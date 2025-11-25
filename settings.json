@@ -1,5 +1,37 @@
 {
   "alwaysThinkingEnabled": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash(git commit*)",
+        "hooks": ["~/.claude/hooks/pre-commit.sh"]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": ["~/.claude/hooks/post-edit.sh Edit $CLAUDE_FILE_PATH"]
+      },
+      {
+        "matcher": "Write",
+        "hooks": ["~/.claude/hooks/post-edit.sh Write $CLAUDE_FILE_PATH"]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": ["~/.claude/hooks/quality-gate.sh"]
+      }
+    ]
+  },
+  "env": {
+    "CLAUDE_HOOK_MODE": "ask",
+    "TRI_AGENT_REVIEW": "false",
+    "MIN_TEST_COVERAGE": "80",
+    "REQUIRE_TESTS": "true",
+    "REQUIRE_DOCS": "false",
+    "AUTO_FORMAT": "true",
+    "AUTO_LINT_FIX": "true"
+  },
   "permissions": {
     "allow": [
       "Bash(npm:*)",
