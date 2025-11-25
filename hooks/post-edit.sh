@@ -1,15 +1,24 @@
 #!/bin/bash
 # Post-edit hook for Claude Code SDLC Orchestration
 # Performs formatting and validation after file edits
+# Receives JSON input from Claude Code via stdin
 
 set -e
 
-# Arguments
-TOOL_NAME="${1:-}"
-FILE_PATH="${2:-}"
+# Read JSON input from stdin (Claude Code hook format)
+INPUT_JSON=$(cat)
 
-# Configuration
-HOOK_MODE="${CLAUDE_HOOK_MODE:-ask}"  # automatic | ask | disabled
+# Parse hook data (requires jq)
+TOOL_NAME=""
+FILE_PATH=""
+if command -v jq &> /dev/null; then
+    TOOL_NAME=$(echo "$INPUT_JSON" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
+    # For Edit/Write tools, file_path is in tool_input
+    FILE_PATH=$(echo "$INPUT_JSON" | jq -r '.tool_input.file_path // empty' 2>/dev/null || echo "")
+fi
+
+# Configuration (from env vars set in settings.json)
+HOOK_MODE="${CLAUDE_HOOK_MODE:-automatic}"  # automatic | ask | disabled
 AUTO_FORMAT="${AUTO_FORMAT:-true}"
 AUTO_LINT_FIX="${AUTO_LINT_FIX:-true}"
 

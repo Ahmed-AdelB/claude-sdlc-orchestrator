@@ -1,11 +1,30 @@
 #!/bin/bash
 # Pre-commit hook for Claude Code SDLC Orchestration
 # Performs quality checks before allowing commits
+# Receives JSON input from Claude Code via stdin
 
 set -e
 
-# Configuration
-HOOK_MODE="${CLAUDE_HOOK_MODE:-ask}"  # automatic | ask | disabled
+# Read JSON input from stdin (Claude Code hook format)
+INPUT_JSON=$(cat)
+
+# Parse hook data (requires jq)
+if command -v jq &> /dev/null; then
+    TOOL_NAME=$(echo "$INPUT_JSON" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
+    TOOL_INPUT=$(echo "$INPUT_JSON" | jq -r '.tool_input // empty' 2>/dev/null || echo "")
+    SESSION_ID=$(echo "$INPUT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+fi
+
+# Only run for git commit commands
+if [ -n "$TOOL_INPUT" ]; then
+    if ! echo "$TOOL_INPUT" | grep -q "git commit"; then
+        # Not a git commit, skip
+        exit 0
+    fi
+fi
+
+# Configuration (from env vars set in settings.json)
+HOOK_MODE="${CLAUDE_HOOK_MODE:-automatic}"  # automatic | ask | disabled
 TRI_AGENT_ENABLED="${TRI_AGENT_REVIEW:-false}"
 MIN_COVERAGE="${MIN_TEST_COVERAGE:-80}"
 
@@ -152,18 +171,8 @@ echo "Warnings: $WARNINGS"
 
 if [ $ERRORS -gt 0 ]; then
     log_error "Commit blocked due to errors"
-
-    if [ "$HOOK_MODE" = "ask" ]; then
-        echo ""
-        read -p "Override and commit anyway? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_warning "Proceeding with commit (override)"
-            exit 0
-        fi
-    fi
-
-    exit 1
+    # Exit code 2 = blocking error in Claude Code hooks
+    exit 2
 fi
 
 if [ $WARNINGS -gt 0 ]; then

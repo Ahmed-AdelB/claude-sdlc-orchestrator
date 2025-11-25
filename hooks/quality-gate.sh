@@ -1,11 +1,20 @@
 #!/bin/bash
 # Quality gate hook for Claude Code SDLC Orchestration
 # Enforces quality standards before task completion
+# Receives JSON input from Claude Code via stdin (Stop hook)
 
 set -e
 
-# Configuration
-HOOK_MODE="${CLAUDE_HOOK_MODE:-ask}"  # automatic | ask | disabled
+# Read JSON input from stdin (Claude Code hook format)
+INPUT_JSON=$(cat)
+
+# Parse hook data (requires jq) - optional for Stop hooks
+if command -v jq &> /dev/null; then
+    SESSION_ID=$(echo "$INPUT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+fi
+
+# Configuration (from env vars set in settings.json)
+HOOK_MODE="${CLAUDE_HOOK_MODE:-automatic}"  # automatic | ask | disabled
 MIN_COVERAGE="${MIN_TEST_COVERAGE:-80}"
 REQUIRE_TESTS="${REQUIRE_TESTS:-true}"
 REQUIRE_DOCS="${REQUIRE_DOCS:-false}"
@@ -214,17 +223,8 @@ if [ $FAILED -gt 0 ]; then
     log_error "Quality gate FAILED"
     echo ""
     echo "Please fix the issues above before proceeding."
-
-    if [ "$HOOK_MODE" = "ask" ]; then
-        echo ""
-        read -p "Override quality gate? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_warning "Quality gate overridden"
-            exit 0
-        fi
-    fi
-
+    # Note: Exit code 1 is non-blocking, 2 would block
+    # Quality gate failures are reported but don't block
     exit 1
 fi
 
