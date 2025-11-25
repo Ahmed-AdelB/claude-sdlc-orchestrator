@@ -1,0 +1,16 @@
+# Debug and history files
+debug/
+file-history/
+*.log
+
+# Credentials (keep template only)
+.credentials.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
