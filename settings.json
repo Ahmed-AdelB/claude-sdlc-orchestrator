@@ -3,23 +3,43 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash(git commit*)",
-        "hooks": ["~/.claude/hooks/pre-commit.sh"]
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/pre-commit.sh $CLAUDE_TOOL_INPUT"
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Edit",
-        "hooks": ["~/.claude/hooks/post-edit.sh Edit $CLAUDE_FILE_PATH"]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/post-edit.sh Edit $CLAUDE_FILE_PATH"
+          }
+        ]
       },
       {
         "matcher": "Write",
-        "hooks": ["~/.claude/hooks/post-edit.sh Write $CLAUDE_FILE_PATH"]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/post-edit.sh Write $CLAUDE_FILE_PATH"
+          }
+        ]
       }
     ],
     "Stop": [
       {
-        "hooks": ["~/.claude/hooks/quality-gate.sh"]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/quality-gate.sh"
+          }
+        ]
       }
     ]
   },
