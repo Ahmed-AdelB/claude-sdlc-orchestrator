@@ -3,7 +3,7 @@
 # Enforces quality standards before task completion
 # Receives JSON input from Claude Code via stdin (Stop hook)
 
-set -e
+# Don't use set -e as we want to report all issues, not fail on first
 
 # Read JSON input from stdin (Claude Code hook format)
 INPUT_JSON=$(cat)

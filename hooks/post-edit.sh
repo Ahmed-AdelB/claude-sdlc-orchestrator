@@ -3,7 +3,7 @@
 # Performs formatting and validation after file edits
 # Receives JSON input from Claude Code via stdin
 
-set -e
+# Don't use set -e as we want to continue on formatting failures
 
 # Read JSON input from stdin (Claude Code hook format)
 INPUT_JSON=$(cat)

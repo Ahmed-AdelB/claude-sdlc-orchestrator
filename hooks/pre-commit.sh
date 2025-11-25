@@ -3,12 +3,15 @@
 # Performs quality checks before allowing commits
 # Receives JSON input from Claude Code via stdin
 
-set -e
+# Don't use set -e as we want to continue on non-critical failures
 
 # Read JSON input from stdin (Claude Code hook format)
 INPUT_JSON=$(cat)
 
 # Parse hook data (requires jq)
+TOOL_NAME=""
+TOOL_INPUT=""
+SESSION_ID=""
 if command -v jq &> /dev/null; then
     TOOL_NAME=$(echo "$INPUT_JSON" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
     TOOL_INPUT=$(echo "$INPUT_JSON" | jq -r '.tool_input // empty' 2>/dev/null || echo "")
@@ -21,6 +24,12 @@ if [ -n "$TOOL_INPUT" ]; then
         # Not a git commit, skip
         exit 0
     fi
+fi
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    # Not in a git repo, skip
+    exit 0
 fi
 
 # Configuration (from env vars set in settings.json)
