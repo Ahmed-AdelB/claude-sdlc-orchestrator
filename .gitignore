@@ -3,6 +3,15 @@ debug/
 file-history/
 *.log
 
+# Session data (local only)
+history.jsonl
+projects/
+plans/
+todos/
+statsig/
+shell-snapshots/
+settings.local.json
+
 # Credentials (keep template only)
 .credentials.json
 
