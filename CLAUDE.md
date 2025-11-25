@@ -103,6 +103,89 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 - **postgres**: Database queries and schema
 - **filesystem**: File system access
 
+## CLI Tool Usage (CRITICAL)
+
+### Gemini CLI
+**IMPORTANT**: Do NOT use deprecated `-p` flag!
+
+```bash
+# CORRECT - Use positional arguments
+gemini "your prompt here"
+gemini -y "prompt"                    # Auto-approve (YOLO mode)
+gemini -m gemini-2.5-pro "prompt"     # Specify model
+gemini --approval-mode yolo "prompt"  # Auto-approve all tools
+
+# WRONG - Deprecated flag
+gemini -p "prompt"  # DO NOT USE - deprecated, will be removed
+```
+
+### Gemini Session Pattern (Multi-turn Conversations)
+Based on gemini_session_test.py - maintains conversation history across calls:
+
+```python
+import subprocess
+import json
+from pathlib import Path
+
+HISTORY_PATH = Path("gemini_session.json")
+
+def load_history():
+    if HISTORY_PATH.exists():
+        return json.loads(HISTORY_PATH.read_text())
+    return []
+
+def save_history(history):
+    HISTORY_PATH.write_text(json.dumps(history, indent=2))
+
+def build_conversation_prompt(history):
+    """Build prompt with conversation context"""
+    if len(history) <= 1:
+        return history[0]["content"]
+
+    prompt_parts = ["[Conversation History]"]
+    for msg in history[:-1]:
+        role = msg["role"].capitalize()
+        prompt_parts.append(f"{role}: {msg['content']}")
+    prompt_parts.append(f"\nUser: {history[-1]['content']}")
+    prompt_parts.append("\nAssistant:")
+    return "\n\n".join(prompt_parts)
+
+def call_gemini(prompt):
+    """Call Gemini CLI - use positional args, NOT -p flag"""
+    result = subprocess.run(
+        ["gemini", "-y", prompt],  # CORRECT: positional, NOT ["gemini", "-p", prompt]
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Gemini failed: {result.stderr}")
+    return result.stdout.strip()
+```
+
+### Codex CLI (GPT-5.1)
+```bash
+# Non-interactive execution
+codex exec "task description"
+codex exec "Implement feature X" src/component.py
+
+# With specific model
+codex exec -m o3 "complex reasoning task"
+
+# View help
+codex --help
+codex exec --help
+```
+
+### Tri-Agent CLI Pattern
+```bash
+# 1. Claude (primary orchestration) - Direct in Claude Code
+# 2. Codex (implementation)
+codex exec "Review and implement: <task>"
+
+# 3. Gemini (validation/security)
+gemini -y "Review for security issues: <code>"
+```
+
 ## Code Style
 - TypeScript: Strict mode, explicit types
 - Python: Type hints, async/await for I/O

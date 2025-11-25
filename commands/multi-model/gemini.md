@@ -39,12 +39,28 @@ Detailed analysis with code references.
 
 ### Step 3: Execute via Gemini CLI
 ```bash
-# Using Gemini CLI
-gemini --model gemini-2.5-pro --task "[task]" --context-file context.md
+# IMPORTANT: Use positional prompts, NOT deprecated -p flag!
 
-# With large context
-gemini --model gemini-2.5-pro --context-dir ./src --output analysis.md
+# Basic usage (positional prompt)
+gemini "Analyze this codebase for security issues"
+
+# With model selection
+gemini -m gemini-2.5-pro "Analyze the authentication flow"
+
+# With auto-approve (YOLO mode)
+gemini -y "Review this code"
+
+# Resume existing session
+gemini --resume session_id "Continue our discussion"
+
+# Interactive mode
+gemini -i
+
+# List available sessions
+gemini --list-sessions
 ```
+
+**WARNING**: Do NOT use `gemini -p "prompt"` - the `-p` flag is deprecated!
 
 ### Step 4: Process Result
 ```markdown
@@ -117,17 +133,29 @@ gemini --model gemini-2.5-pro --context-dir ./src --output analysis.md
 
 ## Configuration
 
-### Environment Variables
+### Authentication
+Gemini CLI uses cached credentials (OAuth/browser-based), no API key required for CLI usage.
+
 ```bash
+# For programmatic API access (optional)
 export GOOGLE_AI_API_KEY="your-api-key"
-export GEMINI_MODEL="gemini-2.5-pro"
 ```
 
 ### Model Selection
 | Model | Context | Speed | Use Case |
 |-------|---------|-------|----------|
-| gemini-2.5-pro | 1M | Medium | Analysis |
-| gemini-3-pro | 1M+ | Fast | General |
+| gemini-2.5-pro | 1M | Medium | Analysis, Review |
+| gemini-2.0-flash | 1M | Fast | Quick tasks |
+
+### CLI Flags Reference
+```bash
+-m MODEL      # Select model (e.g., -m gemini-2.5-pro)
+-y            # Auto-approve (YOLO mode)
+-i            # Interactive mode
+--resume ID   # Resume session by ID
+--list-sessions  # List available sessions
+# NOTE: -p is DEPRECATED - use positional prompt instead
+```
 
 ## Example Usage
 ```
