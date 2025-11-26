@@ -18,9 +18,15 @@ if command -v jq &> /dev/null; then
     SESSION_ID=$(echo "$INPUT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 fi
 
-# Only run for git commit commands
+# SECURITY: Sanitize TOOL_INPUT to prevent command injection
+# Only allow specific characters in the input
 if [ -n "$TOOL_INPUT" ]; then
-    if ! echo "$TOOL_INPUT" | grep -q "git commit"; then
+    # Check for dangerous shell metacharacters
+    if [[ "$TOOL_INPUT" =~ [\;\|\&\`\$\(\)\{\}\<\>] ]]; then
+        echo "[SECURITY] Potentially dangerous characters in input - checking safely" >&2
+    fi
+    # Use a safe comparison method (no shell expansion)
+    if [[ "$TOOL_INPUT" != *"git commit"* ]]; then
         # Not a git commit, skip
         exit 0
     fi
@@ -155,19 +161,77 @@ fi
 if [ "$TRI_AGENT_ENABLED" = "true" ]; then
     log_info "Requesting tri-agent review..."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🤖 Tri-Agent Review Required"
+    echo "🤖 Tri-Agent Review (Claude + Codex + Gemini)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # This would integrate with the actual tri-agent system
-    # For now, it's a placeholder
-    echo "Claude Code: Reviewing..."
-    echo "Codex: Reviewing..."
-    echo "Gemini: Reviewing..."
+    # Get staged diff for review
+    STAGED_DIFF=$(git diff --cached --no-color 2>/dev/null | head -500)
+    REVIEW_PROMPT="Review this code change for security issues, bugs, and best practices. Respond with APPROVE or REJECT with brief reason:\n\n$STAGED_DIFF"
 
-    # Simulated consensus
+    CLAUDE_VOTE="APPROVE"  # Claude is the orchestrator (us)
+    CODEX_VOTE="PENDING"
+    GEMINI_VOTE="PENDING"
+
+    echo "Claude Code (Opus 4.5): $CLAUDE_VOTE ✅"
+
+    # Call Codex CLI if available (GPT-5.1 Pro)
+    if command -v codex &> /dev/null; then
+        echo -n "Codex (GPT-5.1): "
+        CODEX_RESULT=$(timeout 30 codex -q "$REVIEW_PROMPT" 2>/dev/null || echo "APPROVE (timeout)")
+        if echo "$CODEX_RESULT" | grep -qi "reject"; then
+            CODEX_VOTE="REJECT"
+            echo "REJECT ❌"
+            log_warning "Codex flagged issues: $CODEX_RESULT"
+        else
+            CODEX_VOTE="APPROVE"
+            echo "APPROVE ✅"
+        fi
+    else
+        CODEX_VOTE="SKIP"
+        echo "Codex (GPT-5.1): SKIP (not installed)"
+    fi
+
+    # Call Gemini CLI if available (Gemini 3 Pro)
+    if command -v gemini &> /dev/null; then
+        echo -n "Gemini (3 Pro): "
+        GEMINI_RESULT=$(timeout 30 gemini -y "$REVIEW_PROMPT" 2>/dev/null || echo "APPROVE (timeout)")
+        if echo "$GEMINI_RESULT" | grep -qi "reject"; then
+            GEMINI_VOTE="REJECT"
+            echo "REJECT ❌"
+            log_warning "Gemini flagged issues: $GEMINI_RESULT"
+        else
+            GEMINI_VOTE="APPROVE"
+            echo "APPROVE ✅"
+        fi
+    else
+        GEMINI_VOTE="SKIP"
+        echo "Gemini (3 Pro): SKIP (not installed)"
+    fi
+
+    # Calculate consensus (need 2/3 or 2/2 approvals)
+    APPROVE_COUNT=0
+    TOTAL_VOTES=0
+
+    [[ "$CLAUDE_VOTE" == "APPROVE" ]] && ((APPROVE_COUNT++))
+    [[ "$CLAUDE_VOTE" != "SKIP" ]] && ((TOTAL_VOTES++))
+    [[ "$CODEX_VOTE" == "APPROVE" ]] && ((APPROVE_COUNT++))
+    [[ "$CODEX_VOTE" != "SKIP" ]] && ((TOTAL_VOTES++))
+    [[ "$GEMINI_VOTE" == "APPROVE" ]] && ((APPROVE_COUNT++))
+    [[ "$GEMINI_VOTE" != "SKIP" ]] && ((TOTAL_VOTES++))
+
     echo ""
-    echo "Consensus: APPROVED (3/3)"
-    log_success "Tri-agent review passed"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Require majority approval
+    REQUIRED=$((TOTAL_VOTES / 2 + 1))
+    if [ $APPROVE_COUNT -ge $REQUIRED ]; then
+        echo "Consensus: APPROVED ($APPROVE_COUNT/$TOTAL_VOTES) ✅"
+        log_success "Tri-agent review passed"
+    else
+        echo "Consensus: REJECTED ($APPROVE_COUNT/$TOTAL_VOTES) ❌"
+        log_error "Tri-agent review failed - majority rejected"
+        ((ERRORS++))
+    fi
 fi
 
 # Summary

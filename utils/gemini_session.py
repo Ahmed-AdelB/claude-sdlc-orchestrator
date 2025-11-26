@@ -7,13 +7,13 @@ IMPORTANT: Uses positional prompts, NOT deprecated -p flag!
 Usage:
     from gemini_session import GeminiSession
 
-    session = GeminiSession(model="gemini-2.5-pro")
+    session = GeminiSession(model="gemini-3-pro")
     response = session.send("Hello, how are you?")
     response = session.send("What did I just ask?")  # Maintains context
 
 CLI Reference:
     gemini "prompt"                    # Basic usage (positional)
-    gemini -m gemini-2.5-pro "prompt"  # With model selection
+    gemini -m gemini-3-pro "prompt"    # With model selection
     gemini -y "prompt"                 # Auto-approve (YOLO mode)
     gemini --resume SESSION_ID "prompt" # Resume session
     gemini -i                          # Interactive mode
@@ -21,15 +21,30 @@ CLI Reference:
 
     # DEPRECATED - DO NOT USE:
     gemini -p "prompt"                 # -p flag is deprecated!
+
+AI Model Stack (Correct as of 2025):
+    - Claude Code Opus 4.5    - Primary orchestrator
+    - Codex GPT-5.1 Pro       - Implementation agent
+    - Gemini 3 Pro            - Validation agent (1M context)
 """
 
 import subprocess
 import json
 import re
+import os
+import stat
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
+
+# Supported Gemini models
+SUPPORTED_MODELS = [
+    "gemini-3-pro",          # Latest - recommended
+    "gemini-3-pro-preview",  # Preview version
+    "gemini-2.5-pro",        # Legacy support
+    "gemini-2.0-flash",      # Fast model
+]
 
 
 @dataclass
@@ -51,7 +66,7 @@ class GeminiSession:
 
     def __init__(
         self,
-        model: str = "gemini-2.5-pro",
+        model: str = "gemini-3-pro",
         auto_approve: bool = True,
         session_id: Optional[str] = None,
         history_path: Optional[Path] = None
@@ -60,19 +75,31 @@ class GeminiSession:
         Initialize GeminiSession.
 
         Args:
-            model: Gemini model to use (gemini-2.5-pro, gemini-2.0-flash)
+            model: Gemini model to use (gemini-3-pro, gemini-2.5-pro, gemini-2.0-flash)
             auto_approve: Use -y flag for auto-approval
             session_id: Existing session ID to resume
             history_path: Path to save conversation history
         """
+        # Validate model
+        if model not in SUPPORTED_MODELS:
+            raise ValueError(
+                f"Unsupported model: {model}. "
+                f"Supported models: {', '.join(SUPPORTED_MODELS)}"
+            )
+
         self.model = model
         self.auto_approve = auto_approve
         self.session_id = session_id
         self.history_path = history_path or Path.home() / ".claude" / "gemini_history.json"
         self.conversation_history: List[Dict[str, str]] = []
 
+        # SECURITY: Create parent directory with secure permissions
+        self.history_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
         if self.history_path.exists():
             self._load_history()
+            # SECURITY: Ensure existing file has correct permissions
+            self._secure_history_file()
 
     def _load_history(self) -> None:
         """Load conversation history from file."""
@@ -82,11 +109,25 @@ class GeminiSession:
         except (json.JSONDecodeError, FileNotFoundError):
             self.conversation_history = []
 
+    def _secure_history_file(self) -> None:
+        """Ensure history file has secure permissions (owner read/write only)."""
+        if self.history_path.exists():
+            try:
+                # Set file to owner read/write only (0600)
+                os.chmod(self.history_path, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass  # Best effort - may fail on some systems
+
     def _save_history(self) -> None:
-        """Save conversation history to file."""
-        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        """Save conversation history to file with secure permissions."""
+        self.history_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        # Write to file
         with open(self.history_path, "w") as f:
             json.dump(self.conversation_history, f, indent=2)
+
+        # SECURITY: Set restrictive permissions (owner read/write only)
+        self._secure_history_file()
 
     def _build_command(self, prompt: str, include_context: bool = True) -> List[str]:
         """
@@ -221,24 +262,27 @@ class GeminiSession:
         return self.conversation_history.copy()
 
 
-def quick_gemini(prompt: str, model: str = "gemini-2.5-pro") -> str:
+def quick_gemini(prompt: str, model: str = "gemini-3-pro") -> str:
     """
     Quick one-shot Gemini call without session management.
 
     Args:
         prompt: The prompt to send
-        model: Gemini model to use
+        model: Gemini model to use (default: gemini-3-pro)
 
     Returns:
         Response content or error message
     """
-    session = GeminiSession(model=model)
-    response = session.send(prompt, include_context=False)
+    try:
+        session = GeminiSession(model=model)
+        response = session.send(prompt, include_context=False)
 
-    if response.success:
-        return response.content
-    else:
-        return f"Error: {response.error}"
+        if response.success:
+            return response.content
+        else:
+            return f"Error: {response.error}"
+    except ValueError as e:
+        return f"Error: {e}"
 
 
 # CLI interface
@@ -253,7 +297,7 @@ if __name__ == "__main__":
         print("  --clear          Clear conversation history")
         sys.exit(1)
 
-    model = "gemini-2.5-pro"
+    model = "gemini-3-pro"
     include_context = True
     clear_history = False
     prompt_parts = []

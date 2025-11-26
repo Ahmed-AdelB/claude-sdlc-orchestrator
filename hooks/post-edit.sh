@@ -17,6 +17,23 @@ if command -v jq &> /dev/null; then
     FILE_PATH=$(echo "$INPUT_JSON" | jq -r '.tool_input.file_path // empty' 2>/dev/null || echo "")
 fi
 
+# SECURITY: Sanitize FILE_PATH to prevent command injection
+# Only allow valid file paths (alphanumeric, slashes, dots, underscores, hyphens)
+if [[ -n "$FILE_PATH" ]]; then
+    # Check for dangerous characters that could enable command injection
+    if [[ "$FILE_PATH" =~ [\;\|\&\$\`\(\)\{\}\<\>\!\#] ]]; then
+        echo "[SECURITY] Invalid characters in file path - aborting" >&2
+        exit 1
+    fi
+    # Resolve to absolute path and validate it exists
+    if [[ -f "$FILE_PATH" ]]; then
+        FILE_PATH=$(realpath "$FILE_PATH" 2>/dev/null) || {
+            echo "[SECURITY] Cannot resolve file path - aborting" >&2
+            exit 1
+        }
+    fi
+fi
+
 # Configuration (from env vars set in settings.json)
 HOOK_MODE="${CLAUDE_HOOK_MODE:-automatic}"  # automatic | ask | disabled
 AUTO_FORMAT="${AUTO_FORMAT:-true}"
@@ -136,9 +153,14 @@ if grep -qE "TODO|FIXME|XXX|HACK" "$FILE_PATH" 2>/dev/null; then
     log_info "Found TODO/FIXME comments in $FILE_PATH"
 fi
 
-# Track file change for session memory
+# Track file change for session memory (secure location)
 if [ -n "$CLAUDE_SESSION_ID" ]; then
-    echo "$FILE_PATH" >> "/tmp/claude-session-$CLAUDE_SESSION_ID-files.txt"
+    # Use secure directory instead of world-readable /tmp
+    SESSION_DIR="${XDG_RUNTIME_DIR:-$HOME/.claude/tmp}"
+    mkdir -p "$SESSION_DIR" 2>/dev/null
+    chmod 700 "$SESSION_DIR" 2>/dev/null
+    SESSION_FILE="$SESSION_DIR/claude-session-$CLAUDE_SESSION_ID-files.txt"
+    echo "$FILE_PATH" >> "$SESSION_FILE"
 fi
 
 log_success "Post-edit processing complete for $FILE_PATH"

@@ -15,7 +15,25 @@ NC='\033[0m' # No Color
 # Configuration
 REPO="Ahmed-AdelB/claude-sdlc-orchestrator"
 CLAUDE_DIR="$HOME/.claude"
-TEMP_DIR="/tmp/claude-sdlc-orchestrator-$$"
+# SECURITY: Use mktemp for secure temporary directory (prevents race conditions)
+TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'claude-sdlc-orchestrator')
+
+# Ensure temp dir was created successfully
+if [ ! -d "$TEMP_DIR" ]; then
+    log_error "Failed to create secure temporary directory"
+    exit 1
+fi
+
+# Set restrictive permissions on temp dir
+chmod 700 "$TEMP_DIR"
+
+# Cleanup trap - ensure temp dir is removed on exit
+cleanup() {
+    if [ -d "$TEMP_DIR" ]; then
+        rm -rf "$TEMP_DIR"
+    fi
+}
+trap cleanup EXIT
 
 # Functions
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -49,8 +67,17 @@ log_success "Dependencies satisfied"
 # Backup existing config
 if [ -d "$CLAUDE_DIR" ]; then
     BACKUP_DIR="${CLAUDE_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
+
+    # SECURITY: Check if backup destination is a symlink (prevent symlink attacks)
+    if [ -L "$BACKUP_DIR" ]; then
+        log_error "Backup destination is a symlink - possible security attack. Aborting."
+        exit 1
+    fi
+
     log_info "Backing up existing configuration to $BACKUP_DIR..."
     cp -r "$CLAUDE_DIR" "$BACKUP_DIR"
+    # Set restrictive permissions on backup
+    chmod -R 700 "$BACKUP_DIR"
     log_success "Backup created"
 fi
 
@@ -121,10 +148,10 @@ if [ -d ".claude/scripts" ]; then
     chmod +x "$CLAUDE_DIR/scripts/"*.sh 2>/dev/null || true
 fi
 
-# Cleanup
+# Cleanup (handled by trap, but explicit for clarity)
 log_info "Cleaning up..."
 cd /
-rm -rf "$TEMP_DIR"
+# Note: TEMP_DIR cleanup is handled by EXIT trap for safety
 log_success "Cleanup complete"
 
 # Verify installation
