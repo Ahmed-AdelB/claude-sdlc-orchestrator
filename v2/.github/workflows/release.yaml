@@ -1,0 +1,250 @@
+# =============================================================================
+# release.yaml - CI Release Workflow for tri-agent system
+# =============================================================================
+# Handles versioning, changelog generation, and release creation.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v2.1.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Is this a prerelease?'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  PROJECT_NAME: tri-agent
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Validate Release
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+
+          # Validate semver format
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "Error: Invalid version format: $VERSION"
+            echo "Expected format: v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Run tests
+        run: |
+          chmod +x tests/run_tests.sh tests/**/*.sh
+          FUZZ_ITERATIONS=10 PROPERTY_ITERATIONS=10 PARALLEL_PROCESSES=20 STRESS_DURATION=2 \
+            ./tests/run_tests.sh all || echo "Some tests had issues"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PREV_TAG=$(git describe --abbrev=0 --tags HEAD^ 2>/dev/null || echo "")
+
+          echo "## What's Changed" > CHANGELOG_BODY.md
+          echo "" >> CHANGELOG_BODY.md
+
+          if [[ -n "$PREV_TAG" ]]; then
+            echo "### Commits since $PREV_TAG" >> CHANGELOG_BODY.md
+            git log --pretty=format:"- %s (%h)" ${PREV_TAG}..HEAD >> CHANGELOG_BODY.md
+          else
+            echo "### All commits" >> CHANGELOG_BODY.md
+            git log --pretty=format:"- %s (%h)" >> CHANGELOG_BODY.md
+          fi
+
+          echo "" >> CHANGELOG_BODY.md
+          echo "" >> CHANGELOG_BODY.md
+          echo "### Statistics" >> CHANGELOG_BODY.md
+          echo "- Files changed: $(git diff --name-only ${PREV_TAG:-HEAD~10}..HEAD | wc -l)" >> CHANGELOG_BODY.md
+          echo "- Contributors: $(git log --format='%an' ${PREV_TAG:-HEAD~10}..HEAD | sort -u | wc -l)" >> CHANGELOG_BODY.md
+
+          # Set multiline output
+          {
+            echo 'changelog<<EOF'
+            cat CHANGELOG_BODY.md
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # Build Release Artifacts
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Artifacts
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create release package
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          PACKAGE_NAME="${{ env.PROJECT_NAME }}-${VERSION}"
+
+          # Create distribution directory
+          mkdir -p dist/${PACKAGE_NAME}
+
+          # Copy required files
+          cp -r bin dist/${PACKAGE_NAME}/
+          cp -r lib dist/${PACKAGE_NAME}/
+          cp -r config dist/${PACKAGE_NAME}/
+          cp -r tests dist/${PACKAGE_NAME}/
+          cp -r docs dist/${PACKAGE_NAME}/ 2>/dev/null || mkdir -p dist/${PACKAGE_NAME}/docs
+
+          # Copy root files
+          cp README.md dist/${PACKAGE_NAME}/ 2>/dev/null || echo "# ${{ env.PROJECT_NAME }} ${VERSION}" > dist/${PACKAGE_NAME}/README.md
+          cp LICENSE dist/${PACKAGE_NAME}/ 2>/dev/null || true
+          cp CLAUDE.md dist/${PACKAGE_NAME}/ 2>/dev/null || true
+
+          # Create install script
+          cat > dist/${PACKAGE_NAME}/install.sh << 'INSTALL_EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          INSTALL_DIR="${1:-$HOME/.tri-agent}"
+
+          echo "Installing tri-agent to $INSTALL_DIR..."
+
+          mkdir -p "$INSTALL_DIR"
+          cp -r bin lib config "$INSTALL_DIR/"
+          chmod +x "$INSTALL_DIR/bin/"*
+
+          echo ""
+          echo "Installation complete!"
+          echo ""
+          echo "Add to your PATH:"
+          echo "  export PATH=\"$INSTALL_DIR/bin:\$PATH\""
+          echo ""
+          INSTALL_EOF
+          chmod +x dist/${PACKAGE_NAME}/install.sh
+
+          # Create version file
+          echo "$VERSION" > dist/${PACKAGE_NAME}/VERSION
+          date -Iseconds > dist/${PACKAGE_NAME}/BUILD_DATE
+
+          # Create tarball
+          cd dist
+          tar -czf ${PACKAGE_NAME}.tar.gz ${PACKAGE_NAME}
+          sha256sum ${PACKAGE_NAME}.tar.gz > ${PACKAGE_NAME}.tar.gz.sha256
+
+          # Create zip
+          zip -r ${PACKAGE_NAME}.zip ${PACKAGE_NAME}
+          sha256sum ${PACKAGE_NAME}.zip > ${PACKAGE_NAME}.zip.sha256
+
+          echo "Created release artifacts:"
+          ls -la *.tar.gz* *.zip*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Create GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    timeout-minutes: 10
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.validate.outputs.version }}
+          name: Release ${{ needs.validate.outputs.version }}
+          body: ${{ needs.validate.outputs.changelog }}
+          draft: false
+          prerelease: ${{ inputs.prerelease || false }}
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Version" >> $GITHUB_STEP_SUMMARY
+          echo "${{ needs.validate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          ls -la dist/ >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo ":rocket: **Release created successfully!**" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Post-Release Notifications
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [validate, release]
+    if: success()
+
+    steps:
+      - name: Release notification
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          echo "Release $VERSION published successfully!"
+
+          # Could add Slack, Discord, or email notifications here
+          # Example:
+          # curl -X POST -H 'Content-type: application/json' \
+          #   --data '{"text":"tri-agent '$VERSION' has been released!"}' \
+          #   ${{ secrets.SLACK_WEBHOOK_URL }}

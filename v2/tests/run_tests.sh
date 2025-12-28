@@ -17,6 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 UNIT_DIR="${SCRIPT_DIR}/unit"
 INTEGRATION_DIR="${SCRIPT_DIR}/integration"
+FUZZ_DIR="${SCRIPT_DIR}/fuzz"
+PROPERTY_DIR="${SCRIPT_DIR}/property"
+STRESS_DIR="${SCRIPT_DIR}/stress"
 
 # Colors
 if [[ -t 1 ]]; then
@@ -76,6 +79,10 @@ ${BOLD}TEST TYPES:${RESET}
     all          Run all tests (default)
     unit         Run only unit tests
     integration  Run only integration tests
+    fuzz         Run fuzzing tests
+    property     Run property-based tests
+    stress       Run stress/concurrency tests
+    advanced     Run fuzz + property + stress tests
 
 ${BOLD}OPTIONS:${RESET}
     -v, --verbose    Show detailed error messages
@@ -107,7 +114,7 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
-        unit|integration|all)
+        unit|integration|fuzz|property|stress|advanced|all)
             TEST_TYPE="$1"
             shift
             ;;
@@ -175,6 +182,63 @@ run_integration_tests() {
     done
 }
 
+run_fuzz_tests() {
+    log_section "Fuzzing Tests"
+
+    local fuzz_tests=("$FUZZ_DIR"/test_*.sh)
+
+    if [[ ! -e "${fuzz_tests[0]}" ]]; then
+        echo "  No fuzz tests found in ${FUZZ_DIR}"
+        return 0
+    fi
+
+    for test_file in "${fuzz_tests[@]}"; do
+        if [[ -f "$test_file" ]]; then
+            run_test_file "$test_file" || true
+        fi
+    done
+}
+
+run_property_tests() {
+    log_section "Property-Based Tests"
+
+    local property_tests=("$PROPERTY_DIR"/test_*.sh)
+
+    if [[ ! -e "${property_tests[0]}" ]]; then
+        echo "  No property tests found in ${PROPERTY_DIR}"
+        return 0
+    fi
+
+    for test_file in "${property_tests[@]}"; do
+        if [[ -f "$test_file" ]]; then
+            run_test_file "$test_file" || true
+        fi
+    done
+}
+
+run_stress_tests() {
+    log_section "Stress/Concurrency Tests"
+
+    local stress_tests=("$STRESS_DIR"/test_*.sh)
+
+    if [[ ! -e "${stress_tests[0]}" ]]; then
+        echo "  No stress tests found in ${STRESS_DIR}"
+        return 0
+    fi
+
+    for test_file in "${stress_tests[@]}"; do
+        if [[ -f "$test_file" ]]; then
+            run_test_file "$test_file" || true
+        fi
+    done
+}
+
+run_advanced_tests() {
+    run_fuzz_tests
+    run_property_tests
+    run_stress_tests
+}
+
 print_summary() {
     echo ""
     echo -e "${BOLD}${BLUE}============================================================${RESET}"
@@ -220,9 +284,22 @@ main() {
         integration)
             run_integration_tests
             ;;
+        fuzz)
+            run_fuzz_tests
+            ;;
+        property)
+            run_property_tests
+            ;;
+        stress)
+            run_stress_tests
+            ;;
+        advanced)
+            run_advanced_tests
+            ;;
         all)
             run_unit_tests
             run_integration_tests
+            run_advanced_tests
             ;;
     esac
 

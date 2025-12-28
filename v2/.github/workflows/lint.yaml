@@ -1,0 +1,270 @@
+# =============================================================================
+# lint.yaml - CI Linting Workflow for tri-agent system
+# =============================================================================
+# Runs static analysis and linting on bash scripts and configuration files.
+# =============================================================================
+
+name: Lint
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'bin/**'
+      - 'lib/**'
+      - 'tests/**'
+      - 'config/**'
+      - '.github/workflows/lint.yaml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'bin/**'
+      - 'lib/**'
+      - 'tests/**'
+      - 'config/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # ShellCheck - Bash static analysis
+  # ---------------------------------------------------------------------------
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck on lib/
+        run: |
+          echo "Checking lib/ scripts..."
+          shellcheck --severity=warning --format=gcc lib/*.sh || true
+
+      - name: Run ShellCheck on bin/
+        run: |
+          echo "Checking bin/ scripts..."
+          for script in bin/*; do
+            if [[ -f "$script" ]] && file "$script" | grep -q "shell script\|bash"; then
+              shellcheck --severity=warning --format=gcc "$script" || true
+            fi
+          done
+
+      - name: Run ShellCheck on tests/
+        run: |
+          echo "Checking test scripts..."
+          find tests -name "*.sh" -exec shellcheck --severity=warning --format=gcc {} \; || true
+
+      - name: ShellCheck Summary
+        run: |
+          echo "## ShellCheck Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Count issues by severity
+          issues=$(find . -name "*.sh" -exec shellcheck --format=gcc {} \; 2>&1 || true)
+          warnings=$(echo "$issues" | grep -c "warning:" || true)
+          errors=$(echo "$issues" | grep -c "error:" || true)
+
+          echo "- Errors: $errors" >> $GITHUB_STEP_SUMMARY
+          echo "- Warnings: $warnings" >> $GITHUB_STEP_SUMMARY
+
+          if [[ $errors -gt 0 ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":warning: **ShellCheck found $errors error(s)**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ---------------------------------------------------------------------------
+  # YAML Lint - Configuration file validation
+  # ---------------------------------------------------------------------------
+  yamllint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Create yamllint config
+        run: |
+          cat > .yamllint << 'EOF'
+          extends: default
+          rules:
+            line-length:
+              max: 120
+              allow-non-breakable-words: true
+              allow-non-breakable-inline-mappings: true
+            truthy:
+              allowed-values: ['true', 'false', 'yes', 'no', 'on', 'off']
+            comments:
+              min-spaces-from-content: 1
+            indentation:
+              spaces: 2
+              indent-sequences: consistent
+          EOF
+
+      - name: Run yamllint
+        run: |
+          yamllint -c .yamllint config/*.yaml .github/workflows/*.yaml || true
+
+  # ---------------------------------------------------------------------------
+  # Bash Syntax Check
+  # ---------------------------------------------------------------------------
+  bash-syntax:
+    name: Bash Syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check bash syntax
+        run: |
+          echo "## Bash Syntax Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          errors=0
+          for script in bin/* lib/*.sh tests/**/*.sh; do
+            if [[ -f "$script" ]]; then
+              if ! bash -n "$script" 2>&1; then
+                echo "- :x: $script - Syntax error" >> $GITHUB_STEP_SUMMARY
+                ((errors++))
+              fi
+            fi
+          done
+
+          if [[ $errors -eq 0 ]]; then
+            echo ":white_check_mark: All scripts have valid syntax" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":x: **$errors script(s) have syntax errors**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Script Best Practices
+  # ---------------------------------------------------------------------------
+  best-practices:
+    name: Best Practices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for common issues
+        run: |
+          echo "## Best Practices Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          issues=0
+
+          # Check for set -euo pipefail
+          echo "### Strict Mode Check" >> $GITHUB_STEP_SUMMARY
+          for script in lib/*.sh bin/*; do
+            if [[ -f "$script" ]] && file "$script" | grep -q "shell script\|bash"; then
+              if ! grep -q "set -euo pipefail" "$script" 2>/dev/null; then
+                # Check if it sources common.sh which sets it
+                if ! grep -q "source.*common.sh" "$script" 2>/dev/null; then
+                  echo "- :warning: $script - Missing strict mode" >> $GITHUB_STEP_SUMMARY
+                  ((issues++))
+                fi
+              fi
+            fi
+          done
+
+          # Check for hardcoded secrets
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Hardcoded Secrets Check" >> $GITHUB_STEP_SUMMARY
+          if grep -rn "sk-[a-zA-Z0-9]\{20,\}" bin/ lib/ --include="*.sh" 2>/dev/null | grep -v "MASKED\|example\|test\|pattern"; then
+            echo "- :x: Potential hardcoded API key found" >> $GITHUB_STEP_SUMMARY
+            ((issues++))
+          else
+            echo "- :white_check_mark: No hardcoded secrets detected" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for TODO/FIXME
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### TODO/FIXME Count" >> $GITHUB_STEP_SUMMARY
+          todos=$(grep -rn "TODO\|FIXME" bin/ lib/ --include="*.sh" 2>/dev/null | wc -l || true)
+          echo "- Found $todos TODO/FIXME comments" >> $GITHUB_STEP_SUMMARY
+
+          if [[ $issues -gt 0 ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":warning: **Found $issues issue(s)**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Dependency Check
+  # ---------------------------------------------------------------------------
+  dependency-check:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check required commands
+        run: |
+          echo "## Dependency Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Extract required commands from scripts
+          commands=$(grep -rh "require_command\|command -v" bin/ lib/ 2>/dev/null | \
+            grep -oE '"[a-z]+"|'"'"'[a-z]+'"'"'' | tr -d '"\047' | sort -u)
+
+          echo "### Required Commands" >> $GITHUB_STEP_SUMMARY
+          for cmd in $commands; do
+            if command -v "$cmd" &>/dev/null; then
+              echo "- :white_check_mark: $cmd" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- :x: $cmd (not found)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+  # ---------------------------------------------------------------------------
+  # Lint Summary
+  # ---------------------------------------------------------------------------
+  lint-summary:
+    name: Lint Summary
+    runs-on: ubuntu-latest
+    needs: [shellcheck, yamllint, bash-syntax, best-practices]
+    if: always()
+
+    steps:
+      - name: Check lint results
+        run: |
+          echo "## Lint Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          results=("shellcheck:${{ needs.shellcheck.result }}"
+                   "yamllint:${{ needs.yamllint.result }}"
+                   "bash-syntax:${{ needs.bash-syntax.result }}"
+                   "best-practices:${{ needs.best-practices.result }}")
+
+          for result in "${results[@]}"; do
+            name="${result%%:*}"
+            status="${result##*:}"
+            if [[ "$status" == "success" ]]; then
+              echo "- $name: :white_check_mark: Passed" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- $name: :warning: Issues found" >> $GITHUB_STEP_SUMMARY
+            fi
+          done

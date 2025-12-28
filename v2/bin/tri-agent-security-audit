@@ -1,0 +1,534 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-security-audit - Security audit for tri-agent system
+#===============================================================================
+# Comprehensive security audit tool that checks for vulnerabilities,
+# misconfigurations, and security best practices.
+#
+# Usage:
+#   tri-agent-security-audit [OPTIONS]
+#
+# Options:
+#   --full          Run full audit (all checks)
+#   --quick         Quick audit (critical checks only)
+#   --secrets       Check for exposed secrets
+#   --permissions   Check file permissions
+#   --injection     Check for injection vulnerabilities
+#   --config        Check configuration security
+#   --output FILE   Save report to file
+#   --json          Output in JSON format
+#   --fix           Attempt to fix issues (where safe)
+#   --help          Show this help
+#===============================================================================
+
+set -euo pipefail
+
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/common.sh"
+
+#===============================================================================
+# Configuration
+#===============================================================================
+
+AUDIT_DIR="${STATE_DIR}/audits"
+CHECK_SECRETS=false
+CHECK_PERMISSIONS=false
+CHECK_INJECTION=false
+CHECK_CONFIG=false
+QUICK_MODE=false
+FULL_MODE=false
+OUTPUT_FILE=""
+OUTPUT_JSON=false
+AUTO_FIX=false
+
+# Counters
+ISSUES_CRITICAL=0
+ISSUES_HIGH=0
+ISSUES_MEDIUM=0
+ISSUES_LOW=0
+ISSUES_INFO=0
+FIXES_APPLIED=0
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+
+show_help() {
+    head -22 "$0" | grep -E "^#" | tail -n +3 | sed 's/^# \?//'
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --full)
+            FULL_MODE=true
+            CHECK_SECRETS=true
+            CHECK_PERMISSIONS=true
+            CHECK_INJECTION=true
+            CHECK_CONFIG=true
+            shift
+            ;;
+        --quick)
+            QUICK_MODE=true
+            CHECK_SECRETS=true
+            CHECK_INJECTION=true
+            shift
+            ;;
+        --secrets)
+            CHECK_SECRETS=true
+            shift
+            ;;
+        --permissions)
+            CHECK_PERMISSIONS=true
+            shift
+            ;;
+        --injection)
+            CHECK_INJECTION=true
+            shift
+            ;;
+        --config)
+            CHECK_CONFIG=true
+            shift
+            ;;
+        --output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --json)
+            OUTPUT_JSON=true
+            shift
+            ;;
+        --fix)
+            AUTO_FIX=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Default to full if nothing specified
+if ! $CHECK_SECRETS && ! $CHECK_PERMISSIONS && ! $CHECK_INJECTION && ! $CHECK_CONFIG; then
+    FULL_MODE=true
+    CHECK_SECRETS=true
+    CHECK_PERMISSIONS=true
+    CHECK_INJECTION=true
+    CHECK_CONFIG=true
+fi
+
+ensure_dir "$AUDIT_DIR"
+
+#===============================================================================
+# Reporting Functions
+#===============================================================================
+
+report_issue() {
+    local severity="$1"
+    local category="$2"
+    local description="$3"
+    local location="${4:-}"
+    local remediation="${5:-}"
+
+    case "$severity" in
+        CRITICAL) ((ISSUES_CRITICAL++)) || true ;;
+        HIGH)     ((ISSUES_HIGH++)) || true ;;
+        MEDIUM)   ((ISSUES_MEDIUM++)) || true ;;
+        LOW)      ((ISSUES_LOW++)) || true ;;
+        INFO)     ((ISSUES_INFO++)) || true ;;
+    esac
+
+    if $OUTPUT_JSON; then
+        echo "{\"severity\": \"$severity\", \"category\": \"$category\", \"description\": \"$description\", \"location\": \"$location\", \"remediation\": \"$remediation\"}"
+    else
+        local color
+        case "$severity" in
+            CRITICAL) color="${RED:-}" ;;
+            HIGH)     color="${RED:-}" ;;
+            MEDIUM)   color="${YELLOW:-}" ;;
+            LOW)      color="${CYAN:-}" ;;
+            INFO)     color="${BLUE:-}" ;;
+        esac
+
+        echo -e "  ${color}[${severity}]${RESET:-} ${category}: ${description}"
+        [[ -n "$location" ]] && echo "           Location: $location"
+        [[ -n "$remediation" ]] && echo "           Fix: $remediation"
+    fi
+}
+
+#===============================================================================
+# Secret Detection
+#===============================================================================
+
+check_secrets() {
+    echo ""
+    echo "=== Secret Detection ==="
+
+    # Check for common API key patterns
+    local patterns=(
+        'sk-[a-zA-Z0-9]{20,}:OpenAI API Key'
+        'sk-ant-[a-zA-Z0-9]{20,}:Anthropic API Key'
+        'ghp_[a-zA-Z0-9]{36}:GitHub Personal Token'
+        'gho_[a-zA-Z0-9]{36}:GitHub OAuth Token'
+        'ghs_[a-zA-Z0-9]{36}:GitHub Server Token'
+        'github_pat_[a-zA-Z0-9_]{82}:GitHub Fine-Grained Token'
+        'AKIA[A-Z0-9]{16}:AWS Access Key'
+        'xox[baprs]-[a-zA-Z0-9]{10,}:Slack Token'
+        'AIza[a-zA-Z0-9_-]{35}:Google API Key'
+    )
+
+    for pattern_desc in "${patterns[@]}"; do
+        local pattern="${pattern_desc%:*}"
+        local desc="${pattern_desc#*:}"
+
+        local matches
+        matches=$(grep -rn "$pattern" bin/ lib/ config/ 2>/dev/null | grep -v "MASKED\|example\|test\|pattern\|#" || true)
+
+        if [[ -n "$matches" ]]; then
+            while IFS= read -r match; do
+                local file="${match%%:*}"
+                report_issue "CRITICAL" "SECRET" "Potential $desc found" "$file" "Remove or mask the secret immediately"
+            done <<< "$matches"
+        fi
+    done
+
+    # Check for .env files in version control
+    if git ls-files 2>/dev/null | grep -E '\.env$|\.env\.' | grep -v '.example'; then
+        report_issue "HIGH" "SECRET" ".env file tracked in git" "" "Add to .gitignore"
+    fi
+
+    # Check for hardcoded passwords
+    local password_patterns
+    password_patterns=$(grep -rn "password\s*=\s*['\"][^'\"]\+" bin/ lib/ 2>/dev/null | grep -v "#\|test\|example" || true)
+    if [[ -n "$password_patterns" ]]; then
+        report_issue "HIGH" "SECRET" "Potential hardcoded password" "" "Use environment variables"
+    fi
+
+    # Check environment variable exposure
+    if grep -rn "printenv\|env\b" bin/ lib/ 2>/dev/null | grep -v "#"; then
+        report_issue "LOW" "SECRET" "Environment variable enumeration found" "" "Review for sensitive data exposure"
+    fi
+}
+
+#===============================================================================
+# Permission Checks
+#===============================================================================
+
+check_permissions() {
+    echo ""
+    echo "=== Permission Checks ==="
+
+    # Check for world-writable files
+    local world_writable
+    world_writable=$(find "${AUTONOMOUS_ROOT}" -type f -perm -002 2>/dev/null || true)
+    if [[ -n "$world_writable" ]]; then
+        while IFS= read -r file; do
+            report_issue "MEDIUM" "PERMISSIONS" "World-writable file" "$file" "chmod o-w \"$file\""
+            if $AUTO_FIX; then
+                chmod o-w "$file"
+                ((FIXES_APPLIED++)) || true
+            fi
+        done <<< "$world_writable"
+    fi
+
+    # Check for SUID/SGID bits
+    local suid_files
+    suid_files=$(find "${AUTONOMOUS_ROOT}" -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null || true)
+    if [[ -n "$suid_files" ]]; then
+        while IFS= read -r file; do
+            report_issue "HIGH" "PERMISSIONS" "SUID/SGID bit set" "$file" "chmod u-s,g-s \"$file\""
+        done <<< "$suid_files"
+    fi
+
+    # Check directory permissions
+    for dir in "$LOG_DIR" "$STATE_DIR" "$SESSIONS_DIR"; do
+        if [[ -d "$dir" ]]; then
+            local perms
+            perms=$(stat -c %a "$dir" 2>/dev/null || stat -f %Lp "$dir" 2>/dev/null || echo "700")
+            if [[ "${perms: -1}" != "0" ]]; then
+                report_issue "LOW" "PERMISSIONS" "Directory world-accessible" "$dir" "chmod o-rwx \"$dir\""
+            fi
+        fi
+    done
+
+    # Check for overly permissive config files
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local config_perms
+        config_perms=$(stat -c %a "$CONFIG_FILE" 2>/dev/null || stat -f %Lp "$CONFIG_FILE" 2>/dev/null || echo "600")
+        if [[ "${config_perms: -1}" != "0" && "${config_perms: -1}" != "4" ]]; then
+            report_issue "MEDIUM" "PERMISSIONS" "Config file world-accessible" "$CONFIG_FILE" "chmod 640 \"$CONFIG_FILE\""
+        fi
+    fi
+}
+
+#===============================================================================
+# Injection Vulnerability Checks
+#===============================================================================
+
+check_injection() {
+    echo ""
+    echo "=== Injection Vulnerability Checks ==="
+
+    # Check for unquoted variable expansion in dangerous contexts
+    local dangerous_contexts=(
+        'rm.*\$[^"'\''(]'
+        'mv.*\$[^"'\''(]'
+        'cp.*\$[^"'\''(]'
+        'eval.*\$[^"'\''(]'
+        'source.*\$[^"'\''(]'
+    )
+
+    for pattern in "${dangerous_contexts[@]}"; do
+        local matches
+        matches=$(grep -rn "$pattern" bin/ lib/ 2>/dev/null | grep -v "#" || true)
+        if [[ -n "$matches" ]]; then
+            local cmd="${pattern%%.*}"
+            while IFS= read -r match; do
+                local file="${match%%:*}"
+                report_issue "HIGH" "INJECTION" "Unquoted variable in $cmd command" "$file" "Quote all variable expansions"
+            done <<< "$matches"
+        fi
+    done
+
+    # Check for eval usage
+    local eval_usage
+    eval_usage=$(grep -rn '\beval\b' bin/ lib/ 2>/dev/null | grep -v "#" || true)
+    if [[ -n "$eval_usage" ]]; then
+        while IFS= read -r match; do
+            local file="${match%%:*}"
+            report_issue "MEDIUM" "INJECTION" "eval usage detected" "$file" "Consider safer alternatives"
+        done <<< "$eval_usage"
+    fi
+
+    # Check for command substitution in unsafe contexts
+    local backtick_usage
+    backtick_usage=$(grep -rn '\`' bin/ lib/ 2>/dev/null | grep -v "#" || true)
+    if [[ -n "$backtick_usage" ]]; then
+        report_issue "LOW" "INJECTION" "Backtick command substitution found" "" "Prefer \$() syntax for better nesting and quoting"
+    fi
+
+    # Check for PATH manipulation
+    local path_manipulation
+    path_manipulation=$(grep -rn 'PATH=.*\$PATH' bin/ lib/ 2>/dev/null | grep -v "#" || true)
+    if [[ -n "$path_manipulation" ]]; then
+        report_issue "INFO" "INJECTION" "PATH modification detected" "" "Ensure PATH prepending is intentional"
+    fi
+
+    # Check for unsafe redirections
+    local unsafe_redirect
+    unsafe_redirect=$(grep -rn '>\s*\$[^"('\''(]' bin/ lib/ 2>/dev/null | grep -v "#" || true)
+    if [[ -n "$unsafe_redirect" ]]; then
+        while IFS= read -r match; do
+            local file="${match%%:*}"
+            report_issue "MEDIUM" "INJECTION" "Unsafe redirection with unquoted variable" "$file" "Quote the variable"
+        done <<< "$unsafe_redirect"
+    fi
+}
+
+#===============================================================================
+# Configuration Security Checks
+#===============================================================================
+
+check_config() {
+    echo ""
+    echo "=== Configuration Security Checks ==="
+
+    # Check for debug mode in production
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local debug_enabled
+        debug_enabled=$(read_config ".system.debug" "false" "$CONFIG_FILE")
+        if [[ "$debug_enabled" == "true" ]]; then
+            report_issue "MEDIUM" "CONFIG" "Debug mode enabled" "$CONFIG_FILE" "Set debug: false in production"
+        fi
+    fi
+
+    # Check for insecure defaults
+    local curl_insecure
+    curl_insecure=$(grep -rn "curl.*-k\|curl.*--insecure" bin/ lib/ 2>/dev/null | grep -v "#" || true)
+    if [[ -n "$curl_insecure" ]]; then
+        while IFS= read -r match; do
+            local file="${match%%:*}"
+            report_issue "HIGH" "CONFIG" "Insecure curl usage (-k flag)" "$file" "Remove -k flag and use proper certificates"
+        done <<< "$curl_insecure"
+    fi
+
+    # Check for HTTP (non-HTTPS) URLs
+    local http_urls
+    http_urls=$(grep -rn 'http://[^"]' bin/ lib/ config/ 2>/dev/null | grep -v "localhost\|127.0.0.1\|#" || true)
+    if [[ -n "$http_urls" ]]; then
+        while IFS= read -r match; do
+            local file="${match%%:*}"
+            report_issue "MEDIUM" "CONFIG" "Non-HTTPS URL" "$file" "Use HTTPS for all external connections"
+        done <<< "$http_urls"
+    fi
+
+    # Check for excessive timeouts
+    local long_timeouts
+    long_timeouts=$(grep -rn "timeout.*[0-9]\{4,\}" bin/ lib/ 2>/dev/null | grep -v "#" || true)
+    if [[ -n "$long_timeouts" ]]; then
+        report_issue "LOW" "CONFIG" "Long timeout values detected" "" "Review timeout settings for DOS prevention"
+    fi
+
+    # Check for missing input validation
+    local missing_validation=0
+    for script in bin/*; do
+        if [[ -f "$script" ]] && file "$script" | grep -q "shell script\|bash"; then
+            if ! grep -q "validate\|sanitize\|check.*input\|_validate" "$script" 2>/dev/null; then
+                ((missing_validation++)) || true
+            fi
+        fi
+    done
+    if [[ $missing_validation -gt 0 ]]; then
+        report_issue "INFO" "CONFIG" "$missing_validation scripts may lack input validation" "" "Review input handling in bin/ scripts"
+    fi
+}
+
+#===============================================================================
+# Additional Security Checks
+#===============================================================================
+
+check_additional() {
+    echo ""
+    echo "=== Additional Security Checks ==="
+
+    # Check for temporary file security
+    local temp_usage
+    temp_usage=$(grep -rn 'mktemp\|/tmp/' bin/ lib/ 2>/dev/null | grep -v "#" || true)
+    if [[ -n "$temp_usage" ]]; then
+        local mktemp_count
+        mktemp_count=$(echo "$temp_usage" | grep -c "mktemp" || true)
+        local tmp_direct
+        tmp_direct=$(echo "$temp_usage" | grep -c "/tmp/" | grep -v "mktemp" || true)
+
+        if [[ "$tmp_direct" -gt 0 ]]; then
+            report_issue "MEDIUM" "TEMP" "Direct /tmp usage without mktemp" "" "Use mktemp for secure temporary files"
+        fi
+    fi
+
+    # Check for race condition prone patterns
+    if grep -rn 'if.*-f.*then.*cat\|if.*-e.*then.*rm' bin/ lib/ 2>/dev/null | grep -v "#"; then
+        report_issue "MEDIUM" "RACE" "Potential TOCTOU race condition" "" "Use atomic operations or locking"
+    fi
+
+    # Check for signal handling
+    local has_trap=0
+    for script in bin/*; do
+        if [[ -f "$script" ]] && file "$script" | grep -q "shell script\|bash"; then
+            if grep -q "trap.*EXIT\|trap.*INT\|trap.*TERM" "$script" 2>/dev/null; then
+                ((has_trap++)) || true
+            fi
+        fi
+    done
+    if [[ $has_trap -lt 3 ]]; then
+        report_issue "LOW" "SIGNAL" "Some scripts may lack signal handlers" "" "Add trap for cleanup on EXIT/INT/TERM"
+    fi
+
+    # Check for error handling
+    local no_pipefail=0
+    for script in bin/*; do
+        if [[ -f "$script" ]] && file "$script" | grep -q "shell script\|bash"; then
+            if ! grep -q "set.*pipefail\|source.*common.sh" "$script" 2>/dev/null; then
+                ((no_pipefail++)) || true
+            fi
+        fi
+    done
+    if [[ $no_pipefail -gt 0 ]]; then
+        report_issue "LOW" "ERROR" "$no_pipefail scripts may lack pipefail" "" "Add 'set -o pipefail' or source common.sh"
+    fi
+}
+
+#===============================================================================
+# Report Generation
+#===============================================================================
+
+generate_report() {
+    local report_file="${OUTPUT_FILE:-${AUDIT_DIR}/security_audit_$(date +%Y%m%d_%H%M%S).txt}"
+
+    {
+        echo "============================================================"
+        echo "           TRI-AGENT SECURITY AUDIT REPORT                  "
+        echo "============================================================"
+        echo ""
+        echo "Generated: $(iso_timestamp)"
+        echo "Trace ID:  ${TRACE_ID}"
+        echo "Mode:      $(if $FULL_MODE; then echo "Full"; elif $QUICK_MODE; then echo "Quick"; else echo "Custom"; fi)"
+        echo ""
+        echo "============================================================"
+
+        $CHECK_SECRETS && check_secrets
+        $CHECK_PERMISSIONS && check_permissions
+        $CHECK_INJECTION && check_injection
+        $CHECK_CONFIG && check_config
+        $FULL_MODE && check_additional
+
+        echo ""
+        echo "============================================================"
+        echo "                      SUMMARY                               "
+        echo "============================================================"
+        echo ""
+        echo "Issues Found:"
+        echo "  Critical: $ISSUES_CRITICAL"
+        echo "  High:     $ISSUES_HIGH"
+        echo "  Medium:   $ISSUES_MEDIUM"
+        echo "  Low:      $ISSUES_LOW"
+        echo "  Info:     $ISSUES_INFO"
+        echo ""
+        echo "Total:      $((ISSUES_CRITICAL + ISSUES_HIGH + ISSUES_MEDIUM + ISSUES_LOW + ISSUES_INFO))"
+
+        if $AUTO_FIX; then
+            echo ""
+            echo "Fixes Applied: $FIXES_APPLIED"
+        fi
+
+        echo ""
+        echo "============================================================"
+
+        local risk_score=$((ISSUES_CRITICAL * 10 + ISSUES_HIGH * 5 + ISSUES_MEDIUM * 2 + ISSUES_LOW))
+        echo ""
+        if [[ $risk_score -eq 0 ]]; then
+            echo "Risk Assessment: LOW - No significant issues found"
+        elif [[ $risk_score -lt 10 ]]; then
+            echo "Risk Assessment: LOW-MEDIUM - Minor issues to address"
+        elif [[ $risk_score -lt 25 ]]; then
+            echo "Risk Assessment: MEDIUM - Address high-priority issues"
+        elif [[ $risk_score -lt 50 ]]; then
+            echo "Risk Assessment: HIGH - Immediate attention required"
+        else
+            echo "Risk Assessment: CRITICAL - Security remediation needed"
+        fi
+
+        echo ""
+        echo "============================================================"
+    } | if [[ -n "$OUTPUT_FILE" ]]; then
+        tee "$report_file"
+    else
+        cat
+    fi
+
+    [[ -n "$OUTPUT_FILE" ]] && log_info "Report saved to: $report_file"
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+
+main() {
+    log_info "Starting security audit..."
+    log_info "Trace ID: ${TRACE_ID}"
+
+    generate_report
+
+    # Exit with error if critical issues found
+    if [[ $ISSUES_CRITICAL -gt 0 ]]; then
+        exit 2
+    elif [[ $ISSUES_HIGH -gt 0 ]]; then
+        exit 1
+    fi
+}
+
+main

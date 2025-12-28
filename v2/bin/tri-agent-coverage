@@ -1,0 +1,476 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-coverage - Code coverage analysis for tri-agent system
+#===============================================================================
+# Analyzes test coverage for bash scripts by tracking function calls
+# and code paths during test execution.
+#
+# Usage:
+#   tri-agent-coverage [OPTIONS]
+#
+# Options:
+#   --run           Run tests and collect coverage
+#   --report        Generate coverage report
+#   --html          Generate HTML report
+#   --threshold N   Minimum coverage percentage (default: 80)
+#   --output FILE   Output report file
+#   --help          Show this help
+#===============================================================================
+
+set -euo pipefail
+
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/common.sh"
+
+#===============================================================================
+# Configuration
+#===============================================================================
+
+COVERAGE_DIR="${STATE_DIR}/coverage"
+RUN_TESTS=false
+GEN_REPORT=false
+GEN_HTML=false
+THRESHOLD=80
+OUTPUT_FILE=""
+
+ensure_dir "$COVERAGE_DIR"
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+
+show_help() {
+    head -18 "$0" | grep -E "^#" | tail -n +3 | sed 's/^# \?//'
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --run)
+            RUN_TESTS=true
+            shift
+            ;;
+        --report)
+            GEN_REPORT=true
+            shift
+            ;;
+        --html)
+            GEN_HTML=true
+            shift
+            ;;
+        --threshold)
+            THRESHOLD="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Default to report if nothing specified
+if ! $RUN_TESTS && ! $GEN_REPORT && ! $GEN_HTML; then
+    GEN_REPORT=true
+fi
+
+#===============================================================================
+# Coverage Analysis
+#===============================================================================
+
+# Extract all functions from a bash script
+extract_functions() {
+    local script="$1"
+    grep -E '^[a-zA-Z_][a-zA-Z0-9_]*\s*\(\)' "$script" 2>/dev/null | \
+        sed 's/\s*().*$//' | \
+        sort -u
+}
+
+# Check if a function is tested
+is_function_tested() {
+    local func="$1"
+    local test_files="${AUTONOMOUS_ROOT}/tests/**/*.sh"
+
+    grep -rq "$func" tests/ 2>/dev/null
+}
+
+# Analyze library coverage
+analyze_lib_coverage() {
+    local lib_file="$1"
+    local lib_name
+    lib_name=$(basename "$lib_file" .sh)
+
+    local total_funcs=0
+    local tested_funcs=0
+    local untested=()
+
+    while IFS= read -r func; do
+        [[ -z "$func" ]] && continue
+        ((total_funcs++)) || true
+
+        if is_function_tested "$func"; then
+            ((tested_funcs++)) || true
+        else
+            untested+=("$func")
+        fi
+    done < <(extract_functions "$lib_file")
+
+    local coverage=0
+    if [[ $total_funcs -gt 0 ]]; then
+        coverage=$((tested_funcs * 100 / total_funcs))
+    fi
+
+    echo "$lib_name:$total_funcs:$tested_funcs:$coverage"
+
+    # Store untested functions
+    if [[ ${#untested[@]} -gt 0 ]]; then
+        printf '%s\n' "${untested[@]}" > "${COVERAGE_DIR}/${lib_name}_untested.txt"
+    fi
+}
+
+# Analyze script coverage
+analyze_script_coverage() {
+    local script="$1"
+    local script_name
+    script_name=$(basename "$script")
+
+    # Check if script has a corresponding test
+    local test_file="tests/integration/test_${script_name}.sh"
+    local has_test=0
+
+    if [[ -f "$test_file" ]] || grep -rq "$script_name" tests/ 2>/dev/null; then
+        has_test=1
+    fi
+
+    # Count lines
+    local total_lines
+    total_lines=$(wc -l < "$script" 2>/dev/null || echo "0")
+
+    # Count executable lines (non-comment, non-blank)
+    local exec_lines
+    exec_lines=$(grep -c "^[^#[:space:]]" "$script" 2>/dev/null || echo "0")
+
+    echo "$script_name:$total_lines:$exec_lines:$has_test"
+}
+
+# Generate text coverage report
+generate_text_report() {
+    local report_file="${OUTPUT_FILE:-${COVERAGE_DIR}/coverage_report_$(date +%Y%m%d_%H%M%S).txt}"
+
+    {
+        echo "============================================================"
+        echo "           TRI-AGENT CODE COVERAGE REPORT                   "
+        echo "============================================================"
+        echo ""
+        echo "Generated: $(iso_timestamp)"
+        echo "Threshold: ${THRESHOLD}%"
+        echo ""
+
+        echo "============================================================"
+        echo "                 LIBRARY COVERAGE                           "
+        echo "============================================================"
+        echo ""
+        printf "%-25s %10s %10s %10s\n" "Library" "Functions" "Tested" "Coverage"
+        echo "------------------------------------------------------------"
+
+        local total_funcs=0
+        local total_tested=0
+
+        for lib_file in "${LIB_DIR}"/*.sh; do
+            if [[ -f "$lib_file" ]]; then
+                local result
+                result=$(analyze_lib_coverage "$lib_file")
+                local name funcs tested coverage
+                IFS=':' read -r name funcs tested coverage <<< "$result"
+
+                ((total_funcs += funcs)) || true
+                ((total_tested += tested)) || true
+
+                local status=""
+                if [[ $coverage -ge $THRESHOLD ]]; then
+                    status="[OK]"
+                elif [[ $coverage -ge $((THRESHOLD - 20)) ]]; then
+                    status="[WARN]"
+                else
+                    status="[LOW]"
+                fi
+
+                printf "%-25s %10d %10d %9d%% %s\n" "$name" "$funcs" "$tested" "$coverage" "$status"
+            fi
+        done
+
+        echo "------------------------------------------------------------"
+        local lib_coverage=0
+        if [[ $total_funcs -gt 0 ]]; then
+            lib_coverage=$((total_tested * 100 / total_funcs))
+        fi
+        printf "%-25s %10d %10d %9d%%\n" "TOTAL" "$total_funcs" "$total_tested" "$lib_coverage"
+
+        echo ""
+        echo "============================================================"
+        echo "                 SCRIPT COVERAGE                            "
+        echo "============================================================"
+        echo ""
+        printf "%-25s %10s %10s %10s\n" "Script" "Lines" "Exec Lines" "Has Tests"
+        echo "------------------------------------------------------------"
+
+        local scripts_with_tests=0
+        local total_scripts=0
+
+        for script in "${BIN_DIR}"/*; do
+            if [[ -f "$script" ]] && file "$script" | grep -q "shell script\|bash"; then
+                ((total_scripts++)) || true
+
+                local result
+                result=$(analyze_script_coverage "$script")
+                local name lines exec_lines has_test
+                IFS=':' read -r name lines exec_lines has_test <<< "$result"
+
+                if [[ $has_test -eq 1 ]]; then
+                    ((scripts_with_tests++)) || true
+                fi
+
+                local test_status
+                if [[ $has_test -eq 1 ]]; then
+                    test_status="Yes"
+                else
+                    test_status="No"
+                fi
+
+                printf "%-25s %10d %10d %10s\n" "$name" "$lines" "$exec_lines" "$test_status"
+            fi
+        done
+
+        echo "------------------------------------------------------------"
+        local script_coverage=0
+        if [[ $total_scripts -gt 0 ]]; then
+            script_coverage=$((scripts_with_tests * 100 / total_scripts))
+        fi
+        printf "Scripts with tests: %d/%d (%d%%)\n" "$scripts_with_tests" "$total_scripts" "$script_coverage"
+
+        echo ""
+        echo "============================================================"
+        echo "                 UNTESTED FUNCTIONS                         "
+        echo "============================================================"
+        echo ""
+
+        for untested_file in "${COVERAGE_DIR}"/*_untested.txt; do
+            if [[ -f "$untested_file" ]]; then
+                local lib_name
+                lib_name=$(basename "$untested_file" _untested.txt)
+                echo "### $lib_name ###"
+                cat "$untested_file"
+                echo ""
+            fi
+        done
+
+        echo "============================================================"
+        echo "                      SUMMARY                               "
+        echo "============================================================"
+        echo ""
+        echo "Library Function Coverage: ${lib_coverage}%"
+        echo "Script Test Coverage:      ${script_coverage}%"
+        echo "Threshold:                 ${THRESHOLD}%"
+        echo ""
+
+        local overall_coverage=$(( (lib_coverage + script_coverage) / 2 ))
+
+        if [[ $overall_coverage -ge $THRESHOLD ]]; then
+            echo "Status: PASS - Overall coverage meets threshold"
+        else
+            echo "Status: FAIL - Overall coverage below threshold"
+        fi
+
+        echo ""
+        echo "============================================================"
+    } | if [[ -n "$OUTPUT_FILE" ]]; then
+        tee "$report_file"
+    else
+        cat
+    fi
+
+    [[ -n "$OUTPUT_FILE" ]] && log_info "Report saved to: $report_file"
+
+    # Return exit code based on coverage
+    local lib_coverage_val
+    lib_coverage_val=$((total_tested * 100 / (total_funcs > 0 ? total_funcs : 1)))
+    if [[ $lib_coverage_val -lt $THRESHOLD ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Generate HTML coverage report
+generate_html_report() {
+    local report_file="${OUTPUT_FILE:-${COVERAGE_DIR}/coverage_report_$(date +%Y%m%d_%H%M%S).html}"
+
+    {
+        cat << 'HTML_HEAD'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tri-Agent Code Coverage Report</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px; }
+        h2 { color: #555; margin-top: 30px; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #667eea; color: white; }
+        tr:hover { background: #f5f5f5; }
+        .coverage-high { color: #22c55e; font-weight: bold; }
+        .coverage-medium { color: #eab308; font-weight: bold; }
+        .coverage-low { color: #ef4444; font-weight: bold; }
+        .progress { width: 100px; height: 20px; background: #e5e7eb; border-radius: 10px; overflow: hidden; }
+        .progress-bar { height: 100%; transition: width 0.3s; }
+        .progress-high { background: #22c55e; }
+        .progress-medium { background: #eab308; }
+        .progress-low { background: #ef4444; }
+        .summary-box { display: inline-block; padding: 15px 25px; margin: 10px; background: #f3f4f6; border-radius: 8px; text-align: center; }
+        .summary-value { font-size: 32px; font-weight: bold; }
+        .summary-label { color: #666; font-size: 14px; }
+        .status-pass { color: #22c55e; }
+        .status-fail { color: #ef4444; }
+        .untested { background: #fef2f2; padding: 10px; border-radius: 4px; margin: 5px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Tri-Agent Code Coverage Report</h1>
+HTML_HEAD
+
+        echo "<p>Generated: $(iso_timestamp)</p>"
+        echo "<p>Threshold: ${THRESHOLD}%</p>"
+
+        # Calculate totals
+        local total_funcs=0 total_tested=0
+        local results=()
+
+        for lib_file in "${LIB_DIR}"/*.sh; do
+            if [[ -f "$lib_file" ]]; then
+                local result
+                result=$(analyze_lib_coverage "$lib_file")
+                results+=("$result")
+                local name funcs tested coverage
+                IFS=':' read -r name funcs tested coverage <<< "$result"
+                ((total_funcs += funcs)) || true
+                ((total_tested += tested)) || true
+            fi
+        done
+
+        local lib_coverage=0
+        [[ $total_funcs -gt 0 ]] && lib_coverage=$((total_tested * 100 / total_funcs))
+
+        # Summary boxes
+        echo "<div style='text-align: center; margin: 30px 0;'>"
+        echo "<div class='summary-box'><div class='summary-value'>${lib_coverage}%</div><div class='summary-label'>Function Coverage</div></div>"
+        echo "<div class='summary-box'><div class='summary-value'>${total_tested}/${total_funcs}</div><div class='summary-label'>Functions Tested</div></div>"
+
+        if [[ $lib_coverage -ge $THRESHOLD ]]; then
+            echo "<div class='summary-box'><div class='summary-value status-pass'>PASS</div><div class='summary-label'>Status</div></div>"
+        else
+            echo "<div class='summary-box'><div class='summary-value status-fail'>FAIL</div><div class='summary-label'>Status</div></div>"
+        fi
+        echo "</div>"
+
+        # Library coverage table
+        echo "<h2>Library Coverage</h2>"
+        echo "<table><tr><th>Library</th><th>Functions</th><th>Tested</th><th>Coverage</th><th>Progress</th></tr>"
+
+        for result in "${results[@]}"; do
+            local name funcs tested coverage
+            IFS=':' read -r name funcs tested coverage <<< "$result"
+
+            local class="coverage-low" progress_class="progress-low"
+            if [[ $coverage -ge 80 ]]; then
+                class="coverage-high"
+                progress_class="progress-high"
+            elif [[ $coverage -ge 60 ]]; then
+                class="coverage-medium"
+                progress_class="progress-medium"
+            fi
+
+            echo "<tr>"
+            echo "<td>$name</td>"
+            echo "<td>$funcs</td>"
+            echo "<td>$tested</td>"
+            echo "<td class='$class'>${coverage}%</td>"
+            echo "<td><div class='progress'><div class='progress-bar $progress_class' style='width: ${coverage}%'></div></div></td>"
+            echo "</tr>"
+        done
+
+        echo "</table>"
+
+        # Untested functions
+        echo "<h2>Untested Functions</h2>"
+
+        for untested_file in "${COVERAGE_DIR}"/*_untested.txt; do
+            if [[ -f "$untested_file" ]]; then
+                local lib_name
+                lib_name=$(basename "$untested_file" _untested.txt)
+                echo "<h3>$lib_name</h3>"
+                echo "<div class='untested'>"
+                while IFS= read -r func; do
+                    echo "<code>$func()</code><br>"
+                done < "$untested_file"
+                echo "</div>"
+            fi
+        done
+
+        cat << 'HTML_FOOT'
+    </div>
+</body>
+</html>
+HTML_FOOT
+    } > "$report_file"
+
+    log_info "HTML report saved to: $report_file"
+    echo "$report_file"
+}
+
+# Run tests with coverage tracking
+run_tests_with_coverage() {
+    log_info "Running tests with coverage tracking..."
+
+    # Clear previous coverage data
+    rm -f "${COVERAGE_DIR}"/*_untested.txt
+
+    # Run tests
+    local test_output
+    test_output=$("${AUTONOMOUS_ROOT}/tests/run_tests.sh" all 2>&1) || true
+
+    echo "$test_output"
+
+    log_info "Test run complete, generating coverage report..."
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+
+main() {
+    log_info "Starting code coverage analysis..."
+
+    if $RUN_TESTS; then
+        run_tests_with_coverage
+    fi
+
+    if $GEN_HTML; then
+        generate_html_report
+    elif $GEN_REPORT; then
+        generate_text_report
+    fi
+}
+
+main

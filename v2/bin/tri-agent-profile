@@ -1,0 +1,505 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-profile - Performance profiling for tri-agent system
+#===============================================================================
+# Provides detailed performance metrics, flamegraphs, and bottleneck analysis.
+#
+# Usage:
+#   tri-agent-profile [OPTIONS] [COMMAND]
+#
+# Options:
+#   --cpu             CPU profiling (function call times)
+#   --memory          Memory profiling (allocation tracking)
+#   --io              I/O profiling (file operations)
+#   --network         Network profiling (API calls)
+#   --all             Run all profiling modes
+#   --duration SECS   Profiling duration (default: 30)
+#   --output FILE     Output report file
+#   --json            Output in JSON format
+#   --help            Show this help
+#
+# Examples:
+#   tri-agent-profile --cpu --duration 60
+#   tri-agent-profile --all --output profile.html
+#   tri-agent-profile --memory bin/tri-agent-route
+#===============================================================================
+
+set -euo pipefail
+
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/common.sh"
+
+#===============================================================================
+# Configuration
+#===============================================================================
+
+PROFILE_DIR="${STATE_DIR}/profiles"
+PROFILE_CPU=false
+PROFILE_MEMORY=false
+PROFILE_IO=false
+PROFILE_NETWORK=false
+PROFILE_DURATION=30
+OUTPUT_FILE=""
+OUTPUT_JSON=false
+TARGET_COMMAND=""
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+
+show_help() {
+    head -30 "$0" | grep -E "^#" | tail -n +3 | sed 's/^# \?//'
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --cpu)
+            PROFILE_CPU=true
+            shift
+            ;;
+        --memory)
+            PROFILE_MEMORY=true
+            shift
+            ;;
+        --io)
+            PROFILE_IO=true
+            shift
+            ;;
+        --network)
+            PROFILE_NETWORK=true
+            shift
+            ;;
+        --all)
+            PROFILE_CPU=true
+            PROFILE_MEMORY=true
+            PROFILE_IO=true
+            PROFILE_NETWORK=true
+            shift
+            ;;
+        --duration)
+            PROFILE_DURATION="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --json)
+            OUTPUT_JSON=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            TARGET_COMMAND="$*"
+            break
+            ;;
+    esac
+done
+
+# Default to all if nothing specified
+if ! $PROFILE_CPU && ! $PROFILE_MEMORY && ! $PROFILE_IO && ! $PROFILE_NETWORK; then
+    PROFILE_CPU=true
+    PROFILE_MEMORY=true
+fi
+
+ensure_dir "$PROFILE_DIR"
+
+#===============================================================================
+# Profiling Functions
+#===============================================================================
+
+# Profile bash function execution times
+profile_cpu() {
+    local output_file="${PROFILE_DIR}/cpu_profile_$(date +%Y%m%d_%H%M%S).txt"
+
+    echo "=== CPU Profiling ===" >> "$output_file"
+    echo "Duration: ${PROFILE_DURATION}s" >> "$output_file"
+    echo "Started: $(iso_timestamp)" >> "$output_file"
+    echo "" >> "$output_file"
+
+    # Create instrumented version of common functions
+    cat >> "$output_file" << 'PROFILE_FUNCS'
+# Function timing data
+declare -A FUNC_TIMES
+declare -A FUNC_CALLS
+
+_profile_start() {
+    local func="$1"
+    FUNC_START_TIME[$func]=$(date +%s%N)
+}
+
+_profile_end() {
+    local func="$1"
+    local end_time=$(date +%s%N)
+    local start_time="${FUNC_START_TIME[$func]:-$end_time}"
+    local elapsed=$((end_time - start_time))
+    FUNC_TIMES[$func]=$((${FUNC_TIMES[$func]:-0} + elapsed))
+    ((FUNC_CALLS[$func]++)) || true
+}
+PROFILE_FUNCS
+
+    # Time key functions
+    local functions=(
+        "generate_trace_id"
+        "mask_secrets"
+        "read_config"
+        "is_valid_json"
+        "parse_delegate_envelope"
+        "epoch_ms"
+        "iso_timestamp"
+    )
+
+    echo "### Function Timing Results" >> "$output_file"
+    echo "" >> "$output_file"
+
+    for func in "${functions[@]}"; do
+        local start end elapsed
+        start=$(date +%s%N)
+
+        # Run function 1000 times
+        for ((i=0; i<1000; i++)); do
+            case "$func" in
+                generate_trace_id)
+                    generate_trace_id "profile" >/dev/null
+                    ;;
+                mask_secrets)
+                    mask_secrets "test sk-1234567890abcdefghij" >/dev/null
+                    ;;
+                read_config)
+                    read_config ".system.version" "unknown" "$CONFIG_FILE" >/dev/null
+                    ;;
+                is_valid_json)
+                    is_valid_json '{"test": "value"}' >/dev/null
+                    ;;
+                parse_delegate_envelope)
+                    parse_delegate_envelope '{"model":"claude","status":"success"}' 2>/dev/null || true
+                    ;;
+                epoch_ms)
+                    epoch_ms >/dev/null
+                    ;;
+                iso_timestamp)
+                    iso_timestamp >/dev/null
+                    ;;
+            esac
+        done
+
+        end=$(date +%s%N)
+        elapsed=$(( (end - start) / 1000000 ))  # Convert to ms
+        local per_call=$(echo "scale=3; $elapsed / 1000" | bc)
+
+        printf "%-25s %8d ms total, %8s ms/call (1000 calls)\n" "$func:" "$elapsed" "$per_call" >> "$output_file"
+    done
+
+    echo "" >> "$output_file"
+    echo "Completed: $(iso_timestamp)" >> "$output_file"
+
+    echo "$output_file"
+}
+
+# Profile memory usage
+profile_memory() {
+    local output_file="${PROFILE_DIR}/memory_profile_$(date +%Y%m%d_%H%M%S).txt"
+
+    echo "=== Memory Profiling ===" >> "$output_file"
+    echo "Duration: ${PROFILE_DURATION}s" >> "$output_file"
+    echo "Started: $(iso_timestamp)" >> "$output_file"
+    echo "" >> "$output_file"
+
+    # Get baseline memory
+    local baseline_mem
+    if command_exists free; then
+        baseline_mem=$(free -m | awk '/Mem:/ {print $3}')
+    else
+        baseline_mem=$(vm_stat 2>/dev/null | awk '/Pages active/ {print $3}' | tr -d '.' || echo "0")
+    fi
+
+    echo "Baseline memory: ${baseline_mem}MB" >> "$output_file"
+    echo "" >> "$output_file"
+
+    # Memory samples over time
+    echo "### Memory Samples" >> "$output_file"
+    local samples=()
+    for ((i=0; i<PROFILE_DURATION; i++)); do
+        local current_mem
+        if command_exists free; then
+            current_mem=$(free -m | awk '/Mem:/ {print $3}')
+        else
+            current_mem=$(vm_stat 2>/dev/null | awk '/Pages active/ {print $3}' | tr -d '.' || echo "0")
+        fi
+        samples+=("$current_mem")
+        printf "T+%3ds: %6d MB\n" "$i" "$current_mem" >> "$output_file"
+        sleep 1
+    done
+
+    echo "" >> "$output_file"
+
+    # Calculate statistics
+    local sum=0 min=999999 max=0
+    for s in "${samples[@]}"; do
+        ((sum += s)) || true
+        ((s < min)) && min=$s
+        ((s > max)) && max=$s
+    done
+    local avg=$((sum / ${#samples[@]}))
+
+    echo "### Statistics" >> "$output_file"
+    echo "Min: ${min}MB" >> "$output_file"
+    echo "Max: ${max}MB" >> "$output_file"
+    echo "Avg: ${avg}MB" >> "$output_file"
+    echo "Delta: $((max - min))MB" >> "$output_file"
+    echo "" >> "$output_file"
+
+    echo "Completed: $(iso_timestamp)" >> "$output_file"
+
+    echo "$output_file"
+}
+
+# Profile I/O operations
+profile_io() {
+    local output_file="${PROFILE_DIR}/io_profile_$(date +%Y%m%d_%H%M%S).txt"
+
+    echo "=== I/O Profiling ===" >> "$output_file"
+    echo "Duration: ${PROFILE_DURATION}s" >> "$output_file"
+    echo "Started: $(iso_timestamp)" >> "$output_file"
+    echo "" >> "$output_file"
+
+    # Count file operations in codebase
+    echo "### File Operation Patterns" >> "$output_file"
+
+    local file_reads=$(grep -rh "cat \|read_config\|source " bin/ lib/ 2>/dev/null | wc -l || echo "0")
+    local file_writes=$(grep -rh "echo.*>\|printf.*>\|tee " bin/ lib/ 2>/dev/null | wc -l || echo "0")
+    local file_appends=$(grep -rh ">>|tee -a" bin/ lib/ 2>/dev/null | wc -l || echo "0")
+
+    echo "File read operations: $file_reads" >> "$output_file"
+    echo "File write operations: $file_writes" >> "$output_file"
+    echo "File append operations: $file_appends" >> "$output_file"
+    echo "" >> "$output_file"
+
+    # Test file I/O performance
+    echo "### File I/O Benchmarks" >> "$output_file"
+
+    local test_file="${PROFILE_DIR}/io_test_$$"
+    local start end elapsed
+
+    # Write benchmark
+    start=$(date +%s%N)
+    for ((i=0; i<1000; i++)); do
+        echo "test line $i" >> "$test_file"
+    done
+    end=$(date +%s%N)
+    elapsed=$(( (end - start) / 1000000 ))
+    echo "Write 1000 lines: ${elapsed}ms" >> "$output_file"
+
+    # Read benchmark
+    start=$(date +%s%N)
+    for ((i=0; i<100; i++)); do
+        cat "$test_file" >/dev/null
+    done
+    end=$(date +%s%N)
+    elapsed=$(( (end - start) / 1000000 ))
+    echo "Read file 100x: ${elapsed}ms" >> "$output_file"
+
+    rm -f "$test_file"
+
+    echo "" >> "$output_file"
+    echo "Completed: $(iso_timestamp)" >> "$output_file"
+
+    echo "$output_file"
+}
+
+# Profile network/API operations
+profile_network() {
+    local output_file="${PROFILE_DIR}/network_profile_$(date +%Y%m%d_%H%M%S).txt"
+
+    echo "=== Network Profiling ===" >> "$output_file"
+    echo "Started: $(iso_timestamp)" >> "$output_file"
+    echo "" >> "$output_file"
+
+    # Check API endpoint latencies
+    echo "### API Endpoint Latency" >> "$output_file"
+
+    local endpoints=(
+        "https://api.anthropic.com:443"
+        "https://api.openai.com:443"
+        "https://generativelanguage.googleapis.com:443"
+    )
+
+    for endpoint in "${endpoints[@]}"; do
+        local host="${endpoint#https://}"
+        host="${host%:*}"
+        local port="${endpoint##*:}"
+
+        local latency
+        if command_exists nc; then
+            local start end
+            start=$(date +%s%N)
+            timeout 5 bash -c "echo '' | nc -w 2 $host $port" 2>/dev/null && {
+                end=$(date +%s%N)
+                latency=$(( (end - start) / 1000000 ))
+            } || latency="timeout"
+        else
+            latency="nc not available"
+        fi
+
+        printf "%-45s %s ms\n" "$endpoint" "$latency" >> "$output_file"
+    done
+
+    echo "" >> "$output_file"
+
+    # DNS resolution times
+    echo "### DNS Resolution" >> "$output_file"
+    local hosts=("api.anthropic.com" "api.openai.com" "generativelanguage.googleapis.com")
+
+    for host in "${hosts[@]}"; do
+        local start end latency
+        start=$(date +%s%N)
+        nslookup "$host" >/dev/null 2>&1 || true
+        end=$(date +%s%N)
+        latency=$(( (end - start) / 1000000 ))
+        printf "%-45s %d ms\n" "$host" "$latency" >> "$output_file"
+    done
+
+    echo "" >> "$output_file"
+    echo "Completed: $(iso_timestamp)" >> "$output_file"
+
+    echo "$output_file"
+}
+
+# Generate summary report
+generate_report() {
+    local report_file="${OUTPUT_FILE:-${PROFILE_DIR}/profile_report_$(date +%Y%m%d_%H%M%S).txt}"
+
+    echo "==================================================" > "$report_file"
+    echo "       TRI-AGENT PERFORMANCE PROFILE REPORT       " >> "$report_file"
+    echo "==================================================" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "Generated: $(iso_timestamp)" >> "$report_file"
+    echo "Duration: ${PROFILE_DURATION}s" >> "$report_file"
+    echo "Trace ID: ${TRACE_ID}" >> "$report_file"
+    echo "" >> "$report_file"
+
+    # Include individual profiles
+    if $PROFILE_CPU; then
+        echo "" >> "$report_file"
+        local cpu_file
+        cpu_file=$(profile_cpu)
+        cat "$cpu_file" >> "$report_file"
+    fi
+
+    if $PROFILE_MEMORY; then
+        echo "" >> "$report_file"
+        local mem_file
+        mem_file=$(profile_memory)
+        cat "$mem_file" >> "$report_file"
+    fi
+
+    if $PROFILE_IO; then
+        echo "" >> "$report_file"
+        local io_file
+        io_file=$(profile_io)
+        cat "$io_file" >> "$report_file"
+    fi
+
+    if $PROFILE_NETWORK; then
+        echo "" >> "$report_file"
+        local net_file
+        net_file=$(profile_network)
+        cat "$net_file" >> "$report_file"
+    fi
+
+    echo "" >> "$report_file"
+    echo "==================================================" >> "$report_file"
+    echo "                   END OF REPORT                   " >> "$report_file"
+    echo "==================================================" >> "$report_file"
+
+    echo "$report_file"
+}
+
+# Generate JSON output
+generate_json_report() {
+    local report_file="${OUTPUT_FILE:-${PROFILE_DIR}/profile_report_$(date +%Y%m%d_%H%M%S).json}"
+
+    local json="{
+  \"timestamp\": \"$(iso_timestamp)\",
+  \"trace_id\": \"${TRACE_ID}\",
+  \"duration_seconds\": ${PROFILE_DURATION},
+  \"profiles\": {"
+
+    local first=true
+
+    if $PROFILE_CPU; then
+        $first || json+=","
+        json+="
+    \"cpu\": {
+      \"status\": \"collected\",
+      \"file\": \"$(profile_cpu)\"
+    }"
+        first=false
+    fi
+
+    if $PROFILE_MEMORY; then
+        $first || json+=","
+        json+="
+    \"memory\": {
+      \"status\": \"collected\",
+      \"file\": \"$(profile_memory)\"
+    }"
+        first=false
+    fi
+
+    if $PROFILE_IO; then
+        $first || json+=","
+        json+="
+    \"io\": {
+      \"status\": \"collected\",
+      \"file\": \"$(profile_io)\"
+    }"
+        first=false
+    fi
+
+    if $PROFILE_NETWORK; then
+        $first || json+=","
+        json+="
+    \"network\": {
+      \"status\": \"collected\",
+      \"file\": \"$(profile_network)\"
+    }"
+    fi
+
+    json+="
+  }
+}"
+
+    echo "$json" > "$report_file"
+    echo "$report_file"
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+
+main() {
+    log_info "Starting performance profiling..."
+    log_info "Trace ID: ${TRACE_ID}"
+
+    local report_file
+    if $OUTPUT_JSON; then
+        report_file=$(generate_json_report)
+    else
+        report_file=$(generate_report)
+    fi
+
+    log_info "Profile report saved to: $report_file"
+
+    if [[ -z "$OUTPUT_FILE" ]]; then
+        echo ""
+        echo "=== Profile Summary ==="
+        tail -50 "$report_file"
+    fi
+}
+
+main

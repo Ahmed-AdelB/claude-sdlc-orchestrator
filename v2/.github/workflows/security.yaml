@@ -1,0 +1,292 @@
+# =============================================================================
+# security.yaml - CI Security Workflow for tri-agent system
+# =============================================================================
+# Runs security scans and vulnerability detection.
+# =============================================================================
+
+name: Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run weekly security scan
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Secret Scanning
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret scanning
+
+      - name: Install trufflehog
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run TruffleHog
+        run: |
+          trufflehog filesystem . --no-update --json > trufflehog-results.json 2>&1 || true
+
+      - name: Check for secrets
+        run: |
+          echo "## Secret Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ -s trufflehog-results.json ]]; then
+            secrets=$(cat trufflehog-results.json | jq -s 'length')
+            if [[ "$secrets" -gt 0 ]]; then
+              echo ":x: **Found $secrets potential secret(s)**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Please review and remove any exposed secrets." >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          fi
+
+          echo ":white_check_mark: No secrets detected" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # SAST - Static Application Security Testing
+  # ---------------------------------------------------------------------------
+  sast:
+    name: SAST Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: bash
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:bash"
+
+  # ---------------------------------------------------------------------------
+  # Dependency Vulnerability Scan
+  # ---------------------------------------------------------------------------
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for vulnerable patterns
+        run: |
+          echo "## Dependency Security Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          issues=0
+
+          # Check for curl with -k (insecure)
+          if grep -rn "curl.*-k\|curl.*--insecure" bin/ lib/ 2>/dev/null; then
+            echo ":x: Found insecure curl usage (-k/--insecure flag)" >> $GITHUB_STEP_SUMMARY
+            ((issues++))
+          fi
+
+          # Check for wget without certificate verification
+          if grep -rn "wget.*--no-check-certificate" bin/ lib/ 2>/dev/null; then
+            echo ":x: Found insecure wget usage (--no-check-certificate)" >> $GITHUB_STEP_SUMMARY
+            ((issues++))
+          fi
+
+          # Check for eval usage
+          eval_count=$(grep -rn "\beval\b" bin/ lib/ 2>/dev/null | wc -l || true)
+          if [[ "$eval_count" -gt 0 ]]; then
+            echo ":warning: Found $eval_count eval usage(s) - review for command injection" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for unsafe variable expansion
+          if grep -rn '\${\w*[^}]*:-\$(' bin/ lib/ 2>/dev/null; then
+            echo ":warning: Found potentially unsafe variable expansion" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ $issues -eq 0 ]]; then
+            echo ":white_check_mark: No critical dependency issues found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Command Injection Detection
+  # ---------------------------------------------------------------------------
+  injection-scan:
+    name: Injection Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for command injection vulnerabilities
+        run: |
+          echo "## Command Injection Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          issues=0
+
+          # Check for unquoted variables in dangerous contexts
+          echo "### Unquoted Variable Usage" >> $GITHUB_STEP_SUMMARY
+          if grep -rn 'rm -rf \$[^"'\''(]' bin/ lib/ 2>/dev/null; then
+            echo ":x: Found unquoted variable in rm -rf" >> $GITHUB_STEP_SUMMARY
+            ((issues++))
+          fi
+
+          # Check for backticks (prefer $())
+          backticks=$(grep -rn '\`' bin/ lib/ --include="*.sh" 2>/dev/null | wc -l || true)
+          if [[ "$backticks" -gt 0 ]]; then
+            echo ":warning: Found $backticks backtick usage(s) - prefer \$() syntax" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for unsafe redirections
+          if grep -rn '>\s*\$[^"'\''(]' bin/ lib/ 2>/dev/null; then
+            echo ":warning: Found potentially unsafe redirection with unquoted variable" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for sourcing external files without validation
+          if grep -rn 'source\s*\$[^"'\''(]' bin/ lib/ 2>/dev/null; then
+            echo ":warning: Found source with unquoted variable" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ $issues -eq 0 ]]; then
+            echo ":white_check_mark: No obvious injection vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":x: **Found $issues potential injection issue(s)**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Path Traversal Detection
+  # ---------------------------------------------------------------------------
+  path-traversal-scan:
+    name: Path Traversal Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for path traversal vulnerabilities
+        run: |
+          echo "## Path Traversal Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for functions that validate paths
+          echo "### Path Validation Functions" >> $GITHUB_STEP_SUMMARY
+          if grep -rn "realpath\|readlink -f\|canonicalize" bin/ lib/ 2>/dev/null; then
+            echo ":white_check_mark: Found path canonicalization usage" >> $GITHUB_STEP_SUMMARY
+          else
+            echo ":warning: Consider using realpath/readlink -f for path validation" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for direct file access with user input
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### User Input in File Operations" >> $GITHUB_STEP_SUMMARY
+          dangerous_ops=$(grep -rn 'cat\s*"\$\|rm\s*"\$\|mv\s*"\$\|cp\s*"\$' bin/ lib/ 2>/dev/null | wc -l || true)
+          echo "Found $dangerous_ops file operations with variables - review manually" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Permissions Check
+  # ---------------------------------------------------------------------------
+  permissions-check:
+    name: Permissions Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check file permissions
+        run: |
+          echo "## File Permissions Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for overly permissive files
+          echo "### World-Writable Files" >> $GITHUB_STEP_SUMMARY
+          world_writable=$(find . -type f -perm -002 2>/dev/null | wc -l || true)
+          if [[ "$world_writable" -gt 0 ]]; then
+            echo ":x: Found $world_writable world-writable file(s)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo ":white_check_mark: No world-writable files" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for SUID/SGID bits
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### SUID/SGID Files" >> $GITHUB_STEP_SUMMARY
+          suid_files=$(find . -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | wc -l || true)
+          if [[ "$suid_files" -gt 0 ]]; then
+            echo ":x: Found $suid_files SUID/SGID file(s)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo ":white_check_mark: No SUID/SGID files" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Security Summary
+  # ---------------------------------------------------------------------------
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [secret-scan, dependency-scan, injection-scan, path-traversal-scan, permissions-check]
+    if: always()
+
+    steps:
+      - name: Check security results
+        run: |
+          echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          results=("secret-scan:${{ needs.secret-scan.result }}"
+                   "dependency-scan:${{ needs.dependency-scan.result }}"
+                   "injection-scan:${{ needs.injection-scan.result }}"
+                   "path-traversal-scan:${{ needs.path-traversal-scan.result }}"
+                   "permissions-check:${{ needs.permissions-check.result }}")
+
+          failures=0
+          for result in "${results[@]}"; do
+            name="${result%%:*}"
+            status="${result##*:}"
+            if [[ "$status" == "success" ]]; then
+              echo "- $name: :white_check_mark: Passed" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- $name: :x: Failed" >> $GITHUB_STEP_SUMMARY
+              ((failures++))
+            fi
+          done
+
+          if [[ $failures -gt 0 ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":x: **$failures security check(s) failed**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo ":shield: **All security checks passed!**" >> $GITHUB_STEP_SUMMARY

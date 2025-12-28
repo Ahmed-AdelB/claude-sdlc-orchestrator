@@ -1,0 +1,549 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-deps - Dependency management for tri-agent system
+#===============================================================================
+# Checks, audits, and updates system dependencies and CLI tools.
+#
+# Usage:
+#   tri-agent-deps [COMMAND] [OPTIONS]
+#
+# Commands:
+#   check           Check all dependencies
+#   audit           Security audit of dependencies
+#   update          Update dependencies (where possible)
+#   versions        Show version information
+#   install         Install missing dependencies
+#
+# Options:
+#   --json          Output in JSON format
+#   --quiet         Minimal output
+#   --help          Show this help
+#===============================================================================
+
+set -euo pipefail
+
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/common.sh"
+
+#===============================================================================
+# Configuration
+#===============================================================================
+
+COMMAND=""
+OUTPUT_JSON=false
+QUIET=false
+
+# Required dependencies
+REQUIRED_DEPS=(
+    "bash:4.0:Shell interpreter"
+    "jq:1.5:JSON processor"
+    "curl:7.0:HTTP client"
+    "git:2.0:Version control"
+)
+
+# Optional dependencies
+OPTIONAL_DEPS=(
+    "yq:4.0:YAML processor"
+    "python3:3.8:Python interpreter"
+    "flock:any:File locking"
+    "nc:any:Network utility"
+    "timeout:any:Command timeout"
+    "bc:any:Calculator"
+    "shellcheck:0.7:Shell linter"
+)
+
+# CLI tools for tri-agent
+CLI_TOOLS=(
+    "claude:any:Claude CLI"
+    "gemini:any:Gemini CLI"
+    "codex:any:Codex CLI"
+)
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+
+show_help() {
+    head -18 "$0" | grep -E "^#" | tail -n +3 | sed 's/^# \?//'
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        check|audit|update|versions|install)
+            COMMAND="$1"
+            shift
+            ;;
+        --json)
+            OUTPUT_JSON=true
+            shift
+            ;;
+        --quiet|-q)
+            QUIET=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Default to check if no command specified
+COMMAND="${COMMAND:-check}"
+
+#===============================================================================
+# Utility Functions
+#===============================================================================
+
+# Get version of a command
+get_version() {
+    local cmd="$1"
+
+    case "$cmd" in
+        bash)
+            echo "${BASH_VERSION%%(*}"
+            ;;
+        jq)
+            jq --version 2>/dev/null | sed 's/jq-//'
+            ;;
+        curl)
+            curl --version 2>/dev/null | head -1 | awk '{print $2}'
+            ;;
+        git)
+            git --version 2>/dev/null | awk '{print $3}'
+            ;;
+        yq)
+            yq --version 2>/dev/null | awk '{print $NF}'
+            ;;
+        python3)
+            python3 --version 2>/dev/null | awk '{print $2}'
+            ;;
+        claude)
+            claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown"
+            ;;
+        gemini)
+            gemini --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown"
+            ;;
+        codex)
+            codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown"
+            ;;
+        shellcheck)
+            shellcheck --version 2>/dev/null | grep version: | awk '{print $2}'
+            ;;
+        flock|nc|timeout|bc)
+            echo "installed"
+            ;;
+        *)
+            "$cmd" --version 2>/dev/null | head -1 || echo "unknown"
+            ;;
+    esac
+}
+
+# Compare versions (returns 0 if version1 >= version2)
+version_ge() {
+    local version1="$1"
+    local version2="$2"
+
+    [[ "$version2" == "any" ]] && return 0
+    [[ "$version1" == "installed" ]] && return 0
+
+    printf '%s\n' "$version2" "$version1" | sort -V -C
+}
+
+# Print status
+print_status() {
+    local status="$1"
+    local name="$2"
+    local version="$3"
+    local desc="$4"
+
+    if $QUIET; then
+        [[ "$status" == "MISSING" || "$status" == "OLD" ]] && echo "$name: $status"
+        return
+    fi
+
+    local color
+    case "$status" in
+        OK)      color="${GREEN:-}" ;;
+        OLD)     color="${YELLOW:-}" ;;
+        MISSING) color="${RED:-}" ;;
+        *)       color="" ;;
+    esac
+
+    printf "  ${color}[%-7s]${RESET:-} %-15s %-15s %s\n" "$status" "$name" "$version" "$desc"
+}
+
+#===============================================================================
+# Commands
+#===============================================================================
+
+# Check all dependencies
+cmd_check() {
+    echo ""
+    echo "=== Checking Dependencies ==="
+    echo ""
+
+    local missing=0
+    local outdated=0
+
+    # Check required dependencies
+    echo "Required Dependencies:"
+    for dep_info in "${REQUIRED_DEPS[@]}"; do
+        local name="${dep_info%%:*}"
+        local rest="${dep_info#*:}"
+        local min_version="${rest%%:*}"
+        local desc="${rest#*:}"
+
+        if command_exists "$name"; then
+            local version
+            version=$(get_version "$name")
+            if version_ge "$version" "$min_version"; then
+                print_status "OK" "$name" "$version" "$desc"
+            else
+                print_status "OLD" "$name" "$version (need $min_version)" "$desc"
+                ((outdated++)) || true
+            fi
+        else
+            print_status "MISSING" "$name" "-" "$desc"
+            ((missing++)) || true
+        fi
+    done
+
+    echo ""
+    echo "Optional Dependencies:"
+    for dep_info in "${OPTIONAL_DEPS[@]}"; do
+        local name="${dep_info%%:*}"
+        local rest="${dep_info#*:}"
+        local min_version="${rest%%:*}"
+        local desc="${rest#*:}"
+
+        if command_exists "$name"; then
+            local version
+            version=$(get_version "$name")
+            print_status "OK" "$name" "$version" "$desc"
+        else
+            print_status "MISSING" "$name" "-" "$desc"
+        fi
+    done
+
+    echo ""
+    echo "CLI Tools:"
+    for tool_info in "${CLI_TOOLS[@]}"; do
+        local name="${tool_info%%:*}"
+        local rest="${tool_info#*:}"
+        local min_version="${rest%%:*}"
+        local desc="${rest#*:}"
+
+        if command_exists "$name"; then
+            local version
+            version=$(get_version "$name")
+            print_status "OK" "$name" "$version" "$desc"
+        else
+            print_status "MISSING" "$name" "-" "$desc"
+        fi
+    done
+
+    echo ""
+    echo "Summary: $missing required missing, $outdated outdated"
+
+    return $missing
+}
+
+# Security audit of dependencies
+cmd_audit() {
+    echo ""
+    echo "=== Security Audit ==="
+    echo ""
+
+    local issues=0
+
+    # Check for known vulnerable versions
+    echo "Checking for known vulnerabilities..."
+
+    # Check bash version (CVE-2014-6271 Shellshock)
+    if command_exists bash; then
+        local bash_version
+        bash_version=$(get_version bash)
+        local major minor
+        IFS='.' read -r major minor _ <<< "$bash_version"
+        if [[ "$major" -lt 4 ]] || { [[ "$major" -eq 4 ]] && [[ "$minor" -lt 3 ]]; }; then
+            echo "  [WARN] bash $bash_version may be vulnerable to Shellshock"
+            ((issues++)) || true
+        else
+            echo "  [OK] bash $bash_version - Shellshock patched"
+        fi
+    fi
+
+    # Check curl version (various CVEs)
+    if command_exists curl; then
+        local curl_version
+        curl_version=$(get_version curl)
+        local major minor
+        IFS='.' read -r major minor _ <<< "$curl_version"
+        if [[ "$major" -lt 7 ]] || { [[ "$major" -eq 7 ]] && [[ "$minor" -lt 64 ]]; }; then
+            echo "  [WARN] curl $curl_version may have known vulnerabilities"
+            ((issues++)) || true
+        else
+            echo "  [OK] curl $curl_version"
+        fi
+    fi
+
+    # Check for outdated git
+    if command_exists git; then
+        local git_version
+        git_version=$(get_version git)
+        local major minor
+        IFS='.' read -r major minor _ <<< "$git_version"
+        if [[ "$major" -lt 2 ]] || { [[ "$major" -eq 2 ]] && [[ "$minor" -lt 30 ]]; }; then
+            echo "  [WARN] git $git_version - consider updating"
+        else
+            echo "  [OK] git $git_version"
+        fi
+    fi
+
+    echo ""
+    echo "Checking TLS/SSL configuration..."
+
+    # Check curl SSL
+    if command_exists curl; then
+        local ssl_info
+        ssl_info=$(curl --version | grep -i "ssl\|tls" || echo "none")
+        if [[ "$ssl_info" != "none" ]]; then
+            echo "  [OK] curl has SSL support: $ssl_info"
+        else
+            echo "  [WARN] curl may lack SSL support"
+            ((issues++)) || true
+        fi
+    fi
+
+    echo ""
+    echo "Checking for insecure configurations..."
+
+    # Check for world-writable directories
+    local writable_dirs
+    writable_dirs=$(find "${AUTONOMOUS_ROOT}" -type d -perm -002 2>/dev/null | wc -l || echo "0")
+    if [[ "$writable_dirs" -gt 0 ]]; then
+        echo "  [WARN] $writable_dirs world-writable directories found"
+        ((issues++)) || true
+    else
+        echo "  [OK] No world-writable directories"
+    fi
+
+    echo ""
+    echo "Audit complete: $issues issue(s) found"
+
+    return $((issues > 0 ? 1 : 0))
+}
+
+# Update dependencies
+cmd_update() {
+    echo ""
+    echo "=== Updating Dependencies ==="
+    echo ""
+
+    local updated=0
+
+    # Detect package manager
+    local pkg_manager=""
+    if command_exists apt-get; then
+        pkg_manager="apt"
+    elif command_exists brew; then
+        pkg_manager="brew"
+    elif command_exists yum; then
+        pkg_manager="yum"
+    elif command_exists dnf; then
+        pkg_manager="dnf"
+    elif command_exists pacman; then
+        pkg_manager="pacman"
+    fi
+
+    if [[ -z "$pkg_manager" ]]; then
+        echo "No supported package manager found"
+        echo "Please update dependencies manually"
+        return 1
+    fi
+
+    echo "Package manager: $pkg_manager"
+    echo ""
+
+    # Update package lists
+    case "$pkg_manager" in
+        apt)
+            echo "Updating package lists..."
+            sudo apt-get update -qq || true
+            ;;
+        brew)
+            echo "Updating Homebrew..."
+            brew update --quiet || true
+            ;;
+    esac
+
+    # Update CLI tools via npm if available
+    if command_exists npm; then
+        echo ""
+        echo "Checking npm-based CLI tools..."
+
+        for tool in gemini; do
+            if npm list -g "@google/$tool-cli" &>/dev/null; then
+                echo "  Updating $tool-cli..."
+                npm update -g "@google/$tool-cli" 2>/dev/null || true
+                ((updated++)) || true
+            fi
+        done
+    fi
+
+    echo ""
+    echo "Update complete: $updated package(s) updated"
+    echo ""
+    echo "Note: Claude CLI and Codex CLI should be updated via their respective installers"
+}
+
+# Show version information
+cmd_versions() {
+    echo ""
+    echo "=== Version Information ==="
+    echo ""
+
+    echo "Tri-Agent System:"
+    echo "  Version: ${TRI_AGENT_VERSION:-unknown}"
+    echo "  Build:   ${TRI_AGENT_BUILD_DATE:-unknown}"
+    echo "  Common:  ${COMMON_SH_VERSION:-unknown}"
+    echo ""
+
+    echo "System:"
+    echo "  OS:      $(uname -s) $(uname -r)"
+    echo "  Arch:    $(uname -m)"
+    echo "  Shell:   $SHELL ($BASH_VERSION)"
+    echo ""
+
+    echo "Dependencies:"
+    for dep_info in "${REQUIRED_DEPS[@]}" "${OPTIONAL_DEPS[@]}"; do
+        local name="${dep_info%%:*}"
+        if command_exists "$name"; then
+            local version
+            version=$(get_version "$name")
+            printf "  %-15s %s\n" "$name:" "$version"
+        fi
+    done
+
+    echo ""
+    echo "CLI Tools:"
+    for tool_info in "${CLI_TOOLS[@]}"; do
+        local name="${tool_info%%:*}"
+        if command_exists "$name"; then
+            local version
+            version=$(get_version "$name")
+            printf "  %-15s %s\n" "$name:" "$version"
+        else
+            printf "  %-15s %s\n" "$name:" "not installed"
+        fi
+    done
+
+    if $OUTPUT_JSON; then
+        echo ""
+        echo "{"
+        echo "  \"tri_agent_version\": \"${TRI_AGENT_VERSION:-unknown}\","
+        echo "  \"bash_version\": \"$BASH_VERSION\","
+        echo "  \"os\": \"$(uname -s)\""
+        echo "}"
+    fi
+}
+
+# Install missing dependencies
+cmd_install() {
+    echo ""
+    echo "=== Installing Dependencies ==="
+    echo ""
+
+    # Detect package manager
+    local pkg_manager=""
+    local install_cmd=""
+
+    if command_exists apt-get; then
+        pkg_manager="apt"
+        install_cmd="sudo apt-get install -y"
+    elif command_exists brew; then
+        pkg_manager="brew"
+        install_cmd="brew install"
+    elif command_exists yum; then
+        pkg_manager="yum"
+        install_cmd="sudo yum install -y"
+    elif command_exists dnf; then
+        pkg_manager="dnf"
+        install_cmd="sudo dnf install -y"
+    fi
+
+    if [[ -z "$pkg_manager" ]]; then
+        echo "No supported package manager found"
+        return 1
+    fi
+
+    echo "Using $pkg_manager"
+    echo ""
+
+    local installed=0
+
+    # Install missing required dependencies
+    for dep_info in "${REQUIRED_DEPS[@]}"; do
+        local name="${dep_info%%:*}"
+
+        if ! command_exists "$name"; then
+            echo "Installing $name..."
+            $install_cmd "$name" 2>/dev/null || {
+                echo "  Failed to install $name"
+                continue
+            }
+            ((installed++)) || true
+        fi
+    done
+
+    # Install missing optional dependencies
+    for dep_info in "${OPTIONAL_DEPS[@]}"; do
+        local name="${dep_info%%:*}"
+
+        if ! command_exists "$name"; then
+            echo "Installing $name..."
+            $install_cmd "$name" 2>/dev/null || true
+        fi
+    done
+
+    echo ""
+    echo "Installation complete: $installed package(s) installed"
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+
+main() {
+    case "$COMMAND" in
+        check)
+            cmd_check
+            ;;
+        audit)
+            cmd_audit
+            ;;
+        update)
+            cmd_update
+            ;;
+        versions)
+            cmd_versions
+            ;;
+        install)
+            cmd_install
+            ;;
+        *)
+            log_error "Unknown command: $COMMAND"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main
