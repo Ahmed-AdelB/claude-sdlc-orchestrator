@@ -1,0 +1,299 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-dashboard - Real-time TUI dashboard for tri-agent system
+#===============================================================================
+# Usage:
+#   tri-agent-dashboard           Start dashboard with auto-refresh
+#   tri-agent-dashboard --once    Single snapshot (no refresh)
+#   tri-agent-dashboard --help    Show this help
+#
+# Features:
+#   - Session status (running/stopped)
+#   - Circuit breaker states for all 3 models
+#   - Recent routing decisions (last 5)
+#   - Cost summary (requests, tokens)
+#   - Health status
+#   - Auto-refresh every 5 seconds
+#===============================================================================
+
+set -euo pipefail
+
+# Resolve script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+
+# Paths
+STATE_DIR="${AUTONOMOUS_ROOT}/state"
+LOGS_DIR="${AUTONOMOUS_ROOT}/logs"
+BREAKERS_DIR="${STATE_DIR}/breakers"
+COSTS_DIR="${STATE_DIR}/costs"
+
+# Configuration
+REFRESH_INTERVAL=5
+ONCE_MODE=false
+TMUX_SOCKET="tri-agent"
+
+# Colors (with fallback for non-terminal)
+setup_colors() {
+    if [[ -t 1 ]] && command -v tput &>/dev/null; then
+        RED=$(tput setaf 1)
+        GREEN=$(tput setaf 2)
+        YELLOW=$(tput setaf 3)
+        BLUE=$(tput setaf 4)
+        MAGENTA=$(tput setaf 5)
+        CYAN=$(tput setaf 6)
+        WHITE=$(tput setaf 7)
+        BOLD=$(tput bold)
+        DIM=$(tput dim)
+        RESET=$(tput sgr0)
+        CLEAR=$(tput clear)
+    else
+        RED="" GREEN="" YELLOW="" BLUE="" MAGENTA="" CYAN="" WHITE=""
+        BOLD="" DIM="" RESET="" CLEAR=""
+    fi
+}
+
+# Parse arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --once|-1)
+                ONCE_MODE=true
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+}
+
+show_help() {
+    cat <<EOF
+tri-agent-dashboard - Real-time TUI dashboard
+
+Usage: tri-agent-dashboard [OPTIONS]
+
+Options:
+  --once, -1    Single snapshot (no auto-refresh)
+  --help, -h    Show this help
+
+Dashboard shows:
+  - Session status
+  - Circuit breaker states
+  - Recent routing decisions
+  - Cost/usage summary
+  - System health
+
+Press Ctrl+C to exit.
+EOF
+}
+
+# Get session status
+get_session_status() {
+    local status
+    if tmux -L "$TMUX_SOCKET" list-sessions 2>/dev/null | grep -q "tri-agent"; then
+        status="${GREEN}RUNNING${RESET}"
+        local session_info
+        session_info=$(tmux -L "$TMUX_SOCKET" list-sessions 2>/dev/null | head -1)
+        echo "$status ($session_info)"
+    else
+        echo "${RED}STOPPED${RESET}"
+    fi
+}
+
+# Get circuit breaker status for a model
+get_breaker_status() {
+    local model="$1"
+    local state_file="${BREAKERS_DIR}/${model}.state"
+
+    if [[ -f "$state_file" ]]; then
+        local state failure_count
+        state=$(grep -E "^state=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "UNKNOWN")
+        failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "0")
+
+        case "$state" in
+            CLOSED)
+                echo "${GREEN}CLOSED${RESET} (failures: $failure_count)"
+                ;;
+            OPEN)
+                echo "${RED}OPEN${RESET} (failures: $failure_count)"
+                ;;
+            HALF_OPEN)
+                echo "${YELLOW}HALF_OPEN${RESET} (failures: $failure_count)"
+                ;;
+            *)
+                echo "${DIM}$state${RESET}"
+                ;;
+        esac
+    else
+        echo "${DIM}NO DATA${RESET}"
+    fi
+}
+
+# Get recent routing decisions
+get_routing_decisions() {
+    local routing_log="${LOGS_DIR}/routing-decisions.jsonl"
+
+    if [[ -f "$routing_log" ]] && command -v jq &>/dev/null; then
+        tail -5 "$routing_log" 2>/dev/null | while read -r line; do
+            local model confidence reason timestamp
+            model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null)
+            confidence=$(echo "$line" | jq -r '.confidence // 0' 2>/dev/null)
+            reason=$(echo "$line" | jq -r '.reason // "unknown"' 2>/dev/null | cut -c1-40)
+            timestamp=$(echo "$line" | jq -r '.timestamp // ""' 2>/dev/null | cut -c12-19)
+
+            local color
+            case "$model" in
+                claude) color="$BLUE" ;;
+                gemini) color="$GREEN" ;;
+                codex) color="$YELLOW" ;;
+                *) color="$WHITE" ;;
+            esac
+
+            printf "  ${DIM}%s${RESET} ${color}%-7s${RESET} %3d%% %s\n" \
+                "$timestamp" "$model" "$confidence" "$reason"
+        done
+    elif [[ -f "$routing_log" ]]; then
+        tail -5 "$routing_log" 2>/dev/null | while read -r line; do
+            echo "  $line" | cut -c1-70
+        done
+    else
+        echo "  ${DIM}No routing decisions yet${RESET}"
+    fi
+}
+
+# Get cost summary
+get_cost_summary() {
+    local totals_file="${COSTS_DIR}/totals.json"
+
+    if [[ -f "$totals_file" ]] && command -v jq &>/dev/null; then
+        local requests input_tokens output_tokens
+        requests=$(jq -r '.total_requests // 0' "$totals_file" 2>/dev/null)
+        input_tokens=$(jq -r '.total_input_tokens // 0' "$totals_file" 2>/dev/null)
+        output_tokens=$(jq -r '.total_output_tokens // 0' "$totals_file" 2>/dev/null)
+
+        echo "  Requests: ${CYAN}$requests${RESET}"
+        echo "  Input:    ${CYAN}$input_tokens${RESET} tokens"
+        echo "  Output:   ${CYAN}$output_tokens${RESET} tokens"
+
+        # Per-model breakdown
+        for model in claude gemini codex; do
+            local model_requests
+            model_requests=$(jq -r ".by_model.${model}.requests // 0" "$totals_file" 2>/dev/null)
+            if [[ "$model_requests" != "0" && "$model_requests" != "null" ]]; then
+                printf "  %-8s  ${DIM}%s requests${RESET}\n" "$model:" "$model_requests"
+            fi
+        done
+    else
+        echo "  ${DIM}No cost data available${RESET}"
+    fi
+}
+
+# Get health status
+get_health_status() {
+    local health_file="${STATE_DIR}/health.json"
+
+    if [[ -f "$health_file" ]] && command -v jq &>/dev/null; then
+        local status timestamp
+        status=$(jq -r '.status // "UNKNOWN"' "$health_file" 2>/dev/null)
+        timestamp=$(jq -r '.timestamp // ""' "$health_file" 2>/dev/null | cut -c1-19)
+
+        local color
+        case "$status" in
+            OK|HEALTHY) color="$GREEN" ;;
+            DEGRADED) color="$YELLOW" ;;
+            FAIL|CRITICAL) color="$RED" ;;
+            *) color="$WHITE" ;;
+        esac
+
+        echo "  Status: ${color}${status}${RESET}"
+        echo "  ${DIM}Last check: $timestamp${RESET}"
+
+        # Show issues if any
+        local issues
+        issues=$(jq -r '.issues[]? // empty' "$health_file" 2>/dev/null)
+        if [[ -n "$issues" ]]; then
+            echo "  ${YELLOW}Issues:${RESET}"
+            echo "$issues" | while read -r issue; do
+                echo "    ${DIM}- $issue${RESET}"
+            done
+        fi
+    else
+        echo "  ${DIM}No health data available${RESET}"
+    fi
+}
+
+# Draw the dashboard
+draw_dashboard() {
+    local now
+    now=$(date '+%Y-%m-%d %H:%M:%S')
+
+    echo "${CLEAR}"
+    echo "${BOLD}${MAGENTA}╔══════════════════════════════════════════════════════════════════╗${RESET}"
+    echo "${BOLD}${MAGENTA}║          TRI-AGENT DASHBOARD                                     ║${RESET}"
+    echo "${BOLD}${MAGENTA}╚══════════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    echo "${DIM}Updated: $now${RESET}    ${DIM}Refresh: ${REFRESH_INTERVAL}s (Ctrl+C to exit)${RESET}"
+    echo ""
+
+    # Session Status
+    echo "${BOLD}${BLUE}┌─ SESSION ─────────────────────────────────────────────────────────┐${RESET}"
+    echo "  Status: $(get_session_status)"
+    echo ""
+
+    # Circuit Breakers
+    echo "${BOLD}${CYAN}┌─ CIRCUIT BREAKERS ────────────────────────────────────────────────┐${RESET}"
+    printf "  %-10s %s\n" "Claude:" "$(get_breaker_status claude)"
+    printf "  %-10s %s\n" "Gemini:" "$(get_breaker_status gemini)"
+    printf "  %-10s %s\n" "Codex:" "$(get_breaker_status codex)"
+    echo ""
+
+    # Routing Decisions
+    echo "${BOLD}${GREEN}┌─ RECENT ROUTING (last 5) ────────────────────────────────────────┐${RESET}"
+    get_routing_decisions
+    echo ""
+
+    # Cost Summary
+    echo "${BOLD}${YELLOW}┌─ USAGE SUMMARY ───────────────────────────────────────────────────┐${RESET}"
+    get_cost_summary
+    echo ""
+
+    # Health Status
+    echo "${BOLD}${RED}┌─ HEALTH STATUS ───────────────────────────────────────────────────┐${RESET}"
+    get_health_status
+    echo ""
+
+    echo "${DIM}────────────────────────────────────────────────────────────────────${RESET}"
+}
+
+# Main
+main() {
+    setup_colors
+    parse_args "$@"
+
+    if [[ "$ONCE_MODE" == "true" ]]; then
+        draw_dashboard
+    else
+        # Trap Ctrl+C for clean exit
+        trap 'echo ""; echo "Dashboard stopped."; exit 0' INT TERM
+
+        while true; do
+            draw_dashboard
+            sleep "$REFRESH_INTERVAL"
+        done
+    fi
+}
+
+main "$@"
