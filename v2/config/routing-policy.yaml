@@ -25,16 +25,6 @@ metadata:
   author: "tri-agent-system"
   updated: "2025-12-27"
 
-# Global settings
-settings:
-  default_model: "claude"
-  confidence_threshold: 0.7          # Below this, prompt user for confirmation
-  file_size_threshold: 51200         # 50KB - triggers large context handling
-  token_threshold: 100000            # 100K tokens - triggers Gemini routing
-  file_count_threshold: 10           # >10 files - triggers Gemini routing
-  enable_user_confirmation: true     # Prompt when confidence is low
-  enable_logging: true               # Log routing decisions
-
 # =============================================================================
 # Primary Routing Rules
 # =============================================================================
@@ -354,14 +344,3 @@ consensus_triggers:
     require_consensus: true
     min_approvals: 2
 
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-
-logging:
-  log_file: "logs/routing-decisions.jsonl"
-  log_level: "INFO"
-  include_prompt_hash: true
-  include_file_hashes: false
-  mask_secrets: true
-  retention_days: 30

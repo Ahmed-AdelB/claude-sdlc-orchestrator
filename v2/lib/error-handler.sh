@@ -59,6 +59,7 @@ detect_error_type() {
     local output="$1"
     local exit_code="${2:-1}"
     local output_lower
+
     output_lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')
 
     # Rate limit patterns
@@ -163,14 +164,23 @@ record_rate_limit() {
     local model="$1"
     local retry_after="${2:-60}"
     local rate_file="${RATE_LIMITS_DIR}/${model}.limit"
+    local now
+    local until
 
     mkdir -p "$RATE_LIMITS_DIR"
 
-    local now
-    now=$(date +%s)
-    local until=$((now + retry_after))
+    if ! [[ "$retry_after" =~ ^[0-9]+$ ]]; then
+        retry_after=60
+    fi
 
-    echo "$until" > "$rate_file"
+    now=$(date +%s)
+    until=$((now + retry_after))
+
+    if declare -F atomic_write >/dev/null 2>&1; then
+        atomic_write "$rate_file" "$until"
+    else
+        echo "$until" > "$rate_file"
+    fi
     log_rate_limit "$model" "$retry_after" 2>/dev/null || true
 }
 
@@ -179,14 +189,17 @@ record_rate_limit() {
 is_rate_limited() {
     local model="$1"
     local rate_file="${RATE_LIMITS_DIR}/${model}.limit"
+    local until
+    local now
 
     if [[ ! -f "$rate_file" ]]; then
         return 1  # Not rate limited
     fi
 
-    local until
-    until=$(cat "$rate_file")
-    local now
+    until=$(cat "$rate_file" 2>/dev/null || echo "0")
+    if ! [[ "$until" =~ ^[0-9]+$ ]]; then
+        until=0
+    fi
     now=$(date +%s)
 
     if [[ $now -lt $until ]]; then
@@ -201,17 +214,21 @@ is_rate_limited() {
 get_rate_limit_remaining() {
     local model="$1"
     local rate_file="${RATE_LIMITS_DIR}/${model}.limit"
+    local until
+    local now
+    local remaining
 
     if [[ ! -f "$rate_file" ]]; then
         echo 0
         return
     fi
 
-    local until
-    until=$(cat "$rate_file")
-    local now
+    until=$(cat "$rate_file" 2>/dev/null || echo "0")
+    if ! [[ "$until" =~ ^[0-9]+$ ]]; then
+        until=0
+    fi
     now=$(date +%s)
-    local remaining=$((until - now))
+    remaining=$((until - now))
 
     if [[ $remaining -gt 0 ]]; then
         echo "$remaining"
@@ -231,10 +248,12 @@ calculate_backoff() {
     local base="${EH_BACKOFF_BASE}"
     local max="${EH_BACKOFF_MAX}"
     local multiplier="${EH_BACKOFF_MULTIPLIER}"
+    local backoff
+    local jitter_range
+    local jitter
 
     # Exponential backoff: base * multiplier^(attempt-1)
     # Use awk for portability (#116) - bc not always available
-    local backoff
     backoff=$(awk "BEGIN {printf \"%.0f\", $base * ($multiplier ^ ($attempt - 1))}" 2>/dev/null || echo "$base")
 
     # Cap at max
@@ -244,8 +263,8 @@ calculate_backoff() {
 
     # Add jitter (±25%)
     if [[ "$EH_JITTER" == "true" ]]; then
-        local jitter_range=$((backoff / 4))
-        local jitter=$((RANDOM % (jitter_range * 2 + 1) - jitter_range))
+        jitter_range=$((backoff / 4))
+        jitter=$((RANDOM % (jitter_range * 2 + 1) - jitter_range))
         backoff=$((backoff + jitter))
     fi
 
@@ -270,6 +289,13 @@ calculate_backoff() {
 #   execute_with_retry --max-retries 5 ./my-script.sh arg1 arg2
 execute_with_retry() {
     local max_retries="$EH_MAX_RETRIES"
+    local -a cmd
+    local attempt=1
+    local result=0
+    local output
+    local error_type
+    local backoff
+    local errexit_set=0
 
     # Parse optional --max-retries flag
     if [[ "$1" == "--max-retries" ]]; then
@@ -278,21 +304,28 @@ execute_with_retry() {
     fi
 
     # Remaining args are the command and its arguments
-    local -a cmd=("$@")
-    local attempt=1
-    local result=0
-    local output=""
-    local error_type=""
+    cmd=("$@")
 
     if [[ ${#cmd[@]} -eq 0 ]]; then
-        log_error "execute_with_retry: No command provided" 2>/dev/null || true
+        log_error "[${TRACE_ID:-unknown}] execute_with_retry: No command provided" 2>/dev/null || true
         return 1
     fi
 
+    case $- in
+        *e*) errexit_set=1 ;;
+    esac
+
     while [[ $attempt -le $max_retries ]]; do
         # Execute command safely using array expansion (no eval)
+        # Temporarily disable set -e for command execution
+        if [[ $errexit_set -eq 1 ]]; then
+            set +e
+        fi
         output=$("${cmd[@]}" 2>&1)
         result=$?
+        if [[ $errexit_set -eq 1 ]]; then
+            set -e
+        fi
 
         if [[ $result -eq 0 ]]; then
             echo "$output"
@@ -304,7 +337,7 @@ execute_with_retry() {
 
         # Check if retryable
         if ! is_retryable_error "$error_type"; then
-            log_error "Non-retryable error ($error_type): $output" 2>/dev/null || true
+            log_error "[${TRACE_ID:-unknown}] Non-retryable error ($error_type): ${output:0:200}..." 2>/dev/null || true
             echo "$output"
             return $result
         fi
@@ -314,16 +347,15 @@ execute_with_retry() {
 
         # Check if more retries available
         if [[ $attempt -lt $max_retries ]]; then
-            local backoff
             backoff=$(calculate_backoff $attempt)
-            log_warn "Retry $attempt/$max_retries, backing off ${backoff}s" 2>/dev/null || true
+            log_warn "[${TRACE_ID:-unknown}] Retry $attempt/$max_retries, backing off ${backoff}s (error: $error_type)" 2>/dev/null || true
             sleep "$backoff"
         fi
 
         ((attempt++))
     done
 
-    log_error "All $max_retries retries exhausted" 2>/dev/null || true
+    log_error "[${TRACE_ID:-unknown}] All $max_retries retries exhausted for command: ${cmd[0]}" 2>/dev/null || true
     echo "$output"
     return $result
 }
@@ -336,12 +368,19 @@ execute_with_retry() {
 get_task_retry_count() {
     local task_id="$1"
     local retry_file="${RATE_LIMITS_DIR}/retry_${task_id}"
+    local value
 
     if [[ -f "$retry_file" ]]; then
-        cat "$retry_file"
+        value=$(cat "$retry_file" 2>/dev/null || echo "0")
     else
-        echo "0"
+        value="0"
     fi
+
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        value="0"
+    fi
+
+    echo "$value"
 }
 
 # Increment task retry count
@@ -351,9 +390,16 @@ increment_task_retry_count() {
 
     mkdir -p "$RATE_LIMITS_DIR"
 
+    if declare -F atomic_increment >/dev/null 2>&1; then
+        atomic_increment "$retry_file"
+        return 0
+    fi
+
     local current
+    local new
+
     current=$(get_task_retry_count "$task_id")
-    local new=$((current + 1))
+    new=$((current + 1))
     echo "$new" > "$retry_file"
     echo "$new"
 }
@@ -377,39 +423,54 @@ execute_with_fallback_chain() {
     local executor="${2:-execute_model}"
     local models=("${EH_FALLBACK_ORDER[@]}")
     local task_id="${TRACE_ID:-unknown}"
+    local task_retries
+    local remaining
+    local output
+    local result
+    local error_type
+    local next_model
+    local i
+    local model
+    local errexit_set=0
 
     # Get current retry count for this task (#78 fix)
-    local task_retries
     task_retries=$(get_task_retry_count "$task_id")
+
+    case $- in
+        *e*) errexit_set=1 ;;
+    esac
 
     for model in "${models[@]}"; do
         # Check circuit breaker
         if ! should_call_model "$model" 2>/dev/null; then
-            log_warn "Skipping $model (circuit breaker open)" 2>/dev/null || true
+            log_warn "[${TRACE_ID:-unknown}] Skipping $model (circuit breaker open)" 2>/dev/null || true
             continue
         fi
 
         # Check rate limit
         if is_rate_limited "$model"; then
-            local remaining
             remaining=$(get_rate_limit_remaining "$model")
-            log_warn "Skipping $model (rate limited for ${remaining}s)" 2>/dev/null || true
+            log_warn "[${TRACE_ID:-unknown}] Skipping $model (rate limited for ${remaining}s)" 2>/dev/null || true
             continue
         fi
 
         # Check retry budget per task (#78 fix)
         if [[ $task_retries -ge $EH_RETRY_BUDGET ]]; then
-            log_error "Task retry budget exhausted ($task_retries/$EH_RETRY_BUDGET)" 2>/dev/null || true
+            log_error "[${TRACE_ID:-unknown}] Task retry budget exhausted ($task_retries/$EH_RETRY_BUDGET)" 2>/dev/null || true
             return 1
         fi
 
-        log_info "Trying model: $model" 2>/dev/null || true
+        log_info "[${TRACE_ID:-unknown}] Trying model: $model (attempt $((task_retries + 1))/$EH_RETRY_BUDGET)" 2>/dev/null || true
 
-        # Execute with the model
-        local output
-        local result
+        # Execute with the model (disable set -e for error capture)
+        if [[ $errexit_set -eq 1 ]]; then
+            set +e
+        fi
         output=$("$executor" "$model" "$task" 2>&1)
         result=$?
+        if [[ $errexit_set -eq 1 ]]; then
+            set -e
+        fi
 
         if [[ $result -eq 0 ]]; then
             record_success "$model" 2>/dev/null || true
@@ -420,7 +481,6 @@ execute_with_fallback_chain() {
         fi
 
         # Record failure
-        local error_type
         error_type=$(detect_error_type "$output" $result)
         record_failure "$model" "$error_type" 2>/dev/null || true
 
@@ -433,7 +493,7 @@ execute_with_fallback_chain() {
         task_retries=$(increment_task_retry_count "$task_id")
 
         # Log fallback
-        local next_model="${models[$((${#models[@]} - 1))]}"
+        next_model="${models[$((${#models[@]} - 1))]}"
         for ((i=0; i<${#models[@]}; i++)); do
             if [[ "${models[$i]}" == "$model" && $((i+1)) -lt ${#models[@]} ]]; then
                 next_model="${models[$((i+1))]}"
@@ -446,7 +506,7 @@ execute_with_fallback_chain() {
         fi
     done
 
-    log_error "All models in fallback chain exhausted" 2>/dev/null || true
+    log_error "[${TRACE_ID:-unknown}] All models in fallback chain exhausted" 2>/dev/null || true
     return 1
 }
 
@@ -458,6 +518,7 @@ execute_with_fallback_chain() {
 detect_auth_expiry() {
     local output="$1"
     local output_lower
+
     output_lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')
 
     if echo "$output_lower" | grep -qE "(token expired|refresh token|reauth|re-authenticate|login again)"; then
@@ -471,17 +532,17 @@ detect_auth_expiry() {
 trigger_auth_refresh() {
     local model="$1"
 
-    log_warn "Auth refresh needed for $model" 2>/dev/null || true
+    log_warn "[${TRACE_ID:-unknown}] Auth refresh needed for $model" 2>/dev/null || true
 
     case "$model" in
         gemini)
-            log_info "Run 'gemini' interactively to re-authenticate" 2>/dev/null || true
+            log_info "[${TRACE_ID:-unknown}] Run 'gemini' interactively to re-authenticate" 2>/dev/null || true
             ;;
         codex)
-            log_info "Run 'codex auth' to re-authenticate" 2>/dev/null || true
+            log_info "[${TRACE_ID:-unknown}] Run 'codex auth' to re-authenticate" 2>/dev/null || true
             ;;
         claude)
-            log_info "Claude Code should auto-authenticate" 2>/dev/null || true
+            log_info "[${TRACE_ID:-unknown}] Claude Code should auto-authenticate" 2>/dev/null || true
             ;;
     esac
 }
@@ -496,6 +557,9 @@ detect_hung_process() {
     local pid="$1"
     local timeout="${2:-60}"
     local output_file="${3:-}"
+    local now
+    local last_modified
+    local age
 
     if [[ -z "$output_file" ]]; then
         # Just check if process is alive
@@ -506,13 +570,12 @@ detect_hung_process() {
     fi
 
     # Check if output file has been modified recently
-    local now
     now=$(date +%s)
-    local last_modified
     last_modified=$(stat -c %Y "$output_file" 2>/dev/null || stat -f %m "$output_file" 2>/dev/null || echo 0)
-    local age=$((now - last_modified))
+    age=$((now - last_modified))
 
     if [[ $age -gt $timeout ]]; then
+        log_warn "[${TRACE_ID:-unknown}] Process $pid appears hung (no output for ${age}s)" 2>/dev/null || true
         return 0  # Hung (no output for too long)
     fi
 
@@ -524,6 +587,8 @@ kill_hung_process() {
     local pid="$1"
     local grace_period="${2:-5}"
 
+    log_warn "[${TRACE_ID:-unknown}] Killing hung process $pid" 2>/dev/null || true
+
     # Try SIGTERM first
     kill -TERM "$pid" 2>/dev/null || true
     sleep "$grace_period"
@@ -531,6 +596,7 @@ kill_hung_process() {
     # Check if still running
     if kill -0 "$pid" 2>/dev/null; then
         # Force kill
+        log_warn "[${TRACE_ID:-unknown}] Force killing process $pid (SIGTERM failed)" 2>/dev/null || true
         kill -KILL "$pid" 2>/dev/null || true
     fi
 }
@@ -542,6 +608,24 @@ kill_hung_process() {
 # Get user-friendly error message
 get_error_message() {
     local error_type="$1"
+    if ! declare -p ERROR_TYPES >/dev/null 2>&1; then
+        declare -A ERROR_TYPES=(
+            ["RATE_LIMIT"]="Rate limit exceeded"
+            ["AUTH_ERROR"]="Authentication failed"
+            ["TIMEOUT"]="Request timed out"
+            ["MODEL_UNAVAILABLE"]="Model not available"
+            ["NETWORK_ERROR"]="Network connectivity issue"
+            ["INVALID_REQUEST"]="Invalid request format"
+            ["CONTEXT_TOO_LONG"]="Context exceeds limit"
+            ["HUNG_PROCESS"]="Process appears hung"
+            ["CODEX_REASONING_ERROR"]="Codex reasoning budget exceeded"
+            ["CODEX_CONTEXT_ERROR"]="Codex context compaction failed"
+            ["CODEX_SANDBOX_ERROR"]="Codex sandbox permission denied"
+            ["CODEX_OUTPUT_ERROR"]="Codex output token limit exceeded"
+            ["UNKNOWN"]="Unknown error"
+        )
+    fi
+
     echo "${ERROR_TYPES[$error_type]:-Unknown error}"
 }
 
@@ -582,6 +666,7 @@ suggest_recovery() {
 # Load error handling config from config file
 load_error_config() {
     local config="${1:-${CONFIG_DIR:-$HOME/.claude/autonomous/config}/tri-agent.yaml}"
+    local model
 
     if [[ ! -f "$config" ]]; then
         return 0

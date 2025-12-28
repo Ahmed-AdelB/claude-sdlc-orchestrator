@@ -103,7 +103,9 @@ while [[ -L "$SCRIPT_PATH" ]]; do
     [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
-LIB_DIR="$(dirname "$SCRIPT_DIR")/lib"
+# Honor env override for AUTONOMOUS_ROOT, fall back to repo root
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
 
 # Source common utilities with workaround for strict mode issues
 # Set LOG_LEVEL before sourcing to avoid unbound variable issues
@@ -116,11 +118,12 @@ else
     # Fallback to basic strict mode if common.sh not found
     set -euo pipefail
     echo "[WARN] common.sh not found, running with basic settings" >&2
-    AUTONOMOUS_ROOT="${HOME}/.claude/autonomous"
+    AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-${HOME}/.claude/autonomous}"
     CONFIG_DIR="${AUTONOMOUS_ROOT}/config"
     LOG_DIR="${AUTONOMOUS_ROOT}/logs"
     BIN_DIR="${AUTONOMOUS_ROOT}/bin"
-    TRACE_ID="tri-$(date +%Y%m%d%H%M%S)-$$"
+    TRACE_ID="${TRACE_ID:-tri-$(date +%Y%m%d%H%M%S)-$$}"
+    export TRACE_ID
 fi
 
 # =============================================================================
@@ -584,6 +587,21 @@ run_consensus() {
 
     log_info "Running tri-agent consensus..."
 
+    local claude_pid="" gemini_pid="" codex_pid=""
+
+    cleanup_consensus() {
+        for pid in "$claude_pid" "$gemini_pid" "$codex_pid"; do
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+                sleep 1
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+        [[ -n "$temp_dir" ]] && rm -rf "$temp_dir"
+    }
+
+    trap cleanup_consensus EXIT INT TERM
+
     # Build file args for delegates
     local file_args=""
     for file in "${INPUT_FILES[@]}"; do
@@ -594,17 +612,17 @@ run_consensus() {
     (
         execute_claude "$prompt" > "${temp_dir}/claude.txt" 2>&1
     ) &
-    local claude_pid=$!
+    claude_pid=$!
 
     (
         execute_gemini "$prompt" > "${temp_dir}/gemini.txt" 2>&1
     ) &
-    local gemini_pid=$!
+    gemini_pid=$!
 
     (
         execute_codex "$prompt" > "${temp_dir}/codex.txt" 2>&1
     ) &
-    local codex_pid=$!
+    codex_pid=$!
 
     # Wait for all to complete
     wait $claude_pid 2>/dev/null || true

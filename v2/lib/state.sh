@@ -17,6 +17,60 @@
 : "${CONFIG_DIR:=$HOME/.claude/autonomous/config}"
 
 # =============================================================================
+# Lock Cleanup on Exit
+# =============================================================================
+# Track active locks for cleanup on signal/exit
+declare -g -a ACTIVE_LOCK_FDS=()
+declare -g LAST_LOCK_FD=""
+
+_register_lock_fd() {
+    local fd="$1"
+    [[ -z "$fd" ]] && return 0
+    ACTIVE_LOCK_FDS+=("$fd")
+}
+
+_unregister_lock_fd() {
+    local fd="$1"
+    local updated=()
+    local current
+    for current in "${ACTIVE_LOCK_FDS[@]}"; do
+        [[ "$current" == "$fd" ]] && continue
+        updated+=("$current")
+    done
+    ACTIVE_LOCK_FDS=("${updated[@]}")
+}
+
+_lock_name_for_path() {
+    local prefix="$1"
+    local path="$2"
+    local hash
+
+    if command -v md5sum &>/dev/null; then
+        hash=$(printf '%s' "$path" | md5sum | cut -d' ' -f1)
+    elif command -v shasum &>/dev/null; then
+        hash=$(printf '%s' "$path" | shasum -a 1 | cut -d' ' -f1)
+    else
+        hash=$(printf '%s' "$path" | tr '/' '_' | tr -cd '[:alnum:]_')
+    fi
+
+    echo "${prefix}_${hash}"
+}
+
+_cleanup_locks() {
+    local fd
+    for fd in "${ACTIVE_LOCK_FDS[@]}"; do
+        if [[ -n "$fd" ]]; then
+            exec {fd}>&- 2>/dev/null || true
+        fi
+    done
+    ACTIVE_LOCK_FDS=()
+    LAST_LOCK_FD=""
+}
+
+# Register cleanup handlers for signals
+trap '_cleanup_locks' EXIT INT TERM
+
+# =============================================================================
 # File Locking
 # =============================================================================
 
@@ -26,25 +80,32 @@ with_lock() {
     local lock_name="$1"
     shift
     local lock_file="${LOCKS_DIR}/${lock_name}.lock"
+    local result=0
+    local fd
 
     # Ensure locks directory exists
     mkdir -p "${LOCKS_DIR}"
 
-    # Use file descriptor 9 for the lock
-    exec 9>"${lock_file}"
+    if ! exec {fd}>"${lock_file}"; then
+        log_error "[${TRACE_ID:-unknown}] Failed to open lock file: ${lock_name}" 2>/dev/null || true
+        return 1
+    fi
+    _register_lock_fd "$fd"
 
     # Try to acquire exclusive lock (blocks until available)
-    if ! flock -x 9; then
-        log_error "Failed to acquire lock: ${lock_name}"
+    if ! flock -x "$fd"; then
+        log_error "[${TRACE_ID:-unknown}] Failed to acquire lock: ${lock_name}" 2>/dev/null || true
+        exec {fd}>&-
+        _unregister_lock_fd "$fd"
         return 1
     fi
 
     # Execute the command
-    local result=0
     "$@" || result=$?
 
-    # Lock is automatically released when fd 9 is closed (script exit or exec 9>&-)
-    exec 9>&-
+    # Lock is automatically released when fd is closed
+    exec {fd}>&-
+    _unregister_lock_fd "$fd"
 
     return $result
 }
@@ -54,22 +115,35 @@ with_lock() {
 try_lock() {
     local lock_name="$1"
     local lock_file="${LOCKS_DIR}/${lock_name}.lock"
+    local fd
 
     mkdir -p "${LOCKS_DIR}"
-    exec 9>"${lock_file}"
+    if ! exec {fd}>"${lock_file}"; then
+        return 1
+    fi
 
     # Non-blocking lock attempt
-    if flock -n -x 9; then
+    if flock -n -x "$fd"; then
+        LAST_LOCK_FD="$fd"
+        _register_lock_fd "$fd"
         return 0  # Lock acquired
     else
-        exec 9>&-
+        exec {fd}>&-
         return 1  # Already locked
     fi
 }
 
 # Release a lock (usually handled automatically by fd close)
 release_lock() {
-    exec 9>&- 2>/dev/null || true
+    local fd="${1:-${LAST_LOCK_FD:-}}"
+    if [[ -z "$fd" ]]; then
+        return 0
+    fi
+    exec {fd}>&- 2>/dev/null || true
+    _unregister_lock_fd "$fd"
+    if [[ "${LAST_LOCK_FD:-}" == "$fd" ]]; then
+        LAST_LOCK_FD=""
+    fi
 }
 
 # Acquire a lock with timeout
@@ -79,21 +153,28 @@ with_lock_timeout() {
     local timeout="$2"
     shift 2
     local lock_file="${LOCKS_DIR}/${lock_name}.lock"
+    local fd
 
     mkdir -p "${LOCKS_DIR}"
-    exec 9>"${lock_file}"
+    if ! exec {fd}>"${lock_file}"; then
+        log_error "Failed to open lock file: ${lock_name}"
+        return 1
+    fi
+    _register_lock_fd "$fd"
 
     # Try to acquire lock with timeout
-    if ! flock -x -w "${timeout}" 9; then
+    if ! flock -x -w "${timeout}" "$fd"; then
         log_error "Lock timeout after ${timeout}s: ${lock_name}"
-        exec 9>&-
+        exec {fd}>&-
+        _unregister_lock_fd "$fd"
         return 1
     fi
 
     local result=0
     "$@" || result=$?
 
-    exec 9>&-
+    exec {fd}>&-
+    _unregister_lock_fd "$fd"
     return $result
 }
 
@@ -101,17 +182,20 @@ with_lock_timeout() {
 is_locked() {
     local lock_name="$1"
     local lock_file="${LOCKS_DIR}/${lock_name}.lock"
+    local fd
 
     [[ -f "$lock_file" ]] || return 1
 
     # Try non-blocking lock
-    exec 8>"${lock_file}"
-    if flock -n -x 8 2>/dev/null; then
-        flock -u 8
-        exec 8>&-
+    if ! exec {fd}>"${lock_file}"; then
+        return 1
+    fi
+    if flock -n -x "$fd" 2>/dev/null; then
+        flock -u "$fd"
+        exec {fd}>&-
         return 1  # Not locked
     else
-        exec 8>&-
+        exec {fd}>&-
         return 0  # Locked
     fi
 }
@@ -127,6 +211,7 @@ atomic_write() {
     local dest="$1"
     local content="${2:-}"
     local dest_dir
+    local tmp
     dest_dir="$(dirname "$dest")"
 
     # Ensure destination directory exists
@@ -134,25 +219,42 @@ atomic_write() {
 
     # Create secure temp file in same directory (important for atomic mv)
     # Use mktemp with proper directory and random suffix (#89)
-    local tmp
-    tmp="$(mktemp -p "$dest_dir" ".$(basename "$dest").tmp.XXXXXXXXXX")"
+    tmp="$(mktemp -p "$dest_dir" ".$(basename "$dest").tmp.XXXXXXXXXX")" || {
+        log_error "[${TRACE_ID:-unknown}] Failed to create temp file for atomic write" 2>/dev/null || true
+        return 1
+    }
+
+    # Ensure cleanup on error
+    trap "rm -f '$tmp' 2>/dev/null || true" RETURN
 
     # Set restrictive permissions immediately
     chmod 600 "$tmp"
 
-    # Write content
+    # Write content (with error handling)
     if [[ -n "$content" ]]; then
-        printf '%s' "$content" > "$tmp"
+        printf '%s' "$content" > "$tmp" || {
+            log_error "[${TRACE_ID:-unknown}] Failed to write content to temp file" 2>/dev/null || true
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        }
     else
         # Read from stdin
-        cat > "$tmp"
+        cat > "$tmp" || {
+            log_error "[${TRACE_ID:-unknown}] Failed to read stdin to temp file" 2>/dev/null || true
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        }
     fi
 
     # Sync to disk before move (optional, for durability)
     sync "$tmp" 2>/dev/null || true
 
     # Atomic move
-    mv "$tmp" "$dest"
+    mv "$tmp" "$dest" || {
+        log_error "[${TRACE_ID:-unknown}] Failed to move temp file to destination" 2>/dev/null || true
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    }
 }
 
 # Append content to a file atomically (via lock + append)
@@ -161,14 +263,9 @@ atomic_append() {
     local file="$1"
     local content="$2"
     local lock_name
-    
+
     # Use hash of full path to avoid collisions (#85 fix)
-    if command -v md5sum &>/dev/null; then
-        lock_name="append_$(echo "$file" | md5sum | cut -d' ' -f1)"
-    else
-        # Fallback to replaced path if md5sum missing
-        lock_name="append_$(echo "$file" | tr '/' '_')"
-    fi
+    lock_name="$(_lock_name_for_path "append" "$file")"
 
     with_lock "${lock_name}" _do_append "$file" "$content"
 }
@@ -198,17 +295,12 @@ safe_read() {
 atomic_increment() {
     local file="$1"
     local lock_name
-    
+    local result
+
     # Use hash of full path to avoid collisions (#85 fix)
-    if command -v md5sum &>/dev/null; then
-        lock_name="counter_$(echo "$file" | md5sum | cut -d' ' -f1)"
-    else
-        # Fallback to replaced path if md5sum missing
-        lock_name="counter_$(echo "$file" | tr '/' '_')"
-    fi
+    lock_name="$(_lock_name_for_path "counter" "$file")"
 
     # Use a wrapper to ensure output is properly captured (#85)
-    local result
     result=$(with_lock "$lock_name" _do_increment "$file")
     echo "$result"
 }
@@ -246,9 +338,9 @@ state_get() {
     local file="$1"
     local key="$2"
     local default="${3:-}"
+    local value
 
     if [[ -f "$file" ]]; then
-        local value
         value=$(grep -E "^${key}=" "$file" 2>/dev/null | head -1 | cut -d'=' -f2-)
         echo "${value:-$default}"
     else
@@ -263,7 +355,8 @@ state_set() {
     local key="$2"
     local value="$3"
     local lock_name
-    lock_name="state_$(basename "$file" | tr '.' '_')"
+
+    lock_name="$(_lock_name_for_path "state" "$file")"
 
     with_lock "$lock_name" _do_state_set "$file" "$key" "$value"
 }
@@ -272,12 +365,15 @@ _do_state_set() {
     local file="$1"
     local key="$2"
     local value="$3"
+    local tmp
 
     mkdir -p "$(dirname "$file")"
 
     # Create new content with updated key
-    local tmp
-    tmp="$(mktemp)"
+    tmp="$(mktemp)" || return 1
+
+    # Ensure cleanup on error
+    trap "rm -f '$tmp' 2>/dev/null || true" RETURN
 
     # Copy existing entries except the one we're updating
     if [[ -f "$file" ]]; then
@@ -296,13 +392,13 @@ _do_state_set() {
 state_delete() {
     local file="$1"
     local key="$2"
+    local lock_name
 
     if [[ ! -f "$file" ]]; then
         return 0
     fi
 
-    local lock_name
-    lock_name="state_$(basename "$file" | tr '.' '_')"
+    lock_name="$(_lock_name_for_path "state" "$file")"
 
     with_lock "$lock_name" _do_state_delete "$file" "$key"
 }
@@ -310,9 +406,11 @@ state_delete() {
 _do_state_delete() {
     local file="$1"
     local key="$2"
-
     local tmp
-    tmp="$(mktemp)"
+
+    tmp="$(mktemp)" || return 1
+    trap "rm -f '$tmp' 2>/dev/null || true" RETURN
+
     grep -v -E "^${key}=" "$file" > "$tmp" 2>/dev/null || true
     mv "$tmp" "$file"
 }
@@ -325,30 +423,31 @@ _do_state_delete() {
 # Returns 0 if valid, 1 if invalid
 validate_config() {
     local cfg="${1:-$CONFIG_DIR/tri-agent.yaml}"
+    local has_models
+    local has_routing
 
     if [[ ! -f "$cfg" ]]; then
-        log_error "Config file not found: $cfg"
+        log_error "[${TRACE_ID:-unknown}] Config file not found: $cfg" 2>/dev/null || true
         return 1
     fi
 
     # Try yq first (faster)
     if command -v yq &>/dev/null; then
         if ! yq eval '.' "$cfg" &>/dev/null; then
-            log_error "Invalid YAML syntax in: $cfg"
+            log_error "[${TRACE_ID:-unknown}] Invalid YAML syntax in: $cfg" 2>/dev/null || true
             return 1
         fi
 
         # Check required sections
-        local has_models has_routing
         has_models=$(yq eval '.models // ""' "$cfg")
         has_routing=$(yq eval '.routing // ""' "$cfg")
 
         if [[ -z "$has_models" || "$has_models" == "null" ]]; then
-            log_error "Config missing required 'models' section"
+            log_error "[${TRACE_ID:-unknown}] Config missing required 'models' section" 2>/dev/null || true
             return 1
         fi
         if [[ -z "$has_routing" || "$has_routing" == "null" ]]; then
-            log_error "Config missing required 'routing' section"
+            log_error "[${TRACE_ID:-unknown}] Config missing required 'routing' section" 2>/dev/null || true
             return 1
         fi
 
@@ -449,7 +548,18 @@ cleanup_stale_locks() {
         return 0
     fi
 
-    find "$LOCKS_DIR" -name "*.lock" -type f -mmin "+$((max_age / 60))" -delete 2>/dev/null || true
+    local lock_file
+    local fd
+
+    while IFS= read -r -d '' lock_file; do
+        if ! exec {fd}>"$lock_file"; then
+            continue
+        fi
+        if flock -n -x "$fd" 2>/dev/null; then
+            rm -f "$lock_file" 2>/dev/null || true
+        fi
+        exec {fd}>&-
+    done < <(find "$LOCKS_DIR" -name "*.lock" -type f -mmin "+$((max_age / 60))" -print0 2>/dev/null || true)
 }
 
 # Cleanup old state files
@@ -472,13 +582,20 @@ export -f try_lock
 export -f release_lock
 export -f with_lock_timeout
 export -f is_locked
+export -f _register_lock_fd
+export -f _unregister_lock_fd
+export -f _lock_name_for_path
 export -f atomic_write
 export -f atomic_append
+export -f _do_append
 export -f safe_read
 export -f atomic_increment
+export -f _do_increment
 export -f state_get
 export -f state_set
+export -f _do_state_set
 export -f state_delete
+export -f _do_state_delete
 export -f validate_config
 export -f validate_config_schema
 export -f cleanup_stale_locks

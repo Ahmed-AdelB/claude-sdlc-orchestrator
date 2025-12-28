@@ -90,8 +90,9 @@ while [[ -L "$SCRIPT_PATH" ]]; do
     [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
-LIB_DIR="$(dirname "$SCRIPT_DIR")/lib"
-AUTONOMOUS_ROOT="$(dirname "$SCRIPT_DIR")"
+# Honor env override for AUTONOMOUS_ROOT, fall back to repo root
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
 
 # Directory paths
 CONFIG_DIR="${AUTONOMOUS_ROOT}/config"
@@ -137,8 +138,13 @@ _consensus_log() {
     local timestamp
     local color=""
     local reset=""
+    local trace_prefix=""
 
     timestamp="$(date +%H:%M:%S)"
+
+    if [[ -n "${TRACE_ID:-}" ]]; then
+        trace_prefix="[${TRACE_ID}]"
+    fi
 
     if [[ -t 2 ]]; then
         reset='\033[0m'
@@ -150,7 +156,7 @@ _consensus_log() {
         esac
     fi
 
-    printf "${color}[%s][%s][CONSENSUS]${reset} %s\n" "$timestamp" "$level" "$message" >&2
+    printf "${color}[%s][%s][CONSENSUS]%s${reset} %s\n" "$timestamp" "$level" "$trace_prefix" "$message" >&2
 }
 
 log_debug() { [[ "${DEBUG:-0}" == "1" ]] && _consensus_log "DEBUG" "$*" || true; }
@@ -175,7 +181,8 @@ read_config() {
 
     # Try yq first
     if command -v yq &>/dev/null; then
-        value=$(yq -r "$key // \"\"" "$config" 2>/dev/null || echo "")
+        value=$(yq -r "$key" "$config" 2>/dev/null || echo "")
+        [[ "$value" == "null" ]] && value=""
     # Fall back to python3
     elif command -v python3 &>/dev/null; then
         value=$(python3 -c "
@@ -187,7 +194,10 @@ try:
     v = cfg
     for k in keys:
         v = v.get(k, {}) if isinstance(v, dict) else {}
-    print(v if v and v != {} else '')
+    if v is None or (isinstance(v, dict) and v == {}):
+        print('')
+    else:
+        print(v)
 except:
     print('')
 " 2>/dev/null || echo "")
@@ -395,7 +405,7 @@ query_model() {
                 "${BIN_DIR}/claude-delegate" --timeout "$timeout" "$prompt" > "$output_file"
             else
                 # Fallback to direct CLI
-                timeout "$timeout" claude --dangerously-skip-permissions -p "$prompt" 2>&1 > "$output_file"
+                timeout "$timeout" claude --dangerously-skip-permissions -p "$prompt" > "$output_file" 2>&1
             fi
             ;;
         gemini)
@@ -403,9 +413,9 @@ query_model() {
             if [[ -x "${BIN_DIR}/gemini-delegate" ]]; then
                 "${BIN_DIR}/gemini-delegate" --timeout "$timeout" "$prompt" > "$output_file"
             elif [[ -x "${BIN_DIR:-$SCRIPT_DIR}/gemini-ask" ]]; then
-                timeout "$timeout" "${BIN_DIR:-$SCRIPT_DIR}/gemini-ask" "$prompt" 2>&1 > "$output_file"
+                timeout "$timeout" "${BIN_DIR:-$SCRIPT_DIR}/gemini-ask" "$prompt" > "$output_file" 2>&1
             else
-                timeout "$timeout" gemini -m gemini-3-pro-preview --approval-mode yolo "$prompt" 2>&1 > "$output_file"
+                timeout "$timeout" gemini -m gemini-3-pro-preview --approval-mode yolo "$prompt" > "$output_file" 2>&1
             fi
             ;;
         codex)
@@ -413,9 +423,9 @@ query_model() {
             if [[ -x "${BIN_DIR}/codex-delegate" ]]; then
                 "${BIN_DIR}/codex-delegate" --timeout "$timeout" "$prompt" > "$output_file"
             elif [[ -x "${BIN_DIR:-$SCRIPT_DIR}/codex-ask" ]]; then
-                timeout "$timeout" "${BIN_DIR:-$SCRIPT_DIR}/codex-ask" "$prompt" 2>&1 > "$output_file"
+                timeout "$timeout" "${BIN_DIR:-$SCRIPT_DIR}/codex-ask" "$prompt" > "$output_file" 2>&1
             else
-                timeout "$timeout" codex exec --skip-git-repo-check "$prompt" 2>&1 > "$output_file"
+                timeout "$timeout" codex exec --skip-git-repo-check "$prompt" > "$output_file" 2>&1
             fi
             ;;
     esac
@@ -447,62 +457,39 @@ parse_verdict() {
     local model="$2"
 
     if [[ ! -f "$response_file" ]]; then
-        echo '{"verdict": "ERROR", "confidence": 0, "reasoning": "No response file", "error": true}'
+        echo '{"verdict": "ERROR", "confidence": 0, "reasoning": "No response file", "model": "'"$model"'", "error": true}'
         return 1
     fi
 
     local content
     content=$(cat "$response_file")
+    local json_content=""
+
+    # Attempt to extract JSON from markdown code block first
+    if echo "$content" | grep -q '```json'; then
+        json_content=$(echo "$content" | sed -n '/```json/,/```/p' | sed '1d;$d')
+    else
+        # Assume the entire content is JSON or contains a JSON object
+        # This is a bit brittle, but handles raw JSON output
+        json_content="$content"
+    fi
     
-    # Try parsing as delegate envelope first (#84 fix)
-    # Check if content looks like our JSON envelope
-    if echo "$content" | jq -e '.decision and .confidence and .status' >/dev/null 2>&1; then
-        # It's likely a delegate envelope
-        local decision confidence reasoning status
-        
-        status=$(echo "$content" | jq -r '.status // "error"')
-        
-        if [[ "$status" == "success" ]]; then
-            decision=$(echo "$content" | jq -r '.decision // "ABSTAIN"')
-            confidence=$(echo "$content" | jq -r '.confidence // 0')
-            reasoning=$(echo "$content" | jq -r '.reasoning // "No reasoning provided"')
-            
-            # Return normalized JSON
-            jq -nc \
-                --arg verdict "$decision" \
-                --argjson confidence "$confidence" \
-                --arg reasoning "$reasoning" \
-                --arg model "$model" \
-                '{
-                    verdict: $verdict,
-                    confidence: $confidence,
-                    reasoning: $reasoning,
-                    model: $model,
-                    error: false
-                }'
-            return 0
+    # Fallback for simple keyword responses if JSON extraction fails
+    if ! echo "$json_content" | jq -e . >/dev/null 2>&1; then
+        if echo "$content" | grep -qiE '\b(APPROVE|REJECT|ABSTAIN)\b'; then
+            local keyword_verdict
+            keyword_verdict=$(echo "$content" | grep -oiE '\b(APPROVE|REJECT|ABSTAIN)\b' | head -1 | tr '[:lower:]' '[:upper:]')
+            json_content=$(jq -nc --arg verdict "$keyword_verdict" '{verdict: $verdict, confidence: 0.7, reasoning: "Extracted from unstructured keyword response"}')
+        else
+            # No JSON, no keyword, it's a failure
+            echo '{"verdict": "ABSTAIN", "confidence": 0, "reasoning": "Failed to parse model response (no valid JSON or keyword)", "model": "'"$model"'", "error": true}'
+            return 1
         fi
     fi
 
-    # Try to extract JSON block from response (legacy fallback)
-    local json_content=""
-
-    # Method 1: Look for ```json ... ``` block
-    if echo "$content" | grep -q '```json'; then
-        json_content=$(echo "$content" | sed -n '/```json/,/```/p' | sed '1d;$d')
-    # Method 2: Look for raw JSON object
-    elif echo "$content" | grep -qE '^\s*\{.*"verdict"'; then
-        json_content=$(echo "$content" | grep -oE '\{[^}]*"verdict"[^}]*\}' | head -1)
-    # Method 3: Look for verdict keyword and construct JSON
-    elif echo "$content" | grep -qiE '\b(APPROVE|REJECT|ABSTAIN)\b'; then
-        local verdict
-        verdict=$(echo "$content" | grep -oiE '\b(APPROVE|REJECT|ABSTAIN)\b' | head -1 | tr '[:lower:]' '[:upper:]')
-        json_content="{\"verdict\": \"$verdict\", \"confidence\": 0.7, \"reasoning\": \"Extracted from unstructured response\"}"
-    fi
-
+    # At this point, we should have valid JSON in json_content
     # Validate and normalize the JSON
     if [[ -n "$json_content" ]] && echo "$json_content" | jq . &>/dev/null; then
-        # Ensure required fields exist
         local verdict confidence reasoning
         verdict=$(echo "$json_content" | jq -r '.verdict // "ABSTAIN"' | tr '[:lower:]' '[:upper:]')
         confidence=$(echo "$json_content" | jq -r '.confidence // 0.5')
@@ -511,14 +498,14 @@ parse_verdict() {
         # Normalize verdict
         case "$verdict" in
             APPROVE|REJECT|ABSTAIN)
-                ;;
+                ;; # Already correct
             YES|APPROVED|ACCEPT|PASS)
                 verdict="APPROVE"
                 ;;
             NO|REJECTED|DENY|FAIL)
                 verdict="REJECT"
                 ;;
-            *)
+            *) # If verdict is something else, treat as ABSTAIN
                 verdict="ABSTAIN"
                 ;;
         esac
@@ -537,7 +524,7 @@ parse_verdict() {
                 error: false
             }'
     else
-        # Could not parse, return error response
+        # Should not be reached if logic above is correct, but as a safeguard
         echo '{"verdict": "ABSTAIN", "confidence": 0, "reasoning": "Failed to parse model response", "model": "'"$model"'", "error": true}'
         return 1
     fi
@@ -742,6 +729,7 @@ main() {
 
     # Generate trace ID for this consensus session
     TRACE_ID="${TRACE_ID:-$(generate_trace_id consensus)}"
+    export TRACE_ID
 
     if [[ "$JSON_ONLY" != "true" ]]; then
         log_info "Starting tri-agent consensus vote"
@@ -763,10 +751,11 @@ main() {
     fi
 
     # Cleanup function to kill hung processes (#86 fix)
+    # Reads PIDs from variables set in parent scope
     cleanup_processes() {
-        local pids=("$@")
-        for pid in "${pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
+        # Kill background processes if still running
+        for pid in "$claude_pid" "$gemini_pid" "$codex_pid"; do
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
                 log_debug "Killing hung process $pid"
                 kill -TERM "$pid" 2>/dev/null || true
                 sleep 1
@@ -776,10 +765,9 @@ main() {
                 fi
             fi
         done
-        rm -rf "$temp_dir"
+        # Clean up temp directory
+        [[ -n "$temp_dir" ]] && rm -rf "$temp_dir"
     }
-
-    trap "cleanup_processes \$claude_pid \$gemini_pid \$codex_pid" EXIT INT TERM
 
     # Build the consensus prompt
     local prompt
@@ -790,7 +778,10 @@ main() {
         log_info "Querying Claude, Gemini, and Codex in parallel..."
     fi
 
-    local claude_pid gemini_pid codex_pid
+    local claude_pid="" gemini_pid="" codex_pid=""
+
+    # Set trap AFTER declaring PID variables (so cleanup can access them)
+    trap cleanup_processes EXIT INT TERM
 
     # Start all queries in background
     query_model "claude" "$prompt" "$temp_dir/claude.txt" "$MODEL_TIMEOUT" &
@@ -805,31 +796,44 @@ main() {
     # Wait for all to complete with global timeout (#86 fix)
     local global_timeout=$((MODEL_TIMEOUT * 3 + 30))
     local wait_start=$(date +%s)
-    local claude_exit=0 gemini_exit=0 codex_exit=0
+    # Use -1 to indicate "not yet waited on" (0 would be ambiguous with success)
+    local claude_exit=-1 gemini_exit=-1 codex_exit=-1
 
     # Wait for each process with timeout check
     while [[ $(date +%s) -lt $((wait_start + global_timeout)) ]]; do
         local all_done=true
 
         # Check Claude
-        if [[ $claude_exit -eq 0 ]] && kill -0 "$claude_pid" 2>/dev/null; then
+        if [[ $claude_exit -eq -1 ]] && kill -0 "$claude_pid" 2>/dev/null; then
             all_done=false
-        elif [[ $claude_exit -eq 0 ]]; then
-            wait "$claude_pid" 2>/dev/null || claude_exit=$?
+        elif [[ $claude_exit -eq -1 ]]; then
+            if wait "$claude_pid" 2>/dev/null; then
+                claude_exit=0
+            else
+                claude_exit=$?
+            fi
         fi
 
         # Check Gemini
-        if [[ $gemini_exit -eq 0 ]] && kill -0 "$gemini_pid" 2>/dev/null; then
+        if [[ $gemini_exit -eq -1 ]] && kill -0 "$gemini_pid" 2>/dev/null; then
             all_done=false
-        elif [[ $gemini_exit -eq 0 ]]; then
-            wait "$gemini_pid" 2>/dev/null || gemini_exit=$?
+        elif [[ $gemini_exit -eq -1 ]]; then
+            if wait "$gemini_pid" 2>/dev/null; then
+                gemini_exit=0
+            else
+                gemini_exit=$?
+            fi
         fi
 
         # Check Codex
-        if [[ $codex_exit -eq 0 ]] && kill -0 "$codex_pid" 2>/dev/null; then
+        if [[ $codex_exit -eq -1 ]] && kill -0 "$codex_pid" 2>/dev/null; then
             all_done=false
-        elif [[ $codex_exit -eq 0 ]]; then
-            wait "$codex_pid" 2>/dev/null || codex_exit=$?
+        elif [[ $codex_exit -eq -1 ]]; then
+            if wait "$codex_pid" 2>/dev/null; then
+                codex_exit=0
+            else
+                codex_exit=$?
+            fi
         fi
 
         if [[ "$all_done" == "true" ]]; then
@@ -844,10 +848,17 @@ main() {
         if kill -0 "$pid" 2>/dev/null; then
             log_warn "Process $pid exceeded global timeout, force killing"
             kill -KILL "$pid" 2>/dev/null || true
+            if [[ "$pid" == "$claude_pid" ]]; then
+                claude_exit=124
+            elif [[ "$pid" == "$gemini_pid" ]]; then
+                gemini_exit=124
+            elif [[ "$pid" == "$codex_pid" ]]; then
+                codex_exit=124
+            fi
         fi
     done
 
-    # Count successful responses
+    # Count successful responses (exit code 0, not -1 which means not waited on)
     local success_count=0
     [[ $claude_exit -eq 0 ]] && ((success_count++))
     [[ $gemini_exit -eq 0 ]] && ((success_count++))

@@ -35,7 +35,8 @@ while [[ -L "$SCRIPT_PATH" ]]; do
     [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
-AUTONOMOUS_ROOT="$(dirname "$SCRIPT_DIR")"
+# Honor env override for AUTONOMOUS_ROOT, fall back to repo root
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 
 # shellcheck source=../lib/common.sh
 source "${AUTONOMOUS_ROOT}/lib/common.sh"
@@ -603,7 +604,12 @@ main() {
                 echo "Circuit Breakers:"
                 for model in claude gemini codex; do
                     local state
-                    state=$(_read_breaker_state "$model" 2>/dev/null || echo "UNKNOWN")
+                    # Use public API from circuit-breaker.sh
+                    if command -v get_breaker_status &>/dev/null; then
+                        state=$(get_breaker_status "$model" 2>/dev/null | jq -r '.state // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+                    else
+                        state="UNKNOWN"
+                    fi
                     echo "  $model: $state"
                 done
             fi

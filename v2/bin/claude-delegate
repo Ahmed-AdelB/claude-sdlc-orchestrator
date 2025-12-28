@@ -38,7 +38,7 @@ if [[ -f "${LIB_DIR}/common.sh" ]]; then
     # shellcheck source=../lib/common.sh
     source "${LIB_DIR}/common.sh"
 else
-    echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"common.sh not found","output":"","trace_id":"unknown","duration_ms":0}' >&2
+    echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"common.sh not found","output":"","trace_id":"unknown","duration_ms":0}'
     exit 1
 fi
 
@@ -99,6 +99,12 @@ PROMPT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --timeout)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing timeout value, using default $DEFAULT_TIMEOUT"
+                TIMEOUT=$DEFAULT_TIMEOUT
+                shift
+                continue
+            fi
             TIMEOUT="$2"
             # Validate timeout is a positive number
             if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [[ $TIMEOUT -lt 1 ]]; then
@@ -110,6 +116,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --model)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing model value, using default $DEFAULT_MODEL"
+                MODEL="$DEFAULT_MODEL"
+                shift
+                continue
+            fi
             MODEL="$2"
             if [[ -z "$MODEL" || "$MODEL" == -* ]]; then
                 log_warn "Invalid model value: $MODEL, using default $DEFAULT_MODEL"
@@ -118,6 +130,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --max-budget-usd)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing max budget value, using default $DEFAULT_MAX_BUDGET_USD"
+                MAX_BUDGET_USD="$DEFAULT_MAX_BUDGET_USD"
+                shift
+                continue
+            fi
             MAX_BUDGET_USD="$2"
             if ! [[ "$MAX_BUDGET_USD" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
                 log_warn "Invalid max budget value: $MAX_BUDGET_USD, using default $DEFAULT_MAX_BUDGET_USD"
@@ -126,6 +144,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --fallback-model)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing fallback model value, using default $DEFAULT_FALLBACK_MODEL"
+                FALLBACK_MODEL="$DEFAULT_FALLBACK_MODEL"
+                shift
+                continue
+            fi
             FALLBACK_MODEL="$2"
             if [[ -z "$FALLBACK_MODEL" || "$FALLBACK_MODEL" == -* ]]; then
                 log_warn "Invalid fallback model value: $FALLBACK_MODEL, using default $DEFAULT_FALLBACK_MODEL"
@@ -156,36 +180,67 @@ done
 # Helper Functions
 #===============================================================================
 
-# Output JSON error and exit
-json_error() {
-    local msg="$1"
-    echo "$msg"
-    exit 1
+# Output JSON envelope
+# Usage: json_output <status> <decision> <confidence> <reasoning> <output> [duration_ms]
+json_output() {
+    local status="$1"
+    local decision="$2"
+    local confidence="$3"
+    local reasoning="$4"
+    local output="$5"
+    local duration_ms="${6:-}"
+
+    if [[ -z "$duration_ms" ]]; then
+        # Handle case where START_MS might not be set (e.g., early exit)
+        if [[ -z "${START_MS:-}" ]]; then
+            START_MS=$(epoch_ms)
+        fi
+        duration_ms=$(( $(epoch_ms) - START_MS ))
+    fi
+
+    # Ensure jq is available
+    if ! command_exists jq; then
+        # Fallback to simple echo if jq is missing
+        echo "{\"model\":\"claude\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"jq command not found, cannot format JSON.\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${duration_ms}}"
+        exit 1
+    fi
+
+    jq -n \
+        --arg model "claude" \
+        --arg status "$status" \
+        --arg decision "$decision" \
+        --arg confidence "$confidence" \
+        --arg reasoning "$reasoning" \
+        --arg output "$output" \
+        --arg trace_id "$TRACE_ID" \
+        --argjson duration_ms "$duration_ms" \
+        '{model: $model, status: $status, decision: $decision, confidence: ($confidence | tonumber), reasoning: $reasoning, output: $output, trace_id: $trace_id, duration_ms: $duration_ms}'
+}
+
+# Local wrapper for secret masking (compat with common.sh exports)
+mask_secrets_local() {
+    local input="${1-}"
+    if type -t mask_secrets >/dev/null 2>&1; then
+        mask_secrets "$input"
+    else
+        printf '%s' "$input"
+    fi
 }
 
 #===============================================================================
 # Validate Input
 #===============================================================================
 if [[ -z "$PROMPT" ]]; then
-    echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"No prompt provided","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    json_output "error" "ABSTAIN" "0.0" "No prompt provided" "" 0
     exit 1
 fi
 
 # Check if Claude CLI exists
 if ! command_exists "$CLAUDE_CMD"; then
-    echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"Claude CLI not found","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    json_output "error" "ABSTAIN" "0.0" "Claude CLI not found" "" 0
     exit 1
 fi
 
-# Escape string for JSON (using jq for reliable escaping)
-json_escape() {
-    local str="$1"
-    # Use jq for reliable JSON escaping (handles all control characters)
-    # Falls back to python, then sed if neither available
-    printf '%s' "$str" | jq -Rs '.[:-1]' 2>/dev/null | sed 's/^"//; s/"$//' || \
-    printf '%s' "$str" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null || \
-    printf '%s' "$str" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' | tr '\n' ' ' | head -c 10000
-}
 
 # Extract decision from output (APPROVE, REJECT, ABSTAIN)
 extract_decision() {
@@ -331,8 +386,7 @@ if [[ $EXIT_CODE -eq 124 ]]; then
     log_claude "ERROR" "DELEGATE_TIMEOUT" "Claude delegate timed out" \
         "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
 
-    ESCAPED_MSG=$(json_escape "Request timed out after ${TIMEOUT}s")
-    echo "{\"model\":\"claude\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    json_output "error" "ABSTAIN" "0.0" "Request timed out after ${TIMEOUT}s" "" "$DURATION_MS"
     exit 1
 
 elif [[ $EXIT_CODE -ne 0 ]]; then
@@ -341,9 +395,8 @@ elif [[ $EXIT_CODE -ne 0 ]]; then
         "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
 
     ERROR_MSG="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
-    ERROR_MSG=$(mask_secrets "$ERROR_MSG")
-    ESCAPED_MSG=$(json_escape "$ERROR_MSG")
-    echo "{\"model\":\"claude\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    MASKED_ERROR_MSG=$(mask_secrets_local "$ERROR_MSG")
+    json_output "error" "ABSTAIN" "0.0" "$MASKED_ERROR_MSG" "" "$DURATION_MS"
     exit 1
 fi
 
@@ -352,22 +405,12 @@ DECISION=$(extract_decision "$OUTPUT")
 CONFIDENCE=$(calculate_confidence "$OUTPUT" "$DECISION")
 REASONING=$(extract_reasoning "$OUTPUT")
 
-# Escape for JSON
-ESCAPED_OUTPUT=$(json_escape "$OUTPUT")
-ESCAPED_REASONING=$(json_escape "$REASONING")
-
-# Build JSON envelope
-JSON_ENVELOPE=$(cat <<EOF
-{"model":"claude","status":"success","decision":"${DECISION}","confidence":${CONFIDENCE},"reasoning":"${ESCAPED_REASONING}","output":"${ESCAPED_OUTPUT}","trace_id":"${TRACE_ID}","duration_ms":${DURATION_MS}}
-EOF
-)
-
 # Log completion
 log_claude "INFO" "DELEGATE_COMPLETE" "Claude delegate completed" \
     "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"${DECISION}\",\"confidence\":${CONFIDENCE},\"duration_ms\":${DURATION_MS}}"
 
 # Output JSON to stdout
-echo "$JSON_ENVELOPE"
+json_output "success" "$DECISION" "$CONFIDENCE" "$REASONING" "$OUTPUT" "$DURATION_MS"
 
 # Also print to stderr if requested
 if [[ "$PRINT_STDERR" == "true" ]]; then

@@ -122,14 +122,21 @@ _log_basic() {
     local level="$1"
     local message="$2"
     local timestamp
+    local trace_prefix=""
     timestamp="$(date -Iseconds)"
-    echo -e "[${timestamp}] [${level}] ${message}" >&2
+
+    # Include TRACE_ID if available
+    if [[ -n "${TRACE_ID:-}" ]]; then
+        trace_prefix="[${TRACE_ID}] "
+    fi
+
+    echo -e "[${timestamp}] ${trace_prefix}[${level}] ${message}" >&2
 }
 
 log_debug() { [[ "${DEBUG:-0}" == "1" ]] && _log_basic "DEBUG" "$*" || true; }
-log_info()  { _log_basic "${GREEN}INFO${RESET}" "$*"; }
-log_warn()  { _log_basic "${YELLOW}WARN${RESET}" "$*"; }
-log_error() { _log_basic "${RED}ERROR${RESET}" "$*"; }
+log_info()  { _log_basic "${GREEN:-}INFO${RESET:-}" "$*"; }
+log_warn()  { _log_basic "${YELLOW:-}WARN${RESET:-}" "$*"; }
+log_error() { _log_basic "${RED:-}ERROR${RESET:-}" "$*"; }
 
 # =============================================================================
 # Utility Functions
@@ -213,12 +220,25 @@ mask_secrets() {
     input=$(echo "$input" | sed -E 's/ANTHROPIC_API_KEY=[^ ]*/ANTHROPIC_API_KEY=***MASKED***/g')
     input=$(echo "$input" | sed -E 's/OPENAI_API_KEY=[^ ]*/OPENAI_API_KEY=***MASKED***/g')
     input=$(echo "$input" | sed -E 's/GOOGLE_API_KEY=[^ ]*/GOOGLE_API_KEY=***MASKED***/g')
+    input=$(echo "$input" | sed -E 's/GEMINI_API_KEY=[^ ]*/GEMINI_API_KEY=***MASKED***/g')
     input=$(echo "$input" | sed -E 's/Bearer [a-zA-Z0-9._-]+/Bearer ***MASKED***/g')
     input=$(echo "$input" | sed -E 's/ghp_[a-zA-Z0-9]{36}/ghp_***MASKED***/g')
     input=$(echo "$input" | sed -E 's/gho_[a-zA-Z0-9]{36}/gho_***MASKED***/g')
+    input=$(echo "$input" | sed -E 's/ghs_[a-zA-Z0-9]{36}/ghs_***MASKED***/g')
+    input=$(echo "$input" | sed -E 's/github_pat_[a-zA-Z0-9_]{82}/github_pat_***MASKED***/g')
+    # AWS keys
+    input=$(echo "$input" | sed -E 's/AKIA[A-Z0-9]{16}/AKIA***MASKED***/g')
+    input=$(echo "$input" | sed -E 's/AWS_SECRET_ACCESS_KEY=[^ ]*/AWS_SECRET_ACCESS_KEY=***MASKED***/g')
+    # Azure keys
+    input=$(echo "$input" | sed -E 's/DefaultEndpointsProtocol=[^;]*;AccountName=[^;]*;AccountKey=[^;]*/***AZURE_CONNECTION_MASKED***/g')
+    # JWT tokens
+    input=$(echo "$input" | sed -E 's/eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/***JWT_MASKED***/g')
+    # Generic password/token/secret JSON patterns
     input=$(echo "$input" | sed -E 's/"password"\s*:\s*"[^"]*"/"password": "***MASKED***"/g')
     input=$(echo "$input" | sed -E 's/"token"\s*:\s*"[^"]*"/"token": "***MASKED***"/g')
     input=$(echo "$input" | sed -E 's/"secret"\s*:\s*"[^"]*"/"secret": "***MASKED***"/g')
+    input=$(echo "$input" | sed -E 's/"api_key"\s*:\s*"[^"]*"/"api_key": "***MASKED***"/g')
+    input=$(echo "$input" | sed -E 's/"apiKey"\s*:\s*"[^"]*"/"apiKey": "***MASKED***"/g')
 
     echo "$input"
 }
@@ -259,10 +279,17 @@ except:
 # Validate JSON string
 is_valid_json() {
     local json="$1"
+
+    # Handle empty input
+    if [[ -z "$json" ]]; then
+        return 1
+    fi
+
     if command_exists jq; then
-        echo "$json" | jq . &>/dev/null
+        printf '%s' "$json" | jq . &>/dev/null
     elif command_exists python3; then
-        python3 -c "import json; json.loads('$json')" &>/dev/null
+        # Use stdin to avoid shell escaping issues
+        python3 -c "import json, sys; json.loads(sys.stdin.read())" <<< "$json" &>/dev/null
     else
         # Can't validate, assume valid
         return 0
@@ -326,26 +353,32 @@ log_debug "Trace ID: ${TRACE_ID}"
 parse_delegate_envelope() {
     local json="$1"
 
+    # Handle empty input
+    if [[ -z "$json" ]]; then
+        log_error "[${TRACE_ID:-unknown}] Empty JSON envelope provided" 2>/dev/null || true
+        return 1
+    fi
+
     if ! command_exists jq; then
-        log_error "jq not found, cannot parse delegate envelope" 2>/dev/null || true
+        log_error "[${TRACE_ID:-unknown}] jq not found, cannot parse delegate envelope" 2>/dev/null || true
         return 1
     fi
 
     # Validate JSON
-    if ! echo "$json" | jq . >/dev/null 2>&1; then
-        log_error "Invalid JSON envelope" 2>/dev/null || true
+    if ! printf '%s' "$json" | jq . >/dev/null 2>&1; then
+        log_error "[${TRACE_ID:-unknown}] Invalid JSON envelope: ${json:0:100}..." 2>/dev/null || true
         return 1
     fi
 
     # Extract fields using jq
-    DELEGATE_MODEL=$(echo "$json" | jq -r '.model // "unknown"')
-    DELEGATE_STATUS=$(echo "$json" | jq -r '.status // "error"')
-    DELEGATE_DECISION=$(echo "$json" | jq -r '.decision // "ABSTAIN"')
-    DELEGATE_CONFIDENCE=$(echo "$json" | jq -r '.confidence // 0')
-    DELEGATE_REASONING=$(echo "$json" | jq -r '.reasoning // ""')
-    DELEGATE_OUTPUT=$(echo "$json" | jq -r '.output // ""')
-    DELEGATE_TRACE_ID=$(echo "$json" | jq -r '.trace_id // ""')
-    DELEGATE_DURATION_MS=$(echo "$json" | jq -r '.duration_ms // 0')
+    DELEGATE_MODEL=$(printf '%s' "$json" | jq -r '.model // "unknown"')
+    DELEGATE_STATUS=$(printf '%s' "$json" | jq -r '.status // "error"')
+    DELEGATE_DECISION=$(printf '%s' "$json" | jq -r '.decision // "ABSTAIN"')
+    DELEGATE_CONFIDENCE=$(printf '%s' "$json" | jq -r '.confidence // 0')
+    DELEGATE_REASONING=$(printf '%s' "$json" | jq -r '.reasoning // ""')
+    DELEGATE_OUTPUT=$(printf '%s' "$json" | jq -r '.output // ""')
+    DELEGATE_TRACE_ID=$(printf '%s' "$json" | jq -r '.trace_id // ""')
+    DELEGATE_DURATION_MS=$(printf '%s' "$json" | jq -r '.duration_ms // 0')
 
     export DELEGATE_MODEL DELEGATE_STATUS DELEGATE_DECISION DELEGATE_CONFIDENCE
     export DELEGATE_REASONING DELEGATE_OUTPUT DELEGATE_TRACE_ID DELEGATE_DURATION_MS
@@ -360,13 +393,37 @@ get_delegate_field() {
     local field="$2"
     local default="${3:-}"
 
+    # Handle empty input
+    if [[ -z "$json" ]]; then
+        echo "$default"
+        return 1
+    fi
+
     if ! command_exists jq; then
         echo "$default"
         return 1
     fi
 
     local value
-    value=$(echo "$json" | jq -r ".${field} // \"$default\"" 2>/dev/null || echo "$default")
+    if [[ -z "$field" ]]; then
+        echo "$default"
+        return 1
+    fi
+
+    value=$(printf '%s' "$json" | jq -r --arg field "$field" --arg default "$default" '
+        def to_path($s):
+            $s
+            | split(".")
+            | map(select(length > 0))
+            | map(if test("^[0-9]+$") then tonumber else . end);
+        (to_path($field)) as $path
+        | if ($path | length) == 0 then
+              $default
+          else
+              (try getpath($path) catch null) as $v
+              | if $v == null then $default else $v end
+          end
+    ' 2>/dev/null) || value="$default"
     echo "$value"
 }
 
@@ -374,6 +431,12 @@ get_delegate_field() {
 # Usage: if is_delegate_success "$json"; then ...
 is_delegate_success() {
     local json="$1"
+
+    # Handle empty input
+    if [[ -z "$json" ]]; then
+        return 1
+    fi
+
     local status
     status=$(get_delegate_field "$json" "status" "error")
     [[ "$status" == "success" ]]
@@ -387,10 +450,13 @@ export -f require_command
 export -f iso_timestamp
 export -f epoch_ms
 export -f ensure_dir
+export -f ensure_all_dirs
 export -f mask_secrets
 export -f read_config
 export -f is_valid_json
 export -f get_model_display_name
+export -f generate_trace_id
+export -f _log_basic
 export -f parse_delegate_envelope
 export -f get_delegate_field
 export -f is_delegate_success

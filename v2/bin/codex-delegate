@@ -104,6 +104,12 @@ PROMPT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --timeout)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing timeout value, using default $DEFAULT_TIMEOUT"
+                TIMEOUT=$DEFAULT_TIMEOUT
+                shift
+                continue
+            fi
             TIMEOUT="$2"
             # Validate timeout is a positive number
             if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [[ $TIMEOUT -lt 1 ]]; then
@@ -115,14 +121,36 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --model)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing model value, using default $CODEX_MODEL"
+                MODEL="$CODEX_MODEL"
+                shift
+                continue
+            fi
             MODEL="$2"
             shift 2
             ;;
         --reasoning)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing reasoning value, using default $CODEX_REASONING"
+                REASONING="$CODEX_REASONING"
+                shift
+                continue
+            fi
             REASONING="$2"
+            if [[ ! "$REASONING" =~ ^(none|minimal|low|medium|high|xhigh)$ ]]; then
+                log_warn "Invalid reasoning value: $REASONING, using default $CODEX_REASONING"
+                REASONING="$CODEX_REASONING"
+            fi
             shift 2
             ;;
         --sandbox|-s)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing sandbox mode, using default $CODEX_SANDBOX"
+                SANDBOX="$CODEX_SANDBOX"
+                shift
+                continue
+            fi
             SANDBOX="$2"
             # Validate sandbox mode
             if [[ "$SANDBOX" != "workspace-write" && "$SANDBOX" != "danger-full-access" ]]; then
@@ -154,13 +182,13 @@ done
 # Validate Input
 #===============================================================================
 if [[ -z "$PROMPT" ]]; then
-    echo '{"model":"codex","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"No prompt provided","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    json_output "error" "ABSTAIN" "0.0" "No prompt provided" "" 0
     exit 1
 fi
 
 # Check if Codex CLI exists
 if ! command_exists "$CODEX_CMD"; then
-    echo '{"model":"codex","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"Codex CLI not found","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    json_output "error" "ABSTAIN" "0.0" "Codex CLI not found" "" 0
     exit 1
 fi
 
@@ -168,15 +196,51 @@ fi
 # Helper Functions
 #===============================================================================
 
+# Output JSON envelope
+# Usage: json_output <status> <decision> <confidence> <reasoning> <output> [duration_ms]
+json_output() {
+    local status="$1"
+    local decision="$2"
+    local confidence="$3"
+    local reasoning="$4"
+    local output="$5"
+    local duration_ms="${6:-}"
 
-# Escape string for JSON (using jq for reliable escaping)
-json_escape() {
-    local str="$1"
-    # Use jq for reliable JSON escaping (handles all control characters)
-    # Falls back to python, then sed if neither available
-    printf '%s' "$str" | jq -Rs '.[:-1]' 2>/dev/null | sed 's/^"//; s/"$//' || \
-    printf '%s' "$str" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null || \
-    printf '%s' "$str" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' | tr '\n' ' ' | head -c 10000
+    if [[ -z "$duration_ms" ]]; then
+        # Handle case where START_MS might not be set (e.g., early exit)
+        if [[ -z "${START_MS:-}" ]]; then
+            START_MS=$(epoch_ms)
+        fi
+        duration_ms=$(( $(epoch_ms) - START_MS ))
+    fi
+
+    # Ensure jq is available
+    if ! command_exists jq; then
+        # Fallback to simple echo if jq is missing
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"jq command not found, cannot format JSON.\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${duration_ms}}"
+        exit 1
+    fi
+
+    jq -n \
+        --arg model "codex" \
+        --arg status "$status" \
+        --arg decision "$decision" \
+        --arg confidence "$confidence" \
+        --arg reasoning "$reasoning" \
+        --arg output "$output" \
+        --arg trace_id "$TRACE_ID" \
+        --argjson duration_ms "$duration_ms" \
+        '{model: $model, status: $status, decision: $decision, confidence: ($confidence | tonumber), reasoning: $reasoning, output: $output, trace_id: $trace_id, duration_ms: $duration_ms}'
+}
+
+# Local wrapper for secret masking (compat with common.sh exports)
+mask_secrets_local() {
+    local input="${1-}"
+    if type -t mask_secrets >/dev/null 2>&1; then
+        mask_secrets "$input"
+    else
+        printf '%s' "$input"
+    fi
 }
 
 # Extract decision from output (APPROVE, REJECT, ABSTAIN)
@@ -282,7 +346,7 @@ IMPORTANT: When providing your analysis, if a decision is required, please clear
 Include your reasoning for the decision."
 
 # Log start (#81 fix - mask secrets in logs)
-MASKED_PROMPT=$(mask_secrets "$FULL_PROMPT")
+MASKED_PROMPT=$(mask_secrets_local "$FULL_PROMPT")
 log_codex "INFO" "DELEGATE_START" "Starting Codex delegate" \
     "{\"trace_id\":\"${TRACE_ID}\",\"prompt_length\":${#FULL_PROMPT},\"timeout\":${TIMEOUT},\"model\":\"${MODEL}\",\"reasoning\":\"${REASONING}\",\"sandbox\":\"${SANDBOX}\"}"
 
@@ -297,8 +361,8 @@ STDERR_OUTPUT=""
 
 # Create secure temp file for stderr (#89 fix)
 STDERR_TMP=$(mktemp -t "codex.${TRACE_ID}.stderr.XXXXXXXXXX")
-chmod 600 "$STDERR_TMP"
 trap 'rm -f "$STDERR_TMP"' EXIT
+chmod 600 "$STDERR_TMP"
 
 # Normalize context compaction + network tuning settings
 if [[ "$CODEX_CONTEXT_COMPACTION" != "true" && "$CODEX_CONTEXT_COMPACTION" != "false" ]]; then
@@ -347,89 +411,49 @@ if [[ $EXIT_CODE -eq 124 ]]; then
     log_codex "ERROR" "DELEGATE_TIMEOUT" "Codex delegate timed out" \
         "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
 
-    ESCAPED_MSG=$(json_escape "Request timed out after ${TIMEOUT}s")
-    echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    json_output "error" "ABSTAIN" "0.0" "Request timed out after ${TIMEOUT}s" "" "$DURATION_MS"
     exit 1
 
 elif [[ $EXIT_CODE -ne 0 ]]; then
+    local error_reason="Unknown error (exit code: $EXIT_CODE)"
+
     # Check for rate limit
     if echo "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
-        log_codex "WARN" "RATE_LIMIT" "Codex rate limit hit" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Rate limit exceeded. Please try again later.")
-        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+        log_codex "WARN" "RATE_LIMIT" "Codex rate limit hit" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Rate limit exceeded. Please try again later."
     # Check for auth issues
-    if echo "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401|api.key)'; then
-        log_codex "ERROR" "AUTH_ERROR" "Codex authentication failed" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Authentication failed. Check OPENAI_API_KEY environment variable.")
-        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401|api.key)'; then
+        log_codex "ERROR" "AUTH_ERROR" "Codex authentication failed" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Authentication failed. Check OPENAI_API_KEY environment variable."
     # Check for model not found
-    if echo "$STDERR_OUTPUT" | grep -qiE '(model.*not found|invalid model|unknown model)'; then
-        log_codex "ERROR" "MODEL_ERROR" "Codex model not available" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"model\":\"${MODEL}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Model ${MODEL} not available. Try a different model.")
-        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(model.*not found|invalid model|unknown model)'; then
+        log_codex "ERROR" "MODEL_ERROR" "Codex model not available" "{\"trace_id\":\"${TRACE_ID}\",\"model\":\"${MODEL}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Model ${MODEL} not available. Try a different model."
     # Check for Codex-specific reasoning errors (#109)
-    if echo "$STDERR_OUTPUT" | grep -qiE '(reasoning.*budget|reasoning.*exceeded|reasoning.*timeout)'; then
-        log_codex "ERROR" "REASONING_BUDGET_ERROR" "Codex reasoning budget exceeded" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"reasoning\":\"${REASONING}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Reasoning budget exceeded. Try reducing complexity or using lower reasoning effort.")
-        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(reasoning.*budget|reasoning.*exceeded|reasoning.*timeout)'; then
+        log_codex "ERROR" "REASONING_BUDGET_ERROR" "Codex reasoning budget exceeded" "{\"trace_id\":\"${TRACE_ID}\",\"reasoning\":\"${REASONING}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Reasoning budget exceeded. Try reducing complexity or using lower reasoning effort."
     # Check for context compaction failure
-    if echo "$STDERR_OUTPUT" | grep -qiE '(context.*compact|context_compaction_failed)'; then
-        log_codex "ERROR" "CONTEXT_COMPACTION_ERROR" "Codex context compaction failed" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Context compaction failed. Try a smaller input or use Gemini for large context.")
-        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(context.*compact|context_compaction_failed)'; then
+        log_codex "ERROR" "CONTEXT_COMPACTION_ERROR" "Codex context compaction failed" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Context compaction failed. Try a smaller input or use Gemini for large context."
     # Check for sandbox permission denied
-    if echo "$STDERR_OUTPUT" | grep -qiE '(sandbox.*permission|sandbox.*denied|permission.*sandbox)'; then
-        log_codex "ERROR" "SANDBOX_ERROR" "Codex sandbox permission denied" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Sandbox permission denied. Try using -s workspace-write or danger-full-access.")
-        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(sandbox.*permission|sandbox.*denied|permission.*sandbox)'; then
+        log_codex "ERROR" "SANDBOX_ERROR" "Codex sandbox permission denied" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Sandbox permission denied. Try using -s workspace-write or danger-full-access."
     # Check for output token limit
-    if echo "$STDERR_OUTPUT" | grep -qiE '(output.*token.*limit|max.*output.*tokens)'; then
-        log_codex "ERROR" "OUTPUT_LIMIT_ERROR" "Codex output token limit exceeded" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Output token limit exceeded. Try a more focused prompt.")
-        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(output.*token.*limit|max.*output.*tokens)'; then
+        log_codex "ERROR" "OUTPUT_LIMIT_ERROR" "Codex output token limit exceeded" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Output token limit exceeded. Try a more focused prompt."
+    else
+        # General error
+        log_codex "ERROR" "DELEGATE_ERROR" "Codex delegate failed" "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
+        error_reason="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
     fi
 
-    # General error (#81 fix - mask secrets in error output)
-    log_codex "ERROR" "DELEGATE_ERROR" "Codex delegate failed" \
-        "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
-
-    ERROR_MSG="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
-    ERROR_MSG=$(mask_secrets "$ERROR_MSG")
-    ESCAPED_MSG=$(json_escape "$ERROR_MSG")
-    echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    local masked_reason
+    masked_reason=$(mask_secrets_local "$error_reason")
+    json_output "error" "ABSTAIN" "0.0" "$masked_reason" "" "$DURATION_MS"
     exit 1
 fi
 
@@ -438,22 +462,12 @@ DECISION=$(extract_decision "$OUTPUT")
 CONFIDENCE=$(calculate_confidence "$OUTPUT" "$DECISION")
 REASONING_TEXT=$(extract_reasoning "$OUTPUT")
 
-# Escape for JSON
-ESCAPED_OUTPUT=$(json_escape "$OUTPUT")
-ESCAPED_REASONING=$(json_escape "$REASONING_TEXT")
-
-# Build JSON envelope
-JSON_ENVELOPE=$(cat <<EOF
-{"model":"codex","status":"success","decision":"${DECISION}","confidence":${CONFIDENCE},"reasoning":"${ESCAPED_REASONING}","output":"${ESCAPED_OUTPUT}","trace_id":"${TRACE_ID}","duration_ms":${DURATION_MS}}
-EOF
-)
-
 # Log completion
 log_codex "INFO" "DELEGATE_COMPLETE" "Codex delegate completed" \
     "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"${DECISION}\",\"confidence\":${CONFIDENCE},\"duration_ms\":${DURATION_MS}}"
 
 # Output JSON to stdout
-echo "$JSON_ENVELOPE"
+json_output "success" "$DECISION" "$CONFIDENCE" "$REASONING_TEXT" "$OUTPUT" "$DURATION_MS"
 
 # Also print to stderr if requested
 if [[ "$PRINT_STDERR" == "true" ]]; then

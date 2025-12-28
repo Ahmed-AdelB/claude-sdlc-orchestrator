@@ -138,6 +138,8 @@ properties:
         minimum: 1
         maximum: 20
         default: 5
+      error_patterns:
+        type: object
 
   circuit_breaker:
     type: object
@@ -189,6 +191,8 @@ properties:
       audit_mode:
         type: boolean
         default: false
+      directories:
+        type: object
 
   monitoring:
     type: object
@@ -209,6 +213,8 @@ properties:
         minimum: 1
         maximum: 365
         default: 30
+      thresholds:
+        type: object
 
   consensus:
     type: object
@@ -251,6 +257,8 @@ properties:
       auto_resume:
         type: boolean
         default: true
+      tmux:
+        type: object
 
   security:
     type: object
@@ -282,6 +290,10 @@ properties:
       daily_report:
         type: boolean
         default: true
+      report_time:
+        type: string
+      subscriptions:
+        type: object
 
   delegation:
     type: object
@@ -312,6 +324,10 @@ definitions:
       model:
         type: string
         description: "Model identifier"
+      fallback_model:
+          type: string
+      max_budget_usd:
+        type: integer
       cli_command:
         type: string
         description: "CLI command to invoke this model"
@@ -327,7 +343,7 @@ definitions:
         default: 300
       failover_to:
         type: string
-        enum: ["claude", "gemini", "codex"]
+        enum: ["claude", "gemini", "codex", ""]
         description: "Model to failover to if this one fails"
       flags:
         type: array
@@ -340,12 +356,15 @@ definitions:
         maximum: 100000
       thinking_level:
         type: string
-        enum: ["low", "medium", "high"]
+        enum: ["low", "medium", "high", ""]
       reasoning_effort:
         type: string
-        enum: ["none", "minimal", "low", "medium", "high", "xhigh"]
+        enum: ["none", "minimal", "low", "medium", "high", "xhigh", ""]
       auth_type:
         type: string
       skip_git_check:
         type: boolean
         default: false
+      sandbox_mode:
+        type: string
+        enum: ["workspace-write", "danger-full-access", ""]

@@ -52,7 +52,7 @@ models:
     context_window: 1000000
     thinking_level: "high"
     auth_type: "oauth-personal"
-    timeout_seconds: 180
+    timeout_seconds: 300
     flags:
       - "-m"
       - "gemini-3-pro-preview"

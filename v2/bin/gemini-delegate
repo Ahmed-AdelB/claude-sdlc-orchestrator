@@ -115,6 +115,12 @@ PROMPT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --timeout)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing timeout value, using default $DEFAULT_TIMEOUT"
+                TIMEOUT=$DEFAULT_TIMEOUT
+                shift
+                continue
+            fi
             TIMEOUT="$2"
             # Validate timeout is a positive number
             if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [[ $TIMEOUT -lt 1 ]]; then
@@ -126,14 +132,31 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --model)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing model value, using default $GEMINI_MODEL"
+                MODEL="$GEMINI_MODEL"
+                shift
+                continue
+            fi
             MODEL="$2"
             shift 2
             ;;
         --session)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing session value, ignoring"
+                SESSION=""
+                shift
+                continue
+            fi
             SESSION="$2"
             shift 2
             ;;
         --include-directories)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing include directories value, ignoring"
+                shift
+                continue
+            fi
             # Append to existing dirs if already set (#98)
             if [[ -n "$INCLUDE_DIRS" ]]; then
                 INCLUDE_DIRS="$INCLUDE_DIRS,$2"
@@ -143,6 +166,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -o|--output-format)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing output format value, ignoring"
+                OUTPUT_FORMAT=""
+                shift
+                continue
+            fi
             OUTPUT_FORMAT="$2"
             # Validate output format (#99)
             if [[ ! "$OUTPUT_FORMAT" =~ ^(text|json|stream-json)$ ]]; then
@@ -174,13 +203,13 @@ done
 # Validate Input
 #===============================================================================
 if [[ -z "$PROMPT" ]]; then
-    echo '{"model":"gemini","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"No prompt provided","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    json_output "error" "ABSTAIN" "0.0" "No prompt provided" "" 0
     exit 1
 fi
 
 # Check if Gemini CLI exists
 if ! command_exists "$GEMINI_CMD"; then
-    echo '{"model":"gemini","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"Gemini CLI not found","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    json_output "error" "ABSTAIN" "0.0" "Gemini CLI not found" "" 0
     exit 1
 fi
 
@@ -188,15 +217,51 @@ fi
 # Helper Functions
 #===============================================================================
 
+# Output JSON envelope
+# Usage: json_output <status> <decision> <confidence> <reasoning> <output> [duration_ms]
+json_output() {
+    local status="$1"
+    local decision="$2"
+    local confidence="$3"
+    local reasoning="$4"
+    local output="$5"
+    local duration_ms="${6:-}"
 
-# Escape string for JSON (using jq for reliable escaping)
-json_escape() {
-    local str="$1"
-    # Use jq for reliable JSON escaping (handles all control characters)
-    # Falls back to python, then sed if neither available
-    printf '%s' "$str" | jq -Rs '.[:-1]' 2>/dev/null | sed 's/^"//; s/"$//' || \
-    printf '%s' "$str" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null || \
-    printf '%s' "$str" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' | tr '\n' ' ' | head -c 10000
+    if [[ -z "$duration_ms" ]]; then
+        # Handle case where START_MS might not be set (e.g., early exit)
+        if [[ -z "${START_MS:-}" ]]; then
+            START_MS=$(epoch_ms)
+        fi
+        duration_ms=$(( $(epoch_ms) - START_MS ))
+    fi
+
+    # Ensure jq is available
+    if ! command_exists jq; then
+        # Fallback to simple echo if jq is missing
+        echo "{\"model\":\"gemini\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"jq command not found, cannot format JSON.\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${duration_ms}}"
+        exit 1
+    fi
+
+    jq -n \
+        --arg model "gemini" \
+        --arg status "$status" \
+        --arg decision "$decision" \
+        --arg confidence "$confidence" \
+        --arg reasoning "$reasoning" \
+        --arg output "$output" \
+        --arg trace_id "$TRACE_ID" \
+        --argjson duration_ms "$duration_ms" \
+        '{model: $model, status: $status, decision: $decision, confidence: ($confidence | tonumber), reasoning: $reasoning, output: $output, trace_id: $trace_id, duration_ms: $duration_ms}'
+}
+
+# Local wrapper for secret masking (compat with common.sh exports)
+mask_secrets_local() {
+    local input="${1-}"
+    if type -t mask_secrets >/dev/null 2>&1; then
+        mask_secrets "$input"
+    else
+        printf '%s' "$input"
+    fi
 }
 
 # Expand leading ~ to $HOME for a single path
@@ -351,7 +416,7 @@ IMPORTANT: When providing your analysis, if a decision is required, please clear
 Include your reasoning for the decision."
 
 # Log start (#81 fix - mask secrets in logs)
-MASKED_PROMPT=$(mask_secrets"$FULL_PROMPT")
+MASKED_PROMPT=$(mask_secrets_local "$FULL_PROMPT")
 log_gemini "INFO" "DELEGATE_START" "Starting Gemini delegate" \
     "{\"trace_id\":\"${TRACE_ID}\",\"prompt_length\":${#FULL_PROMPT},\"timeout\":${TIMEOUT},\"model\":\"${MODEL}\",\"session\":\"${SESSION:-none}\",\"include_dirs\":\"${INCLUDE_DIRS:-none}\",\"output_format\":\"${OUTPUT_FORMAT:-envelope}\"}"
 
@@ -367,18 +432,19 @@ STDERR_OUTPUT=""
 
 # Create secure temp file for stderr (#89 fix)
 STDERR_TMP=$(mktemp -t "gemini.${TRACE_ID}.stderr.XXXXXXXXXX")
-chmod 600 "$STDERR_TMP"
 trap 'rm -f "$STDERR_TMP"' EXIT
+chmod 600 "$STDERR_TMP"
 
 # Unset GOOGLE_CLOUD_PROJECT to avoid auth issues with personal OAuth
 unset GOOGLE_CLOUD_PROJECT 2>/dev/null || true
 
 # Build command with optional session resumption (#114)
-GEMINI_ARGS=(-m "$MODEL" --approval-mode yolo)
+GEMINI_ARGS=()
 if [[ -n "$SESSION" ]]; then
     log_debug "Resuming Gemini session: $SESSION"
-    GEMINI_ARGS=(-r "$SESSION" "${GEMINI_ARGS[@]}")
+    GEMINI_ARGS+=(-r "$SESSION")
 fi
+GEMINI_ARGS+=(-m "$MODEL" --approval-mode yolo)
 if [[ -n "$INCLUDE_DIRS" ]]; then
     GEMINI_ARGS+=(--include-directories "$INCLUDE_DIRS")
 fi
@@ -403,49 +469,34 @@ if [[ $EXIT_CODE -eq 124 ]]; then
     log_gemini "ERROR" "DELEGATE_TIMEOUT" "Gemini delegate timed out" \
         "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
 
-    ESCAPED_MSG=$(json_escape "Request timed out after ${TIMEOUT}s")
-    echo "{\"model\":\"gemini\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    json_output "error" "ABSTAIN" "0.0" "Request timed out after ${TIMEOUT}s" "" "$DURATION_MS"
     exit 1
 
 elif [[ $EXIT_CODE -ne 0 ]]; then
+    local error_reason="Unknown error (exit code: $EXIT_CODE)"
+
     # Check for rate limit
     if echo "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
-        log_gemini "WARN" "RATE_LIMIT" "Gemini rate limit hit" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Rate limit exceeded. Please try again later.")
-        echo "{\"model\":\"gemini\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+        log_gemini "WARN" "RATE_LIMIT" "Gemini rate limit hit" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Rate limit exceeded. Please try again later."
     # Check for auth issues
-    if echo "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401)'; then
-        log_gemini "ERROR" "AUTH_ERROR" "Gemini authentication failed" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Authentication failed. Run 'gemini' interactively to re-authenticate.")
-        echo "{\"model\":\"gemini\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
-    fi
-
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401)'; then
+        log_gemini "ERROR" "AUTH_ERROR" "Gemini authentication failed" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Authentication failed. Run 'gemini' interactively to re-authenticate."
     # Check for context too long (#127)
-    if echo "$STDERR_OUTPUT" | grep -qiE '(context.*(too long|exceeded|limit)|token.*(limit|exceeded)|input.*(too large|too long)|max.*tokens)'; then
-        log_gemini "ERROR" "CONTEXT_TOO_LONG" "Gemini context limit exceeded" \
-            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-
-        ESCAPED_MSG=$(json_escape "Context too long. Consider splitting the input or using --session to maintain context across calls.")
-        echo "{\"model\":\"gemini\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        exit 1
+    elif echo "$STDERR_OUTPUT" | grep -qiE '(context.*(too long|exceeded|limit)|token.*(limit|exceeded)|input.*(too large|too long)|max.*tokens)'; then
+        log_gemini "ERROR" "CONTEXT_TOO_LONG" "Gemini context limit exceeded" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Context too long. Consider splitting the input or using --session to maintain context across calls."
+    else
+        # General error
+        log_gemini "ERROR" "DELEGATE_ERROR" "Gemini delegate failed" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
+        error_reason="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
     fi
-
-    # General error (#81 fix - mask secrets in error output)
-    log_gemini "ERROR" "DELEGATE_ERROR" "Gemini delegate failed" \
-        "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
-
-    ERROR_MSG="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
-    ERROR_MSG=$(mask_secrets"$ERROR_MSG")
-    ESCAPED_MSG=$(json_escape "$ERROR_MSG")
-    echo "{\"model\":\"gemini\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    
+    local masked_reason
+    masked_reason=$(mask_secrets_local "$error_reason")
+    json_output "error" "ABSTAIN" "0.0" "$masked_reason" "" "$DURATION_MS"
     exit 1
 fi
 
@@ -466,22 +517,12 @@ DECISION=$(extract_decision "$OUTPUT")
 CONFIDENCE=$(calculate_confidence "$OUTPUT" "$DECISION")
 REASONING=$(extract_reasoning "$OUTPUT")
 
-# Escape for JSON
-ESCAPED_OUTPUT=$(json_escape "$OUTPUT")
-ESCAPED_REASONING=$(json_escape "$REASONING")
-
-# Build JSON envelope
-JSON_ENVELOPE=$(cat <<EOF
-{"model":"gemini","status":"success","decision":"${DECISION}","confidence":${CONFIDENCE},"reasoning":"${ESCAPED_REASONING}","output":"${ESCAPED_OUTPUT}","trace_id":"${TRACE_ID}","duration_ms":${DURATION_MS}}
-EOF
-)
-
 # Log completion
 log_gemini "INFO" "DELEGATE_COMPLETE" "Gemini delegate completed" \
     "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"${DECISION}\",\"confidence\":${CONFIDENCE},\"duration_ms\":${DURATION_MS}}"
 
 # Output JSON to stdout
-echo "$JSON_ENVELOPE"
+json_output "success" "$DECISION" "$CONFIDENCE" "$REASONING" "$OUTPUT" "$DURATION_MS"
 
 # Also print to stderr if requested
 if [[ "$PRINT_STDERR" == "true" ]]; then

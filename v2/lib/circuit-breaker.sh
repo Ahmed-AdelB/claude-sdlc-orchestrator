@@ -28,7 +28,8 @@ CB_HALF_OPEN_MAX_CALLS="${CB_HALF_OPEN_MAX_CALLS:-1}"
 # Get state file path for a model
 _get_breaker_file() {
     local model="$1"
-    echo "${BREAKERS_DIR}/${model}.state"
+    local state_file="${BREAKERS_DIR}/${model}.state"
+    echo "$state_file"
 }
 
 # Initialize breaker state if not exists
@@ -50,32 +51,41 @@ EOF
     fi
 }
 
-# Read breaker state
+# Read breaker state (with locking to prevent race conditions)
 _read_breaker_state() {
     local model="$1"
     local state_file
+    local state
+
     state_file="$(_get_breaker_file "$model")"
 
     _init_breaker "$model"
 
-    # Source the state file to get variables
-    # shellcheck disable=SC1090
-    source "$state_file"
-
-    echo "$state"
+    # Read state atomically
+    if [[ -f "$state_file" ]]; then
+        state=$(grep -E "^state=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+        echo "${state:-CLOSED}"
+    else
+        echo "CLOSED"
+    fi
 }
 
-# Get failure count
+# Get failure count (with safe file reading)
 _get_failure_count() {
     local model="$1"
     local state_file
+    local failure_count
+
     state_file="$(_get_breaker_file "$model")"
 
     _init_breaker "$model"
 
-    # shellcheck disable=SC1090
-    source "$state_file"
-    echo "$failure_count"
+    if [[ -f "$state_file" ]]; then
+        failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+        echo "${failure_count:-0}"
+    else
+        echo "0"
+    fi
 }
 
 # Update breaker state atomically (#82 fix - use atomic_write for consistency)
@@ -87,12 +97,13 @@ _update_breaker_state() {
     local last_success="$5"
     local half_open_calls="${6:-0}"
     local state_file
+    local content
+
     state_file="$(_get_breaker_file "$model")"
 
     mkdir -p "$BREAKERS_DIR"
 
     # Use atomic_write from state.sh for unified locking mechanism (#82)
-    local content
     content="state=${new_state}
 failure_count=${new_failure_count}
 last_failure=${last_failure}
@@ -110,17 +121,55 @@ half_open_calls=${half_open_calls}"
 # Returns 0 (allow) or 1 (skip)
 should_call_model() {
     local model="$1"
+    local lock_name="breaker_${model}"
+
+    with_lock "$lock_name" _should_call_model_locked "$model"
+}
+
+_should_call_model_locked() {
+    local model="$1"
     local state_file
+    local state
+    local failure_count
+    local last_failure
+    local last_success
+    local half_open_calls
+    local now
+    local elapsed
+    local remaining
+
     state_file="$(_get_breaker_file "$model")"
 
     _init_breaker "$model"
 
-    # Read current state
-    local state failure_count last_failure last_success half_open_calls
-    # shellcheck disable=SC1090
-    source "$state_file"
+    # Read current state safely (without sourcing - prevents code injection)
+    if [[ -f "$state_file" ]]; then
+        state=$(grep -E "^state=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "CLOSED")
+        failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_failure=$(grep -E "^last_failure=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_success=$(grep -E "^last_success=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        half_open_calls=$(grep -E "^half_open_calls=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+    else
+        state="CLOSED"
+        failure_count=0
+        last_failure=0
+        last_success=0
+        half_open_calls=0
+    fi
 
-    local now
+    if ! [[ "$failure_count" =~ ^[0-9]+$ ]]; then
+        failure_count=0
+    fi
+    if ! [[ "$last_failure" =~ ^[0-9]+$ ]]; then
+        last_failure=0
+    fi
+    if ! [[ "$last_success" =~ ^[0-9]+$ ]]; then
+        last_success=0
+    fi
+    if ! [[ "$half_open_calls" =~ ^[0-9]+$ ]]; then
+        half_open_calls=0
+    fi
+
     now=$(date +%s)
 
     case "$state" in
@@ -131,7 +180,7 @@ should_call_model() {
 
         OPEN)
             # Check if cooldown has elapsed
-            local elapsed=$((now - last_failure))
+            elapsed=$((now - last_failure))
             if [[ $elapsed -ge $CB_COOLDOWN_SECONDS ]]; then
                 # Transition to HALF_OPEN
                 _update_breaker_state "$model" "HALF_OPEN" "$failure_count" "$last_failure" "$last_success" 0
@@ -139,8 +188,8 @@ should_call_model() {
                 return 0  # Allow test call
             else
                 # Still in cooldown
-                local remaining=$((CB_COOLDOWN_SECONDS - elapsed))
-                log_debug "Circuit breaker OPEN for ${model}, ${remaining}s remaining" 2>/dev/null || true
+                remaining=$((CB_COOLDOWN_SECONDS - elapsed))
+                log_debug "[${TRACE_ID:-unknown}] Circuit breaker OPEN for ${model}, ${remaining}s remaining" 2>/dev/null || true
                 return 1  # Skip call
             fi
             ;;
@@ -148,7 +197,7 @@ should_call_model() {
         HALF_OPEN)
             # Check if we've exceeded max half-open calls
             if [[ $half_open_calls -ge $CB_HALF_OPEN_MAX_CALLS ]]; then
-                log_debug "Circuit breaker HALF_OPEN max calls reached for ${model}" 2>/dev/null || true
+                log_debug "[${TRACE_ID:-unknown}] Circuit breaker HALF_OPEN max calls reached for ${model}" 2>/dev/null || true
                 return 1  # Skip call
             fi
             # Increment half-open call count
@@ -158,6 +207,7 @@ should_call_model() {
 
         *)
             # Unknown state - reset to CLOSED
+            log_warn "[${TRACE_ID:-unknown}] Unknown circuit breaker state for ${model}: ${state}, resetting to CLOSED" 2>/dev/null || true
             _update_breaker_state "$model" "CLOSED" 0 0 "$now" 0
             return 0
             ;;
@@ -167,16 +217,53 @@ should_call_model() {
 # Record a successful call
 record_success() {
     local model="$1"
+    local lock_name="breaker_${model}"
+
+    with_lock "$lock_name" _record_success_locked "$model"
+}
+
+_record_success_locked() {
+    local model="$1"
     local state_file
+    local state
+    local failure_count
+    local last_failure
+    local last_success
+    local half_open_calls
+    local now
+
     state_file="$(_get_breaker_file "$model")"
 
     _init_breaker "$model"
 
-    local state failure_count last_failure last_success half_open_calls
-    # shellcheck disable=SC1090
-    source "$state_file"
+    # Read state safely
+    if [[ -f "$state_file" ]]; then
+        state=$(grep -E "^state=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "CLOSED")
+        failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_failure=$(grep -E "^last_failure=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_success=$(grep -E "^last_success=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        half_open_calls=$(grep -E "^half_open_calls=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+    else
+        state="CLOSED"
+        failure_count=0
+        last_failure=0
+        last_success=0
+        half_open_calls=0
+    fi
 
-    local now
+    if ! [[ "$failure_count" =~ ^[0-9]+$ ]]; then
+        failure_count=0
+    fi
+    if ! [[ "$last_failure" =~ ^[0-9]+$ ]]; then
+        last_failure=0
+    fi
+    if ! [[ "$last_success" =~ ^[0-9]+$ ]]; then
+        last_success=0
+    fi
+    if ! [[ "$half_open_calls" =~ ^[0-9]+$ ]]; then
+        half_open_calls=0
+    fi
+
     now=$(date +%s)
 
     case "$state" in
@@ -197,18 +284,57 @@ record_success() {
 record_failure() {
     local model="$1"
     local error_type="${2:-UNKNOWN}"
+    local lock_name="breaker_${model}"
+
+    with_lock "$lock_name" _record_failure_locked "$model" "$error_type"
+}
+
+_record_failure_locked() {
+    local model="$1"
+    local error_type="${2:-UNKNOWN}"
     local state_file
+    local state
+    local failure_count
+    local last_failure
+    local last_success
+    local half_open_calls
+    local now
+    local new_failure_count
+
     state_file="$(_get_breaker_file "$model")"
 
     _init_breaker "$model"
 
-    local state failure_count last_failure last_success half_open_calls
-    # shellcheck disable=SC1090
-    source "$state_file"
+    # Read state safely
+    if [[ -f "$state_file" ]]; then
+        state=$(grep -E "^state=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "CLOSED")
+        failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_failure=$(grep -E "^last_failure=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_success=$(grep -E "^last_success=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        half_open_calls=$(grep -E "^half_open_calls=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+    else
+        state="CLOSED"
+        failure_count=0
+        last_failure=0
+        last_success=0
+        half_open_calls=0
+    fi
 
-    local now
+    if ! [[ "$failure_count" =~ ^[0-9]+$ ]]; then
+        failure_count=0
+    fi
+    if ! [[ "$last_failure" =~ ^[0-9]+$ ]]; then
+        last_failure=0
+    fi
+    if ! [[ "$last_success" =~ ^[0-9]+$ ]]; then
+        last_success=0
+    fi
+    if ! [[ "$half_open_calls" =~ ^[0-9]+$ ]]; then
+        half_open_calls=0
+    fi
+
     now=$(date +%s)
-    local new_failure_count=$((failure_count + 1))
+    new_failure_count=$((failure_count + 1))
 
     case "$state" in
         CLOSED)
@@ -216,6 +342,7 @@ record_failure() {
                 # Trip the breaker
                 _update_breaker_state "$model" "OPEN" "$new_failure_count" "$now" "$last_success" 0
                 log_circuit_breaker "$model" "CLOSED" "OPEN" 2>/dev/null || true
+                log_warn "[${TRACE_ID:-unknown}] Circuit breaker tripped for $model (failures: $new_failure_count, error: $error_type)" 2>/dev/null || true
             else
                 # Increment failure count
                 _update_breaker_state "$model" "CLOSED" "$new_failure_count" "$now" "$last_success" 0
@@ -257,18 +384,37 @@ record_result() {
 get_breaker_status() {
     local model="$1"
     local state_file
+    local state
+    local failure_count
+    local last_failure
+    local last_success
+    local half_open_calls
+    local now
+    local since_failure
+    local since_success
+
     state_file="$(_get_breaker_file "$model")"
 
     _init_breaker "$model"
 
-    local state failure_count last_failure last_success half_open_calls
-    # shellcheck disable=SC1090
-    source "$state_file"
+    # Read state safely
+    if [[ -f "$state_file" ]]; then
+        state=$(grep -E "^state=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "CLOSED")
+        failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_failure=$(grep -E "^last_failure=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        last_success=$(grep -E "^last_success=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+        half_open_calls=$(grep -E "^half_open_calls=" "$state_file" 2>/dev/null | head -1 | cut -d'=' -f2- || echo "0")
+    else
+        state="CLOSED"
+        failure_count=0
+        last_failure=0
+        last_success=0
+        half_open_calls=0
+    fi
 
-    local now
     now=$(date +%s)
-    local since_failure=$((now - last_failure))
-    local since_success=$((now - last_success))
+    since_failure=$((now - last_failure))
+    since_success=$((now - last_success))
 
     cat <<EOF
 {
@@ -340,10 +486,11 @@ get_available_models() {
 reset_breaker() {
     local model="$1"
     local now
+
     now=$(date +%s)
 
     _update_breaker_state "$model" "CLOSED" 0 0 "$now" 0
-    log_info "Circuit breaker reset for ${model}" 2>/dev/null || true
+    log_info "[${TRACE_ID:-unknown}] Circuit breaker reset for ${model}" 2>/dev/null || true
 }
 
 # Reset all circuit breakers
@@ -362,6 +509,9 @@ reset_all_breakers() {
 # Update circuit breaker configuration from config file
 load_breaker_config() {
     local config="${1:-$HOME/.claude/autonomous/config/tri-agent.yaml}"
+    local threshold
+    local cooldown
+    local max_calls
 
     if [[ ! -f "$config" ]]; then
         return 0
@@ -369,7 +519,6 @@ load_breaker_config() {
 
     # Try to read config values
     if command -v yq &>/dev/null; then
-        local threshold cooldown max_calls
         threshold=$(yq eval '.circuit_breaker.failure_threshold // 3' "$config" 2>/dev/null)
         cooldown=$(yq eval '.circuit_breaker.cooldown_seconds // 60' "$config" 2>/dev/null)
         max_calls=$(yq eval '.circuit_breaker.half_open_max_calls // 1' "$config" 2>/dev/null)
@@ -377,6 +526,8 @@ load_breaker_config() {
         CB_FAILURE_THRESHOLD="${threshold:-3}"
         CB_COOLDOWN_SECONDS="${cooldown:-60}"
         CB_HALF_OPEN_MAX_CALLS="${max_calls:-1}"
+
+        log_debug "[${TRACE_ID:-unknown}] Circuit breaker config: threshold=$CB_FAILURE_THRESHOLD, cooldown=$CB_COOLDOWN_SECONDS, max_calls=$CB_HALF_OPEN_MAX_CALLS" 2>/dev/null || true
     fi
 }
 
