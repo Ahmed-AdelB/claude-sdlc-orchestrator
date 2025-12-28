@@ -1,0 +1,556 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-quality - Code quality metrics for tri-agent system
+#===============================================================================
+# Generates comprehensive quality report including:
+# - Code coverage
+# - Complexity metrics
+# - Documentation coverage
+# - Test coverage
+# - Dependency health
+#===============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+LIB_DIR="${PROJECT_ROOT}/lib"
+BIN_DIR="${PROJECT_ROOT}/bin"
+TESTS_DIR="${PROJECT_ROOT}/tests"
+REPORT_DIR="${PROJECT_ROOT}/reports"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+#===============================================================================
+# Usage
+#===============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}tri-agent-quality${RESET} - Quality metrics for tri-agent system
+
+${BOLD}USAGE:${RESET}
+    tri-agent-quality [OPTIONS]
+
+${BOLD}OPTIONS:${RESET}
+    --full          Run all quality checks (slower)
+    --json          Output as JSON
+    --report        Generate HTML report
+    -h, --help      Show this help message
+
+${BOLD}METRICS COLLECTED:${RESET}
+    - Lines of code (LOC)
+    - Function count
+    - Documentation coverage
+    - Test coverage
+    - Cyclomatic complexity estimate
+    - Duplicate code detection
+    - TODO/FIXME tracking
+EOF
+}
+
+# Parse arguments
+FULL_CHECK=false
+JSON_OUTPUT=false
+GENERATE_REPORT=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --full) FULL_CHECK=true; shift ;;
+        --json) JSON_OUTPUT=true; shift ;;
+        --report) GENERATE_REPORT=true; shift ;;
+        -h|--help) show_help; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+#===============================================================================
+# Metrics Collection
+#===============================================================================
+
+# Count lines of code
+count_loc() {
+    local dir="$1"
+    local total=0
+    local code=0
+    local comments=0
+    local blank=0
+
+    # Find shell scripts (with or without .sh extension)
+    local files
+    files=$(find "$dir" -type f \( -name "*.sh" -o -name "tri-agent*" \) 2>/dev/null)
+
+    for file in $files; do
+        [[ -f "$file" ]] || continue
+
+        local file_total file_blank file_comments
+
+        file_total=$(wc -l < "$file" 2>/dev/null | tr -d '\n ' || echo 0)
+        [[ -z "$file_total" || ! "$file_total" =~ ^[0-9]+$ ]] && file_total=0
+        total=$((total + file_total))
+
+        file_blank=$(grep -c '^[[:space:]]*$' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+        [[ -z "$file_blank" || ! "$file_blank" =~ ^[0-9]+$ ]] && file_blank=0
+        blank=$((blank + file_blank))
+
+        file_comments=$(grep -c '^[[:space:]]*#' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+        [[ -z "$file_comments" || ! "$file_comments" =~ ^[0-9]+$ ]] && file_comments=0
+        comments=$((comments + file_comments))
+    done
+
+    code=$((total - blank - comments))
+    [[ $code -lt 0 ]] && code=0
+
+    echo "$total,$code,$comments,$blank"
+}
+
+# Count functions
+count_functions() {
+    local dir="$1"
+    local count=0
+
+    local files
+    files=$(find "$dir" -type f \( -name "*.sh" -o -name "tri-agent*" \) 2>/dev/null)
+
+    for file in $files; do
+        [[ -f "$file" ]] || continue
+        local file_funcs
+        file_funcs=$(grep -cE '^[a-zA-Z_][a-zA-Z0-9_]*\s*\(\)\s*\{' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+        [[ -z "$file_funcs" ]] && file_funcs=0
+        [[ "$file_funcs" =~ ^[0-9]+$ ]] || file_funcs=0
+        count=$((count + file_funcs))
+    done
+
+    echo "$count"
+}
+
+# Count tests
+count_tests() {
+    local count=0
+
+    local files
+    files=$(find "$TESTS_DIR" -name "*.sh" -type f 2>/dev/null)
+
+    for file in $files; do
+        [[ -f "$file" ]] || continue
+        local test_funcs
+        test_funcs=$(grep -cE '^test_[a-zA-Z_]+\s*\(\)\s*\{' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+        [[ -z "$test_funcs" ]] && test_funcs=0
+        [[ "$test_funcs" =~ ^[0-9]+$ ]] || test_funcs=0
+        count=$((count + test_funcs))
+    done
+
+    echo "$count"
+}
+
+# Check documentation coverage
+check_doc_coverage() {
+    local dir="$1"
+    local total_funcs=0
+    local documented_funcs=0
+
+    local files
+    files=$(find "$dir" -type f \( -name "*.sh" -o -name "tri-agent*" \) 2>/dev/null)
+
+    for file in $files; do
+        [[ -f "$file" ]] || continue
+
+        # Count functions
+        local funcs
+        funcs=$(grep -cE '^[a-zA-Z_][a-zA-Z0-9_]*\s*\(\)\s*\{' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+        [[ -z "$funcs" ]] && funcs=0
+        [[ "$funcs" =~ ^[0-9]+$ ]] || funcs=0
+        total_funcs=$((total_funcs + funcs))
+
+        # Count functions with preceding comment (# Usage: or # Description:)
+        local doc_funcs
+        doc_funcs=$(grep -cE '^#.*[Uu]sage:' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+        [[ -z "$doc_funcs" ]] && doc_funcs=0
+        [[ "$doc_funcs" =~ ^[0-9]+$ ]] || doc_funcs=0
+        documented_funcs=$((documented_funcs + doc_funcs))
+    done
+
+    if [[ $total_funcs -gt 0 ]]; then
+        echo "$((documented_funcs * 100 / total_funcs))"
+    else
+        echo "0"
+    fi
+}
+
+# Count TODOs and FIXMEs
+count_todos() {
+    local count=0
+
+    local files
+    files=$(find "$PROJECT_ROOT" -type f \( -name "*.sh" -o -name "tri-agent*" \) 2>/dev/null)
+
+    for file in $files; do
+        [[ -f "$file" ]] || continue
+        local file_todos
+        file_todos=$(grep -ciE '(TODO|FIXME|XXX|HACK):' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+        [[ -z "$file_todos" ]] && file_todos=0
+        [[ "$file_todos" =~ ^[0-9]+$ ]] || file_todos=0
+        count=$((count + file_todos))
+    done
+
+    echo "$count"
+}
+
+# Estimate complexity (based on control structures)
+estimate_complexity() {
+    local file="$1"
+    local complexity=1  # Base complexity
+
+    # Add for each control structure (sanitize grep output)
+    local ifs fors cases ands ors
+
+    ifs=$(grep -cE '\bif\b|\belif\b' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+    [[ -z "$ifs" || ! "$ifs" =~ ^[0-9]+$ ]] && ifs=0
+
+    fors=$(grep -cE '\bfor\b|\bwhile\b|\buntil\b' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+    [[ -z "$fors" || ! "$fors" =~ ^[0-9]+$ ]] && fors=0
+
+    cases=$(grep -cE '\bcase\b' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+    [[ -z "$cases" || ! "$cases" =~ ^[0-9]+$ ]] && cases=0
+
+    ands=$(grep -c '&&' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+    [[ -z "$ands" || ! "$ands" =~ ^[0-9]+$ ]] && ands=0
+
+    ors=$(grep -c '||' "$file" 2>/dev/null | tr -d '\n' || echo 0)
+    [[ -z "$ors" || ! "$ors" =~ ^[0-9]+$ ]] && ors=0
+
+    complexity=$((complexity + ifs + fors + cases + ands/2 + ors/2))
+    echo "$complexity"
+}
+
+# Calculate average complexity
+average_complexity() {
+    local dir="$1"
+    local total=0
+    local count=0
+
+    local files
+    files=$(find "$dir" -type f \( -name "*.sh" -o -name "tri-agent*" \) 2>/dev/null)
+
+    for file in $files; do
+        [[ -f "$file" ]] || continue
+        local file_complexity
+        file_complexity=$(estimate_complexity "$file")
+        total=$((total + file_complexity))
+        count=$((count + 1))
+    done
+
+    if [[ $count -gt 0 ]]; then
+        echo "$((total / count))"
+    else
+        echo "0"
+    fi
+}
+
+# Check for duplicate code blocks
+find_duplicates() {
+    local threshold=5  # Lines that need to match
+    local duplicates=0
+
+    # Simple check: look for exact duplicate functions
+    local func_bodies
+    func_bodies=$(find "$PROJECT_ROOT" -name "*.sh" -type f -exec grep -hE '^[a-zA-Z_]+\s*\(\)' {} \; 2>/dev/null | sort | uniq -d | wc -l)
+
+    echo "$func_bodies"
+}
+
+#===============================================================================
+# Calculate Metrics
+#===============================================================================
+
+echo ""
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo -e "${BOLD}     TRI-AGENT QUALITY METRICS               ${RESET}"
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo ""
+
+# Collect metrics
+echo -e "${CYAN}Collecting metrics...${RESET}"
+
+# LOC metrics
+BIN_LOC=$(count_loc "$BIN_DIR")
+LIB_LOC=$(count_loc "$LIB_DIR")
+TEST_LOC=$(count_loc "$TESTS_DIR")
+
+BIN_TOTAL=$(echo "$BIN_LOC" | cut -d, -f1)
+LIB_TOTAL=$(echo "$LIB_LOC" | cut -d, -f1)
+TEST_TOTAL=$(echo "$TEST_LOC" | cut -d, -f1)
+
+BIN_CODE=$(echo "$BIN_LOC" | cut -d, -f2)
+LIB_CODE=$(echo "$LIB_LOC" | cut -d, -f2)
+TEST_CODE=$(echo "$TEST_LOC" | cut -d, -f2)
+
+# Function counts
+BIN_FUNCS=$(count_functions "$BIN_DIR")
+LIB_FUNCS=$(count_functions "$LIB_DIR")
+TEST_COUNT=$(count_tests)
+
+# Documentation coverage
+BIN_DOC=$(check_doc_coverage "$BIN_DIR")
+LIB_DOC=$(check_doc_coverage "$LIB_DIR")
+
+# TODOs
+TODO_COUNT=$(count_todos)
+
+# Complexity
+BIN_COMPLEXITY=$(average_complexity "$BIN_DIR")
+LIB_COMPLEXITY=$(average_complexity "$LIB_DIR")
+
+# Duplicates
+DUPLICATE_COUNT=$(find_duplicates)
+
+# Calculate test coverage ratio
+TOTAL_FUNCS=$((BIN_FUNCS + LIB_FUNCS))
+if [[ $TOTAL_FUNCS -gt 0 ]]; then
+    TEST_COVERAGE=$((TEST_COUNT * 100 / TOTAL_FUNCS))
+else
+    TEST_COVERAGE=0
+fi
+
+# File counts
+BIN_FILE_COUNT=$(find "$BIN_DIR" -name "*.sh" -o -type f ! -name "*.md" 2>/dev/null | wc -l)
+LIB_FILE_COUNT=$(find "$LIB_DIR" -name "*.sh" -type f 2>/dev/null | wc -l)
+TEST_FILE_COUNT=$(find "$TESTS_DIR" -name "*.sh" -type f 2>/dev/null | wc -l)
+
+#===============================================================================
+# Output Results
+#===============================================================================
+
+if $JSON_OUTPUT; then
+    cat << EOF
+{
+    "timestamp": "$(date -Iseconds)",
+    "lines_of_code": {
+        "bin": {"total": $BIN_TOTAL, "code": $BIN_CODE},
+        "lib": {"total": $LIB_TOTAL, "code": $LIB_CODE},
+        "tests": {"total": $TEST_TOTAL, "code": $TEST_CODE}
+    },
+    "functions": {
+        "bin": $BIN_FUNCS,
+        "lib": $LIB_FUNCS,
+        "total": $TOTAL_FUNCS
+    },
+    "tests": {
+        "count": $TEST_COUNT,
+        "coverage_percent": $TEST_COVERAGE
+    },
+    "documentation": {
+        "bin_percent": $BIN_DOC,
+        "lib_percent": $LIB_DOC
+    },
+    "complexity": {
+        "bin_avg": $BIN_COMPLEXITY,
+        "lib_avg": $LIB_COMPLEXITY
+    },
+    "issues": {
+        "todos": $TODO_COUNT,
+        "duplicates": $DUPLICATE_COUNT
+    },
+    "files": {
+        "bin": $BIN_FILE_COUNT,
+        "lib": $LIB_FILE_COUNT,
+        "tests": $TEST_FILE_COUNT
+    }
+}
+EOF
+    exit 0
+fi
+
+# Human-readable output
+echo ""
+echo -e "${BOLD}Lines of Code:${RESET}"
+echo -e "  bin/:   ${GREEN}$BIN_TOTAL${RESET} total, ${CYAN}$BIN_CODE${RESET} code"
+echo -e "  lib/:   ${GREEN}$LIB_TOTAL${RESET} total, ${CYAN}$LIB_CODE${RESET} code"
+echo -e "  tests/: ${GREEN}$TEST_TOTAL${RESET} total, ${CYAN}$TEST_CODE${RESET} code"
+echo -e "  ${BOLD}Total:  $((BIN_TOTAL + LIB_TOTAL + TEST_TOTAL))${RESET} lines"
+
+echo ""
+echo -e "${BOLD}Functions:${RESET}"
+echo -e "  bin/:   ${GREEN}$BIN_FUNCS${RESET} functions"
+echo -e "  lib/:   ${GREEN}$LIB_FUNCS${RESET} functions"
+echo -e "  ${BOLD}Total:  $TOTAL_FUNCS${RESET} functions"
+
+echo ""
+echo -e "${BOLD}Tests:${RESET}"
+echo -e "  Test functions: ${GREEN}$TEST_COUNT${RESET}"
+echo -e "  Test files:     ${GREEN}$TEST_FILE_COUNT${RESET}"
+if [[ $TEST_COVERAGE -ge 80 ]]; then
+    echo -e "  Coverage ratio: ${GREEN}$TEST_COVERAGE%${RESET} (tests/functions)"
+elif [[ $TEST_COVERAGE -ge 50 ]]; then
+    echo -e "  Coverage ratio: ${YELLOW}$TEST_COVERAGE%${RESET} (tests/functions)"
+else
+    echo -e "  Coverage ratio: ${RED}$TEST_COVERAGE%${RESET} (tests/functions)"
+fi
+
+echo ""
+echo -e "${BOLD}Documentation:${RESET}"
+if [[ $BIN_DOC -ge 50 ]]; then
+    echo -e "  bin/:   ${GREEN}$BIN_DOC%${RESET} documented"
+else
+    echo -e "  bin/:   ${YELLOW}$BIN_DOC%${RESET} documented"
+fi
+if [[ $LIB_DOC -ge 50 ]]; then
+    echo -e "  lib/:   ${GREEN}$LIB_DOC%${RESET} documented"
+else
+    echo -e "  lib/:   ${YELLOW}$LIB_DOC%${RESET} documented"
+fi
+
+echo ""
+echo -e "${BOLD}Complexity (avg):${RESET}"
+if [[ $BIN_COMPLEXITY -le 10 ]]; then
+    echo -e "  bin/:   ${GREEN}$BIN_COMPLEXITY${RESET}"
+else
+    echo -e "  bin/:   ${YELLOW}$BIN_COMPLEXITY${RESET}"
+fi
+if [[ $LIB_COMPLEXITY -le 10 ]]; then
+    echo -e "  lib/:   ${GREEN}$LIB_COMPLEXITY${RESET}"
+else
+    echo -e "  lib/:   ${YELLOW}$LIB_COMPLEXITY${RESET}"
+fi
+
+echo ""
+echo -e "${BOLD}Issues:${RESET}"
+if [[ $TODO_COUNT -eq 0 ]]; then
+    echo -e "  TODOs/FIXMEs: ${GREEN}$TODO_COUNT${RESET}"
+else
+    echo -e "  TODOs/FIXMEs: ${YELLOW}$TODO_COUNT${RESET}"
+fi
+if [[ $DUPLICATE_COUNT -eq 0 ]]; then
+    echo -e "  Duplicates:   ${GREEN}$DUPLICATE_COUNT${RESET}"
+else
+    echo -e "  Duplicates:   ${YELLOW}$DUPLICATE_COUNT${RESET}"
+fi
+
+#===============================================================================
+# Quality Score
+#===============================================================================
+
+# Calculate overall quality score (0-100)
+QUALITY_SCORE=100
+
+# Deduct for low test coverage
+if [[ $TEST_COVERAGE -lt 80 ]]; then
+    QUALITY_SCORE=$((QUALITY_SCORE - (80 - TEST_COVERAGE) / 2))
+fi
+
+# Deduct for low documentation
+AVG_DOC=$(( (BIN_DOC + LIB_DOC) / 2 ))
+if [[ $AVG_DOC -lt 50 ]]; then
+    QUALITY_SCORE=$((QUALITY_SCORE - (50 - AVG_DOC) / 2))
+fi
+
+# Deduct for high complexity
+AVG_COMPLEXITY=$(( (BIN_COMPLEXITY + LIB_COMPLEXITY) / 2 ))
+if [[ $AVG_COMPLEXITY -gt 10 ]]; then
+    QUALITY_SCORE=$((QUALITY_SCORE - (AVG_COMPLEXITY - 10)))
+fi
+
+# Deduct for TODOs
+if [[ $TODO_COUNT -gt 10 ]]; then
+    QUALITY_SCORE=$((QUALITY_SCORE - (TODO_COUNT - 10) / 2))
+fi
+
+# Cap at 0-100
+[[ $QUALITY_SCORE -lt 0 ]] && QUALITY_SCORE=0
+[[ $QUALITY_SCORE -gt 100 ]] && QUALITY_SCORE=100
+
+echo ""
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo -e "${BOLD}         OVERALL QUALITY SCORE               ${RESET}"
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo ""
+
+if [[ $QUALITY_SCORE -ge 80 ]]; then
+    echo -e "            ${GREEN}${BOLD}$QUALITY_SCORE / 100${RESET}"
+    echo -e "            ${GREEN}EXCELLENT${RESET}"
+elif [[ $QUALITY_SCORE -ge 60 ]]; then
+    echo -e "            ${YELLOW}${BOLD}$QUALITY_SCORE / 100${RESET}"
+    echo -e "            ${YELLOW}GOOD${RESET}"
+else
+    echo -e "            ${RED}${BOLD}$QUALITY_SCORE / 100${RESET}"
+    echo -e "            ${RED}NEEDS IMPROVEMENT${RESET}"
+fi
+
+echo ""
+
+#===============================================================================
+# Generate Report
+#===============================================================================
+
+if $GENERATE_REPORT; then
+    mkdir -p "$REPORT_DIR"
+    REPORT_FILE="${REPORT_DIR}/quality-report-$(date +%Y%m%d-%H%M%S).html"
+
+    cat > "$REPORT_FILE" << EOF
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tri-Agent Quality Report</title>
+    <style>
+        body { font-family: sans-serif; margin: 40px; }
+        .metric { margin: 20px 0; padding: 10px; background: #f5f5f5; }
+        .good { color: green; }
+        .warn { color: orange; }
+        .bad { color: red; }
+        h1 { color: #333; }
+        .score { font-size: 48px; font-weight: bold; text-align: center; padding: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Tri-Agent Quality Report</h1>
+    <p>Generated: $(date)</p>
+
+    <div class="score ${QUALITY_SCORE -ge 80 && echo 'good' || echo 'warn'}">
+        Quality Score: $QUALITY_SCORE / 100
+    </div>
+
+    <div class="metric">
+        <h2>Lines of Code</h2>
+        <p>Total: $((BIN_TOTAL + LIB_TOTAL + TEST_TOTAL)) lines</p>
+        <p>Code: $((BIN_CODE + LIB_CODE + TEST_CODE)) lines</p>
+    </div>
+
+    <div class="metric">
+        <h2>Test Coverage</h2>
+        <p>Tests: $TEST_COUNT test functions</p>
+        <p>Coverage: $TEST_COVERAGE%</p>
+    </div>
+
+    <div class="metric">
+        <h2>Documentation</h2>
+        <p>bin/: $BIN_DOC%</p>
+        <p>lib/: $LIB_DOC%</p>
+    </div>
+
+    <div class="metric">
+        <h2>Issues</h2>
+        <p>TODOs: $TODO_COUNT</p>
+        <p>Duplicates: $DUPLICATE_COUNT</p>
+    </div>
+</body>
+</html>
+EOF
+
+    echo -e "${CYAN}Report generated: $REPORT_FILE${RESET}"
+fi
+
+# Exit with appropriate code
+if [[ $QUALITY_SCORE -ge 80 ]]; then
+    exit 0
+elif [[ $QUALITY_SCORE -ge 60 ]]; then
+    exit 0
+else
+    exit 1
+fi

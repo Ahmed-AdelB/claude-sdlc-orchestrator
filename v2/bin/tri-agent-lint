@@ -1,0 +1,436 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-lint - Code linting and style checker for tri-agent system
+#===============================================================================
+# Usage:
+#   tri-agent-lint                    Run all linting checks
+#   tri-agent-lint --fix              Auto-fix issues where possible
+#   tri-agent-lint --check [file]     Check specific file
+#   tri-agent-lint --report           Generate linting report
+#===============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+LIB_DIR="${PROJECT_ROOT}/lib"
+BIN_DIR="${PROJECT_ROOT}/bin"
+TESTS_DIR="${PROJECT_ROOT}/tests"
+REPORT_DIR="${PROJECT_ROOT}/reports"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# Counters
+ERRORS=0
+WARNINGS=0
+FILES_CHECKED=0
+
+# Options
+FIX_MODE=false
+SPECIFIC_FILE=""
+GENERATE_REPORT=false
+
+#===============================================================================
+# Usage
+#===============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}tri-agent-lint${RESET} - Code linting for tri-agent system
+
+${BOLD}USAGE:${RESET}
+    tri-agent-lint [OPTIONS]
+
+${BOLD}OPTIONS:${RESET}
+    --fix           Auto-fix issues where possible
+    --check FILE    Check specific file only
+    --report        Generate detailed lint report
+    -h, --help      Show this help message
+
+${BOLD}CHECKS PERFORMED:${RESET}
+    - ShellCheck (if available)
+    - Bash syntax validation
+    - Shebang presence
+    - Executable permissions
+    - set -euo pipefail presence
+    - Trailing whitespace
+    - Tab/space consistency
+    - YAML validation
+    - JSON validation
+
+${BOLD}EXIT CODES:${RESET}
+    0   All checks passed
+    1   Errors found
+    2   Warnings only
+EOF
+}
+
+#===============================================================================
+# Parse Arguments
+#===============================================================================
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fix)
+            FIX_MODE=true
+            shift
+            ;;
+        --check)
+            SPECIFIC_FILE="$2"
+            shift 2
+            ;;
+        --report)
+            GENERATE_REPORT=true
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${RESET}" >&2
+            exit 1
+            ;;
+    esac
+done
+
+#===============================================================================
+# Linting Functions
+#===============================================================================
+
+log_error() {
+    ((ERRORS++))
+    echo -e "  ${RED}[ERROR]${RESET} $1"
+}
+
+log_warning() {
+    ((WARNINGS++))
+    echo -e "  ${YELLOW}[WARN]${RESET} $1"
+}
+
+log_pass() {
+    echo -e "  ${GREEN}[PASS]${RESET} $1"
+}
+
+log_info() {
+    echo -e "  ${CYAN}[INFO]${RESET} $1"
+}
+
+# Check if ShellCheck is available
+check_shellcheck() {
+    if command -v shellcheck >/dev/null 2>&1; then
+        return 0
+    else
+        log_warning "ShellCheck not installed - some checks will be skipped"
+        log_info "Install with: apt install shellcheck OR brew install shellcheck"
+        return 1
+    fi
+}
+
+# Check bash syntax
+check_bash_syntax() {
+    local file="$1"
+    if bash -n "$file" 2>/dev/null; then
+        return 0
+    else
+        log_error "$file: Bash syntax error"
+        return 1
+    fi
+}
+
+# Check shebang
+check_shebang() {
+    local file="$1"
+    local first_line
+    first_line=$(head -1 "$file" 2>/dev/null)
+
+    if [[ "$first_line" =~ ^#!.*bash ]] || [[ "$first_line" =~ ^#!.*/bin/sh ]]; then
+        return 0
+    else
+        log_warning "$file: Missing or invalid shebang"
+        return 1
+    fi
+}
+
+# Check for set -euo pipefail
+check_strict_mode() {
+    local file="$1"
+
+    if grep -q "set -euo pipefail" "$file" 2>/dev/null || \
+       grep -q "set -e" "$file" 2>/dev/null; then
+        return 0
+    else
+        log_warning "$file: Missing strict mode (set -euo pipefail)"
+        return 1
+    fi
+}
+
+# Check executable permission
+check_executable() {
+    local file="$1"
+    if [[ -x "$file" ]]; then
+        return 0
+    else
+        if $FIX_MODE; then
+            chmod +x "$file"
+            log_info "$file: Fixed executable permission"
+            return 0
+        else
+            log_warning "$file: Not executable"
+            return 1
+        fi
+    fi
+}
+
+# Check trailing whitespace
+check_trailing_whitespace() {
+    local file="$1"
+    local lines_with_trailing
+
+    lines_with_trailing=$(grep -n '[[:space:]]$' "$file" 2>/dev/null | wc -l)
+
+    if [[ $lines_with_trailing -eq 0 ]]; then
+        return 0
+    else
+        if $FIX_MODE; then
+            sed -i 's/[[:space:]]*$//' "$file"
+            log_info "$file: Fixed $lines_with_trailing lines with trailing whitespace"
+            return 0
+        else
+            log_warning "$file: $lines_with_trailing lines with trailing whitespace"
+            return 1
+        fi
+    fi
+}
+
+# Check for mixed tabs/spaces
+check_indentation() {
+    local file="$1"
+
+    # Count lines starting with tabs
+    local tab_lines
+    tab_lines=$(grep -c '^	' "$file" 2>/dev/null || echo 0)
+
+    # Count lines starting with spaces (2 or 4 space indent)
+    local space_lines
+    space_lines=$(grep -c '^  [^ ]' "$file" 2>/dev/null || echo 0)
+
+    # If both tabs and significant spaces, warn about mixed indentation
+    if [[ $tab_lines -gt 5 && $space_lines -gt 5 ]]; then
+        log_warning "$file: Mixed tabs and spaces indentation"
+        return 1
+    fi
+
+    return 0
+}
+
+# Check YAML syntax
+check_yaml_syntax() {
+    local file="$1"
+
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c "import yaml; yaml.safe_load(open('$file'))" 2>/dev/null; then
+            return 0
+        else
+            log_error "$file: Invalid YAML syntax"
+            return 1
+        fi
+    else
+        # Fallback: basic structure check
+        if grep -qE '^[a-zA-Z_-]+:' "$file" 2>/dev/null; then
+            return 0
+        else
+            log_warning "$file: Could not validate YAML (python3 not available)"
+            return 1
+        fi
+    fi
+}
+
+# Check JSON syntax
+check_json_syntax() {
+    local file="$1"
+
+    if jq -e '.' "$file" >/dev/null 2>&1; then
+        return 0
+    else
+        log_error "$file: Invalid JSON syntax"
+        return 1
+    fi
+}
+
+# Run ShellCheck if available
+run_shellcheck() {
+    local file="$1"
+
+    if command -v shellcheck >/dev/null 2>&1; then
+        local output
+        output=$(shellcheck --format=gcc "$file" 2>&1 || true)
+
+        if [[ -n "$output" ]]; then
+            local error_count
+            error_count=$(echo "$output" | grep -c ":error:" || echo 0)
+            local warning_count
+            warning_count=$(echo "$output" | grep -c ":warning:" || echo 0)
+
+            if [[ $error_count -gt 0 ]]; then
+                log_error "$file: ShellCheck found $error_count errors"
+                ((ERRORS += error_count))
+            fi
+
+            if [[ $warning_count -gt 0 ]]; then
+                log_warning "$file: ShellCheck found $warning_count warnings"
+                ((WARNINGS += warning_count))
+            fi
+
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# Lint a single bash file
+lint_bash_file() {
+    local file="$1"
+    local file_errors=0
+
+    ((FILES_CHECKED++))
+
+    check_bash_syntax "$file" || ((file_errors++))
+    check_shebang "$file" || ((file_errors++))
+    check_strict_mode "$file" || ((file_errors++))
+    check_executable "$file" || ((file_errors++))
+    check_trailing_whitespace "$file" || ((file_errors++))
+    check_indentation "$file" || ((file_errors++))
+    run_shellcheck "$file" || ((file_errors++))
+
+    if [[ $file_errors -eq 0 ]]; then
+        log_pass "$file"
+    fi
+
+    return $file_errors
+}
+
+#===============================================================================
+# Main Linting
+#===============================================================================
+
+echo ""
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo -e "${BOLD}       TRI-AGENT CODE LINTING                ${RESET}"
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo ""
+
+# Check for ShellCheck
+HAS_SHELLCHECK=false
+if check_shellcheck; then
+    HAS_SHELLCHECK=true
+fi
+
+# If specific file provided, lint only that
+if [[ -n "$SPECIFIC_FILE" ]]; then
+    echo -e "${BOLD}Checking: $SPECIFIC_FILE${RESET}"
+    if [[ -f "$SPECIFIC_FILE" ]]; then
+        lint_bash_file "$SPECIFIC_FILE"
+    else
+        log_error "File not found: $SPECIFIC_FILE"
+    fi
+else
+    # Lint all bin scripts
+    echo -e "${BOLD}Linting bin/ scripts...${RESET}"
+    for file in "$BIN_DIR"/*; do
+        [[ -f "$file" ]] || continue
+        [[ "$file" == *.md ]] && continue
+        lint_bash_file "$file" || true
+    done
+
+    # Lint all lib scripts
+    echo ""
+    echo -e "${BOLD}Linting lib/ scripts...${RESET}"
+    for file in "$LIB_DIR"/*.sh; do
+        [[ -f "$file" ]] || continue
+        lint_bash_file "$file" || true
+    done
+
+    # Lint test scripts
+    echo ""
+    echo -e "${BOLD}Linting tests/ scripts...${RESET}"
+    find "$TESTS_DIR" -name "*.sh" -type f 2>/dev/null | while read -r file; do
+        lint_bash_file "$file" || true
+    done
+
+    # Lint YAML files
+    echo ""
+    echo -e "${BOLD}Checking YAML files...${RESET}"
+    find "$PROJECT_ROOT" -name "*.yaml" -o -name "*.yml" 2>/dev/null | while read -r file; do
+        ((FILES_CHECKED++))
+        if check_yaml_syntax "$file"; then
+            log_pass "$file"
+        fi
+    done
+
+    # Lint JSON files (excluding node_modules, etc.)
+    echo ""
+    echo -e "${BOLD}Checking JSON files...${RESET}"
+    find "$PROJECT_ROOT" -name "*.json" -type f ! -path "*/node_modules/*" 2>/dev/null | while read -r file; do
+        ((FILES_CHECKED++))
+        if check_json_syntax "$file"; then
+            log_pass "$file"
+        fi
+    done
+fi
+
+#===============================================================================
+# Generate Report
+#===============================================================================
+
+if $GENERATE_REPORT; then
+    mkdir -p "$REPORT_DIR"
+    REPORT_FILE="${REPORT_DIR}/lint-report-$(date +%Y%m%d-%H%M%S).json"
+
+    cat > "$REPORT_FILE" << EOF
+{
+    "timestamp": "$(date -Iseconds)",
+    "files_checked": $FILES_CHECKED,
+    "errors": $ERRORS,
+    "warnings": $WARNINGS,
+    "shellcheck_available": $HAS_SHELLCHECK,
+    "fix_mode": $FIX_MODE
+}
+EOF
+
+    echo ""
+    echo -e "${CYAN}Report generated: $REPORT_FILE${RESET}"
+fi
+
+#===============================================================================
+# Summary
+#===============================================================================
+
+echo ""
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo -e "${BOLD}           LINTING SUMMARY                    ${RESET}"
+echo -e "${BOLD}${BLUE}============================================${RESET}"
+echo ""
+echo -e "Files checked: ${BOLD}$FILES_CHECKED${RESET}"
+echo -e "Errors:        ${RED}$ERRORS${RESET}"
+echo -e "Warnings:      ${YELLOW}$WARNINGS${RESET}"
+echo ""
+
+if [[ $ERRORS -gt 0 ]]; then
+    echo -e "${RED}${BOLD}Linting FAILED with $ERRORS errors${RESET}"
+    exit 1
+elif [[ $WARNINGS -gt 0 ]]; then
+    echo -e "${YELLOW}${BOLD}Linting passed with $WARNINGS warnings${RESET}"
+    exit 2
+else
+    echo -e "${GREEN}${BOLD}All linting checks passed!${RESET}"
+    exit 0
+fi
