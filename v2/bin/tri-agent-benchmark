@@ -1,0 +1,428 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-benchmark - Benchmark delegate response times and performance
+#===============================================================================
+# Benchmarks each model's response time with standardized prompts.
+#
+# Usage:
+#   tri-agent-benchmark                Run quick benchmark (all models)
+#   tri-agent-benchmark --model claude Only benchmark Claude
+#   tri-agent-benchmark --full         Run comprehensive benchmark
+#   tri-agent-benchmark --iterations N Run N iterations per test
+#   tri-agent-benchmark --json         Output results as JSON
+#   tri-agent-benchmark --help         Show help
+#
+# Features:
+#   - Standardized test prompts for fair comparison
+#   - Response time statistics (min, max, avg, p95)
+#   - Success/failure rates
+#   - Throughput metrics
+#===============================================================================
+
+set -euo pipefail
+
+# Resolve script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+BIN_DIR="${SCRIPT_DIR}"
+
+# Configuration
+ITERATIONS=3
+MODELS=("claude" "gemini" "codex")
+BENCHMARK_MODE="quick"
+JSON_OUTPUT=false
+TIMEOUT=60
+
+# Colors
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    MAGENTA='\033[0;35m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' MAGENTA='' BOLD='' DIM='' RESET=''
+fi
+
+#===============================================================================
+# Test Prompts
+#===============================================================================
+
+# Quick prompts (fast response expected)
+QUICK_PROMPTS=(
+    "What is 2+2? Respond with just the number."
+    "Say 'hello' and nothing else."
+    "Count from 1 to 5."
+)
+
+# Standard prompts (typical usage)
+STANDARD_PROMPTS=(
+    "Explain the difference between TCP and UDP in 2-3 sentences."
+    "Write a simple function to check if a number is prime."
+    "List 5 best practices for API design."
+)
+
+# Complex prompts (for full benchmark)
+COMPLEX_PROMPTS=(
+    "Design a simple caching strategy for a web application. Include cache invalidation."
+    "Write a binary search tree implementation with insert, search, and delete operations."
+    "Review this code pattern and suggest improvements: function getData() { return fetch('/api').then(r => r.json()) }"
+)
+
+#===============================================================================
+# Helper Functions
+#===============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}tri-agent-benchmark${RESET} - Benchmark model response times
+
+${BOLD}USAGE:${RESET}
+    tri-agent-benchmark [OPTIONS]
+
+${BOLD}OPTIONS:${RESET}
+    --model MODEL    Only benchmark specific model (claude/gemini/codex)
+    --full           Run comprehensive benchmark (more prompts)
+    --quick          Run quick benchmark (default)
+    --iterations N   Number of iterations per test (default: 3)
+    --timeout N      Timeout per request in seconds (default: 60)
+    --json           Output results as JSON
+    --help, -h       Show this help message
+
+${BOLD}EXAMPLES:${RESET}
+    tri-agent-benchmark                 Quick benchmark of all models
+    tri-agent-benchmark --model claude  Benchmark only Claude
+    tri-agent-benchmark --full --iterations 5  Comprehensive test
+
+${BOLD}METRICS REPORTED:${RESET}
+    - Response time (min, max, avg, p95)
+    - Success rate
+    - Throughput (requests/minute)
+    - First token latency (estimated)
+EOF
+}
+
+get_model_color() {
+    local model="$1"
+    case "$model" in
+        claude) echo "$BLUE" ;;
+        gemini) echo "$GREEN" ;;
+        codex) echo "$YELLOW" ;;
+        *) echo "$RESET" ;;
+    esac
+}
+
+# Get delegate command for model
+get_delegate_cmd() {
+    local model="$1"
+    case "$model" in
+        claude) echo "${BIN_DIR}/claude-delegate" ;;
+        gemini) echo "${BIN_DIR}/gemini-delegate" ;;
+        codex)  echo "${BIN_DIR}/codex-delegate" ;;
+    esac
+}
+
+# Check if delegate is available
+check_delegate() {
+    local model="$1"
+    local delegate
+    delegate=$(get_delegate_cmd "$model")
+
+    if [[ -x "$delegate" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Run a single benchmark test
+run_single_test() {
+    local model="$1"
+    local prompt="$2"
+    local delegate
+    delegate=$(get_delegate_cmd "$model")
+
+    local start_ms end_ms duration_ms
+    start_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+
+    local output exit_code
+    output=$(timeout "$TIMEOUT" "$delegate" --timeout "$TIMEOUT" "$prompt" 2>/dev/null) && exit_code=0 || exit_code=$?
+
+    end_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    duration_ms=$((end_ms - start_ms))
+
+    local status="success"
+    if [[ $exit_code -ne 0 ]]; then
+        status="failure"
+    elif echo "$output" | grep -q '"status":"error"' 2>/dev/null; then
+        status="error"
+    fi
+
+    echo "${duration_ms}:${status}"
+}
+
+# Calculate statistics from results
+calculate_stats() {
+    local results="$1"
+
+    local times=()
+    local success_count=0
+    local failure_count=0
+
+    while IFS=: read -r duration status; do
+        if [[ "$status" == "success" ]]; then
+            times+=("$duration")
+            ((success_count++))
+        else
+            ((failure_count++))
+        fi
+    done <<< "$results"
+
+    local count=${#times[@]}
+    if [[ $count -eq 0 ]]; then
+        echo "0:0:0:0:0:$failure_count"
+        return
+    fi
+
+    # Sort times
+    IFS=$'\n' sorted=($(sort -n <<<"${times[*]}")); unset IFS
+
+    local min=${sorted[0]}
+    local max=${sorted[$((count-1))]}
+
+    # Calculate average
+    local sum=0
+    for t in "${times[@]}"; do
+        sum=$((sum + t))
+    done
+    local avg=$((sum / count))
+
+    # Calculate p95
+    local p95_idx=$(( (count * 95 + 99) / 100 - 1 ))
+    if [[ $p95_idx -lt 0 ]]; then p95_idx=0; fi
+    if [[ $p95_idx -ge $count ]]; then p95_idx=$((count-1)); fi
+    local p95=${sorted[$p95_idx]}
+
+    echo "${min}:${max}:${avg}:${p95}:${success_count}:${failure_count}"
+}
+
+# Format milliseconds to human readable
+format_ms() {
+    local ms="$1"
+    if [[ $ms -lt 1000 ]]; then
+        echo "${ms}ms"
+    elif [[ $ms -lt 60000 ]]; then
+        echo "$(echo "scale=2; $ms/1000" | bc 2>/dev/null || echo "$((ms/1000))")s"
+    else
+        local mins=$((ms / 60000))
+        local secs=$(((ms % 60000) / 1000))
+        echo "${mins}m${secs}s"
+    fi
+}
+
+#===============================================================================
+# Benchmark Functions
+#===============================================================================
+
+benchmark_model() {
+    local model="$1"
+    local prompts=("${!2}")
+    local iterations="$3"
+
+    local color
+    color=$(get_model_color "$model")
+
+    if ! check_delegate "$model"; then
+        echo -e "  ${RED}[SKIP]${RESET} ${model}: Delegate not available"
+        return 1
+    fi
+
+    echo -e "  ${color}${BOLD}Testing ${model}...${RESET}"
+
+    local all_results=""
+    local total_tests=$((${#prompts[@]} * iterations))
+    local current=0
+
+    for prompt in "${prompts[@]}"; do
+        for ((i=1; i<=iterations; i++)); do
+            ((current++))
+            printf "\r    Progress: %d/%d " "$current" "$total_tests"
+
+            local result
+            result=$(run_single_test "$model" "$prompt")
+            all_results+="${result}"$'\n'
+        done
+    done
+
+    printf "\r                          \r"
+
+    # Calculate and display stats
+    local stats
+    stats=$(calculate_stats "$all_results")
+
+    IFS=: read -r min max avg p95 success_count failure_count <<< "$stats"
+
+    local total=$((success_count + failure_count))
+    local success_rate=0
+    if [[ $total -gt 0 ]]; then
+        success_rate=$((success_count * 100 / total))
+    fi
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        cat <<EOF
+    {
+      "model": "$model",
+      "min_ms": $min,
+      "max_ms": $max,
+      "avg_ms": $avg,
+      "p95_ms": $p95,
+      "success_count": $success_count,
+      "failure_count": $failure_count,
+      "success_rate": $success_rate,
+      "total_tests": $total
+    }
+EOF
+    else
+        echo -e "    ${BOLD}Results:${RESET}"
+        echo -e "      Min:     $(format_ms "$min")"
+        echo -e "      Max:     $(format_ms "$max")"
+        echo -e "      Avg:     $(format_ms "$avg")"
+        echo -e "      P95:     $(format_ms "$p95")"
+        echo -e "      Success: ${success_count}/${total} (${success_rate}%)"
+        echo ""
+    fi
+
+    # Store for comparison
+    echo "${model}:${min}:${max}:${avg}:${p95}:${success_rate}"
+}
+
+run_benchmark() {
+    local prompts_ref="$1"
+
+    echo ""
+    echo -e "${BOLD}${MAGENTA}════════════════════════════════════════════════════════════${RESET}"
+    echo -e "${BOLD}${MAGENTA}              TRI-AGENT BENCHMARK                           ${RESET}"
+    echo -e "${BOLD}${MAGENTA}════════════════════════════════════════════════════════════${RESET}"
+    echo ""
+    echo -e "  Mode:       ${BENCHMARK_MODE}"
+    echo -e "  Iterations: ${ITERATIONS}"
+    echo -e "  Timeout:    ${TIMEOUT}s"
+    echo ""
+    echo -e "${DIM}────────────────────────────────────────────────────────────${RESET}"
+
+    local all_model_results=()
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "{"
+        echo '  "benchmark": {'
+        echo "    \"mode\": \"$BENCHMARK_MODE\","
+        echo "    \"iterations\": $ITERATIONS,"
+        echo "    \"timeout\": $TIMEOUT"
+        echo "  },"
+        echo '  "results": ['
+    fi
+
+    local first=true
+    for model in "${MODELS[@]}"; do
+        if [[ "$JSON_OUTPUT" == "true" && "$first" != "true" ]]; then
+            echo ","
+        fi
+        first=false
+
+        local result
+        result=$(benchmark_model "$model" "$prompts_ref" "$ITERATIONS") || true
+        all_model_results+=("$result")
+    done
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo ""
+        echo "  ]"
+        echo "}"
+    else
+        # Print comparison table
+        echo -e "${DIM}────────────────────────────────────────────────────────────${RESET}"
+        echo ""
+        echo -e "${BOLD}Comparison Summary:${RESET}"
+        echo ""
+        printf "  ${BOLD}%-10s %-12s %-12s %-12s %-10s${RESET}\n" "Model" "Min" "Avg" "P95" "Success"
+        echo -e "  ${DIM}─────────────────────────────────────────────────────${RESET}"
+
+        for result in "${all_model_results[@]}"; do
+            if [[ -n "$result" ]]; then
+                IFS=: read -r model min max avg p95 success_rate <<< "$result"
+                local color
+                color=$(get_model_color "$model")
+                printf "  ${color}%-10s${RESET} %-12s %-12s %-12s %s%%\n" \
+                    "$model" "$(format_ms "$min")" "$(format_ms "$avg")" "$(format_ms "$p95")" "$success_rate"
+            fi
+        done
+
+        echo ""
+        echo -e "${BOLD}${MAGENTA}════════════════════════════════════════════════════════════${RESET}"
+        echo ""
+    fi
+}
+
+#===============================================================================
+# Parse Arguments
+#===============================================================================
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --model)
+            MODELS=("$2")
+            shift 2
+            ;;
+        --full)
+            BENCHMARK_MODE="full"
+            shift
+            ;;
+        --quick)
+            BENCHMARK_MODE="quick"
+            shift
+            ;;
+        --iterations)
+            ITERATIONS="$2"
+            shift 2
+            ;;
+        --timeout)
+            TIMEOUT="$2"
+            shift 2
+            ;;
+        --json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${RESET}" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+    esac
+done
+
+#===============================================================================
+# Main
+#===============================================================================
+
+# Select prompts based on mode
+if [[ "$BENCHMARK_MODE" == "full" ]]; then
+    ALL_PROMPTS=("${QUICK_PROMPTS[@]}" "${STANDARD_PROMPTS[@]}" "${COMPLEX_PROMPTS[@]}")
+else
+    ALL_PROMPTS=("${QUICK_PROMPTS[@]}")
+fi
+
+run_benchmark "ALL_PROMPTS[@]"

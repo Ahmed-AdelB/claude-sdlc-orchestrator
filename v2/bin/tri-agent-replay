@@ -1,0 +1,381 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-replay - Replay routing decisions from logs
+#===============================================================================
+# Replays past routing decisions to debug routing logic and analyze patterns.
+#
+# Usage:
+#   tri-agent-replay                     Show recent routing decisions
+#   tri-agent-replay --date 2025-12-27   Show decisions for specific date
+#   tri-agent-replay --last N            Show last N decisions
+#   tri-agent-replay --compare           Compare original vs current routing
+#   tri-agent-replay --stats             Show routing statistics
+#   tri-agent-replay --json              Output as JSON
+#   tri-agent-replay --help              Show help
+#
+# Features:
+#   - View historical routing decisions
+#   - Compare past decisions to current routing rules
+#   - Identify routing rule changes
+#   - Generate statistics on model usage
+#===============================================================================
+
+set -euo pipefail
+
+# Resolve script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+
+# Paths
+LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+ROUTING_LOG="${LOG_DIR}/routing-decisions.jsonl"
+
+# Configuration
+SHOW_COUNT=20
+DATE_FILTER=""
+COMPARE_MODE=false
+STATS_MODE=false
+JSON_OUTPUT=false
+
+# Colors
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    MAGENTA='\033[0;35m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' MAGENTA='' BOLD='' DIM='' RESET=''
+fi
+
+#===============================================================================
+# Helper Functions
+#===============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}tri-agent-replay${RESET} - Replay and analyze routing decisions
+
+${BOLD}USAGE:${RESET}
+    tri-agent-replay [OPTIONS]
+
+${BOLD}OPTIONS:${RESET}
+    --date DATE      Show decisions for specific date (YYYY-MM-DD)
+    --last N         Show last N decisions (default: 20)
+    --compare        Compare original vs current routing logic
+    --stats          Show routing statistics
+    --json           Output as JSON
+    --help, -h       Show this help message
+
+${BOLD}EXAMPLES:${RESET}
+    tri-agent-replay                      Show last 20 decisions
+    tri-agent-replay --last 50            Show last 50 decisions
+    tri-agent-replay --date 2025-12-27    Show decisions from Dec 27
+    tri-agent-replay --compare            Compare with current rules
+    tri-agent-replay --stats              Show model usage statistics
+
+${BOLD}OUTPUT COLUMNS:${RESET}
+    Time      - When the decision was made
+    Model     - Selected model (claude/gemini/codex)
+    Conf      - Confidence score (0-100%)
+    Reason    - Routing reason
+    Changed   - (in compare mode) Would current rules differ?
+EOF
+}
+
+get_model_color() {
+    local model="$1"
+    case "$model" in
+        claude) echo "$BLUE" ;;
+        gemini) echo "$GREEN" ;;
+        codex) echo "$YELLOW" ;;
+        *) echo "$RESET" ;;
+    esac
+}
+
+# Re-route a prompt with current rules (for comparison)
+simulate_routing() {
+    local prompt="$1"
+    local prompt_lower
+    prompt_lower=$(echo "$prompt" | tr '[:upper:]' '[:lower:]')
+
+    # Gemini patterns (large context, analysis)
+    if echo "$prompt_lower" | grep -qE "(analyze|review|audit|scan|entire|codebase|large|100k|document|multimodal|image|pdf|video)"; then
+        echo "gemini"
+        return
+    fi
+
+    # Codex patterns (implementation, rapid coding)
+    if echo "$prompt_lower" | grep -qE "(implement|build|create|generate|write code|fix bug|debug|refactor|prototype|scaffold)"; then
+        echo "codex"
+        return
+    fi
+
+    # Claude patterns (architecture, complex reasoning)
+    if echo "$prompt_lower" | grep -qE "(architect|design|plan|strategy|complex|decision|evaluate|compare|tradeoff|security)"; then
+        echo "claude"
+        return
+    fi
+
+    # Default to Claude
+    echo "claude"
+}
+
+#===============================================================================
+# Main Functions
+#===============================================================================
+
+show_decisions() {
+    local log_file="$1"
+    local count="$2"
+    local date_filter="$3"
+
+    if [[ ! -f "$log_file" ]]; then
+        echo -e "${YELLOW}No routing decisions log found${RESET}"
+        echo "Expected: $log_file"
+        return 1
+    fi
+
+    local entries
+    if [[ -n "$date_filter" ]]; then
+        entries=$(grep "\"timestamp\":\"${date_filter}" "$log_file" 2>/dev/null | tail -n "$count")
+    else
+        entries=$(tail -n "$count" "$log_file" 2>/dev/null)
+    fi
+
+    if [[ -z "$entries" ]]; then
+        echo -e "${YELLOW}No routing decisions found${RESET}"
+        return 0
+    fi
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$entries"
+        return 0
+    fi
+
+    echo ""
+    echo -e "${BOLD}${MAGENTA}Recent Routing Decisions${RESET}"
+    echo -e "${DIM}────────────────────────────────────────────────────────────────${RESET}"
+    printf "${BOLD}%-12s %-8s %-5s %-45s${RESET}\n" "Time" "Model" "Conf" "Reason"
+    echo -e "${DIM}────────────────────────────────────────────────────────────────${RESET}"
+
+    echo "$entries" | while read -r line; do
+        if command -v jq &>/dev/null; then
+            local timestamp model confidence reason
+            timestamp=$(echo "$line" | jq -r '.timestamp // ""' 2>/dev/null | cut -c12-19)
+            model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null)
+            confidence=$(echo "$line" | jq -r '.confidence // 0' 2>/dev/null)
+            reason=$(echo "$line" | jq -r '.reason // ""' 2>/dev/null | cut -c1-45)
+
+            local color
+            color=$(get_model_color "$model")
+            local conf_pct=$((confidence))
+
+            printf "%-12s ${color}%-8s${RESET} %3d%% %-45s\n" \
+                "$timestamp" "$model" "$conf_pct" "$reason"
+        else
+            echo "$line" | cut -c1-80
+        fi
+    done
+
+    echo -e "${DIM}────────────────────────────────────────────────────────────────${RESET}"
+    echo ""
+}
+
+compare_decisions() {
+    local log_file="$1"
+    local count="$2"
+
+    if [[ ! -f "$log_file" ]]; then
+        echo -e "${YELLOW}No routing decisions log found${RESET}"
+        return 1
+    fi
+
+    local entries
+    entries=$(tail -n "$count" "$log_file" 2>/dev/null)
+
+    if [[ -z "$entries" ]]; then
+        echo -e "${YELLOW}No routing decisions to compare${RESET}"
+        return 0
+    fi
+
+    echo ""
+    echo -e "${BOLD}${MAGENTA}Routing Decision Comparison${RESET}"
+    echo -e "${DIM}Comparing historical decisions to current routing rules${RESET}"
+    echo -e "${DIM}────────────────────────────────────────────────────────────────────────${RESET}"
+    printf "${BOLD}%-12s %-8s %-8s %-8s %-35s${RESET}\n" "Time" "Was" "Now" "Changed" "Prompt"
+    echo -e "${DIM}────────────────────────────────────────────────────────────────────────${RESET}"
+
+    local changed_count=0
+    local total_count=0
+
+    echo "$entries" | while read -r line; do
+        if command -v jq &>/dev/null; then
+            local timestamp original_model prompt_text
+            timestamp=$(echo "$line" | jq -r '.timestamp // ""' 2>/dev/null | cut -c12-19)
+            original_model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null)
+            prompt_text=$(echo "$line" | jq -r '.prompt // ""' 2>/dev/null)
+
+            if [[ -n "$prompt_text" ]]; then
+                local current_model
+                current_model=$(simulate_routing "$prompt_text")
+
+                local changed="no"
+                local changed_color="$DIM"
+                if [[ "$original_model" != "$current_model" ]]; then
+                    changed="YES"
+                    changed_color="$RED"
+                    ((changed_count++)) || true
+                fi
+
+                local orig_color current_color
+                orig_color=$(get_model_color "$original_model")
+                current_color=$(get_model_color "$current_model")
+
+                local prompt_short
+                prompt_short=$(echo "$prompt_text" | cut -c1-35)
+
+                printf "%-12s ${orig_color}%-8s${RESET} ${current_color}%-8s${RESET} ${changed_color}%-8s${RESET} %-35s\n" \
+                    "$timestamp" "$original_model" "$current_model" "$changed" "$prompt_short"
+            fi
+        fi
+        ((total_count++)) || true
+    done
+
+    echo -e "${DIM}────────────────────────────────────────────────────────────────────────${RESET}"
+    echo ""
+}
+
+show_stats() {
+    local log_file="$1"
+
+    if [[ ! -f "$log_file" ]]; then
+        echo -e "${YELLOW}No routing decisions log found${RESET}"
+        return 1
+    fi
+
+    local total claude_count gemini_count codex_count
+    total=$(wc -l < "$log_file")
+    claude_count=$(grep -c '"model":"claude"' "$log_file" 2>/dev/null || echo 0)
+    gemini_count=$(grep -c '"model":"gemini"' "$log_file" 2>/dev/null || echo 0)
+    codex_count=$(grep -c '"model":"codex"' "$log_file" 2>/dev/null || echo 0)
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        cat <<EOF
+{
+    "total_decisions": $total,
+    "by_model": {
+        "claude": $claude_count,
+        "gemini": $gemini_count,
+        "codex": $codex_count
+    },
+    "percentages": {
+        "claude": $(echo "scale=1; $claude_count * 100 / $total" | bc 2>/dev/null || echo 0),
+        "gemini": $(echo "scale=1; $gemini_count * 100 / $total" | bc 2>/dev/null || echo 0),
+        "codex": $(echo "scale=1; $codex_count * 100 / $total" | bc 2>/dev/null || echo 0)
+    }
+}
+EOF
+        return 0
+    fi
+
+    echo ""
+    echo -e "${BOLD}${MAGENTA}Routing Statistics${RESET}"
+    echo -e "${DIM}════════════════════════════════════════${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Total Decisions:${RESET} $total"
+    echo ""
+    echo -e "  ${BOLD}By Model:${RESET}"
+
+    if [[ $total -gt 0 ]]; then
+        local claude_pct gemini_pct codex_pct
+        claude_pct=$((claude_count * 100 / total))
+        gemini_pct=$((gemini_count * 100 / total))
+        codex_pct=$((codex_count * 100 / total))
+
+        # Bar chart
+        local claude_bar gemini_bar codex_bar
+        claude_bar=$(printf '%*s' $((claude_pct / 2)) | tr ' ' '█')
+        gemini_bar=$(printf '%*s' $((gemini_pct / 2)) | tr ' ' '█')
+        codex_bar=$(printf '%*s' $((codex_pct / 2)) | tr ' ' '█')
+
+        printf "    ${BLUE}Claude:${RESET} %5d (%3d%%) ${BLUE}%s${RESET}\n" "$claude_count" "$claude_pct" "$claude_bar"
+        printf "    ${GREEN}Gemini:${RESET} %5d (%3d%%) ${GREEN}%s${RESET}\n" "$gemini_count" "$gemini_pct" "$gemini_bar"
+        printf "    ${YELLOW}Codex:${RESET}  %5d (%3d%%) ${YELLOW}%s${RESET}\n" "$codex_count" "$codex_pct" "$codex_bar"
+    fi
+
+    echo ""
+    echo -e "${DIM}════════════════════════════════════════${RESET}"
+    echo ""
+
+    # Recent trend
+    echo -e "  ${BOLD}Recent Trend (last 100):${RESET}"
+    local recent_claude recent_gemini recent_codex
+    recent_claude=$(tail -100 "$log_file" 2>/dev/null | grep -c '"model":"claude"' || echo 0)
+    recent_gemini=$(tail -100 "$log_file" 2>/dev/null | grep -c '"model":"gemini"' || echo 0)
+    recent_codex=$(tail -100 "$log_file" 2>/dev/null | grep -c '"model":"codex"' || echo 0)
+
+    printf "    ${BLUE}Claude:${RESET} %d   ${GREEN}Gemini:${RESET} %d   ${YELLOW}Codex:${RESET} %d\n" \
+        "$recent_claude" "$recent_gemini" "$recent_codex"
+    echo ""
+}
+
+#===============================================================================
+# Parse Arguments
+#===============================================================================
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --date)
+            DATE_FILTER="$2"
+            shift 2
+            ;;
+        --last)
+            SHOW_COUNT="$2"
+            shift 2
+            ;;
+        --compare)
+            COMPARE_MODE=true
+            shift
+            ;;
+        --stats)
+            STATS_MODE=true
+            shift
+            ;;
+        --json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${RESET}" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+    esac
+done
+
+#===============================================================================
+# Main
+#===============================================================================
+
+if [[ "$STATS_MODE" == "true" ]]; then
+    show_stats "$ROUTING_LOG"
+elif [[ "$COMPARE_MODE" == "true" ]]; then
+    compare_decisions "$ROUTING_LOG" "$SHOW_COUNT"
+else
+    show_decisions "$ROUTING_LOG" "$SHOW_COUNT" "$DATE_FILTER"
+fi

@@ -1,0 +1,502 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-metrics - Export Prometheus-format metrics
+#===============================================================================
+# Exports metrics in Prometheus text exposition format for monitoring.
+#
+# Usage:
+#   tri-agent-metrics                Export all metrics
+#   tri-agent-metrics --port 9090    Start HTTP server on port 9090
+#   tri-agent-metrics --once         Export once and exit
+#   tri-agent-metrics --json         Output as JSON instead of Prometheus
+#   tri-agent-metrics --help         Show help
+#
+# Metrics Exported:
+#   tri_agent_requests_total         Total requests by model
+#   tri_agent_request_duration_ms    Request latency histogram
+#   tri_agent_errors_total           Total errors by model and type
+#   tri_agent_circuit_breaker_state  Circuit breaker state (0=closed,1=open,2=half_open)
+#   tri_agent_tokens_total           Total tokens processed
+#   tri_agent_routing_decisions      Routing decisions by model
+#   tri_agent_consensus_results      Consensus voting results
+#   tri_agent_health_status          Health check status (0=unhealthy,1=healthy)
+#===============================================================================
+
+set -euo pipefail
+
+# Resolve script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+
+# Paths
+STATE_DIR="${STATE_DIR:-${AUTONOMOUS_ROOT}/state}"
+LOG_DIR="${LOG_DIR:-${AUTONOMOUS_ROOT}/logs}"
+COST_LOG="${LOG_DIR}/costs"
+BREAKER_DIR="${STATE_DIR}/breakers"
+
+# Configuration
+HTTP_PORT=9090
+RUN_ONCE=false
+JSON_OUTPUT=false
+
+#===============================================================================
+# Helper Functions
+#===============================================================================
+
+show_help() {
+    cat <<EOF
+tri-agent-metrics - Export Prometheus-format metrics
+
+USAGE:
+    tri-agent-metrics [OPTIONS]
+
+OPTIONS:
+    --port PORT    Start HTTP server on specified port (default: 9090)
+    --once         Export metrics once and exit
+    --json         Output as JSON instead of Prometheus format
+    --help, -h     Show this help message
+
+METRICS EXPORTED:
+    tri_agent_requests_total{model="..."}
+        Total number of requests per model
+
+    tri_agent_request_duration_ms{model="...",quantile="..."}
+        Request latency histogram (p50, p90, p95, p99)
+
+    tri_agent_errors_total{model="...",error_type="..."}
+        Total errors by model and error type
+
+    tri_agent_circuit_breaker_state{model="..."}
+        Circuit breaker state: 0=CLOSED, 1=OPEN, 2=HALF_OPEN
+
+    tri_agent_tokens_total{model="...",direction="..."}
+        Total tokens (input/output) per model
+
+    tri_agent_routing_decisions_total{model="..."}
+        Total routing decisions per model
+
+    tri_agent_health_status{component="..."}
+        Health status: 0=unhealthy, 1=healthy
+
+EXAMPLES:
+    tri-agent-metrics --once      # Print metrics and exit
+    tri-agent-metrics --json      # Output as JSON
+    tri-agent-metrics --port 9091 # Start server on port 9091
+
+INTEGRATION:
+    # Prometheus scrape config
+    scrape_configs:
+      - job_name: 'tri-agent'
+        static_configs:
+          - targets: ['localhost:9090']
+EOF
+}
+
+#===============================================================================
+# Metric Collection Functions
+#===============================================================================
+
+# Get circuit breaker states
+get_breaker_metrics() {
+    local output=""
+
+    for model in claude gemini codex; do
+        local state_file="${BREAKER_DIR}/${model}.state"
+        local state="CLOSED"
+        local state_value=0
+
+        if [[ -f "$state_file" ]]; then
+            state=$(cat "$state_file" 2>/dev/null || echo "CLOSED")
+        fi
+
+        case "$state" in
+            CLOSED)    state_value=0 ;;
+            OPEN)      state_value=1 ;;
+            HALF_OPEN) state_value=2 ;;
+            *)         state_value=0 ;;
+        esac
+
+        output+="tri_agent_circuit_breaker_state{model=\"${model}\"} ${state_value}\n"
+
+        # Failure count
+        local failure_file="${BREAKER_DIR}/${model}.failures"
+        local failures=0
+        if [[ -f "$failure_file" ]]; then
+            failures=$(cat "$failure_file" 2>/dev/null || echo "0")
+        fi
+        output+="tri_agent_circuit_breaker_failures{model=\"${model}\"} ${failures}\n"
+    done
+
+    echo -e "$output"
+}
+
+# Get request counts and latencies from cost logs
+get_request_metrics() {
+    local output=""
+    local today
+    today=$(date +%Y-%m-%d)
+    local cost_file="${COST_LOG}/${today}.jsonl"
+
+    # Initialize counters
+    local claude_requests=0 gemini_requests=0 codex_requests=0
+    local claude_errors=0 gemini_errors=0 codex_errors=0
+    local claude_input_tokens=0 gemini_input_tokens=0 codex_input_tokens=0
+    local claude_output_tokens=0 gemini_output_tokens=0 codex_output_tokens=0
+    local claude_latencies=() gemini_latencies=() codex_latencies=()
+
+    if [[ -f "$cost_file" ]] && command -v jq &>/dev/null; then
+        while IFS= read -r line; do
+            local model status duration input_tokens output_tokens
+            model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null)
+            status=$(echo "$line" | jq -r '.status // "success"' 2>/dev/null)
+            duration=$(echo "$line" | jq -r '.duration_ms // 0' 2>/dev/null)
+            input_tokens=$(echo "$line" | jq -r '.input_tokens // 0' 2>/dev/null)
+            output_tokens=$(echo "$line" | jq -r '.output_tokens // 0' 2>/dev/null)
+
+            case "$model" in
+                claude)
+                    ((claude_requests++)) || true
+                    [[ "$status" != "success" ]] && ((claude_errors++)) || true
+                    claude_input_tokens=$((claude_input_tokens + input_tokens))
+                    claude_output_tokens=$((claude_output_tokens + output_tokens))
+                    [[ "$duration" -gt 0 ]] && claude_latencies+=("$duration")
+                    ;;
+                gemini)
+                    ((gemini_requests++)) || true
+                    [[ "$status" != "success" ]] && ((gemini_errors++)) || true
+                    gemini_input_tokens=$((gemini_input_tokens + input_tokens))
+                    gemini_output_tokens=$((gemini_output_tokens + output_tokens))
+                    [[ "$duration" -gt 0 ]] && gemini_latencies+=("$duration")
+                    ;;
+                codex)
+                    ((codex_requests++)) || true
+                    [[ "$status" != "success" ]] && ((codex_errors++)) || true
+                    codex_input_tokens=$((codex_input_tokens + input_tokens))
+                    codex_output_tokens=$((codex_output_tokens + output_tokens))
+                    [[ "$duration" -gt 0 ]] && codex_latencies+=("$duration")
+                    ;;
+            esac
+        done < "$cost_file"
+    fi
+
+    # Request counts
+    output+="# HELP tri_agent_requests_total Total number of requests per model\n"
+    output+="# TYPE tri_agent_requests_total counter\n"
+    output+="tri_agent_requests_total{model=\"claude\"} ${claude_requests}\n"
+    output+="tri_agent_requests_total{model=\"gemini\"} ${gemini_requests}\n"
+    output+="tri_agent_requests_total{model=\"codex\"} ${codex_requests}\n"
+
+    # Error counts
+    output+="# HELP tri_agent_errors_total Total number of errors per model\n"
+    output+="# TYPE tri_agent_errors_total counter\n"
+    output+="tri_agent_errors_total{model=\"claude\"} ${claude_errors}\n"
+    output+="tri_agent_errors_total{model=\"gemini\"} ${gemini_errors}\n"
+    output+="tri_agent_errors_total{model=\"codex\"} ${codex_errors}\n"
+
+    # Token counts
+    output+="# HELP tri_agent_tokens_total Total tokens processed\n"
+    output+="# TYPE tri_agent_tokens_total counter\n"
+    output+="tri_agent_tokens_total{model=\"claude\",direction=\"input\"} ${claude_input_tokens}\n"
+    output+="tri_agent_tokens_total{model=\"claude\",direction=\"output\"} ${claude_output_tokens}\n"
+    output+="tri_agent_tokens_total{model=\"gemini\",direction=\"input\"} ${gemini_input_tokens}\n"
+    output+="tri_agent_tokens_total{model=\"gemini\",direction=\"output\"} ${gemini_output_tokens}\n"
+    output+="tri_agent_tokens_total{model=\"codex\",direction=\"input\"} ${codex_input_tokens}\n"
+    output+="tri_agent_tokens_total{model=\"codex\",direction=\"output\"} ${codex_output_tokens}\n"
+
+    # Latency percentiles
+    output+="# HELP tri_agent_request_duration_ms Request duration in milliseconds\n"
+    output+="# TYPE tri_agent_request_duration_ms summary\n"
+
+    for model in claude gemini codex; do
+        local -n latencies="${model}_latencies"
+        if [[ ${#latencies[@]} -gt 0 ]]; then
+            # Sort latencies
+            IFS=$'\n' sorted=($(sort -n <<<"${latencies[*]}")); unset IFS
+            local count=${#sorted[@]}
+
+            # Calculate percentiles
+            local p50_idx=$(( (count * 50 + 99) / 100 - 1 ))
+            local p90_idx=$(( (count * 90 + 99) / 100 - 1 ))
+            local p95_idx=$(( (count * 95 + 99) / 100 - 1 ))
+            local p99_idx=$(( (count * 99 + 99) / 100 - 1 ))
+
+            [[ $p50_idx -lt 0 ]] && p50_idx=0
+            [[ $p90_idx -ge $count ]] && p90_idx=$((count-1))
+            [[ $p95_idx -ge $count ]] && p95_idx=$((count-1))
+            [[ $p99_idx -ge $count ]] && p99_idx=$((count-1))
+
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.5\"} ${sorted[$p50_idx]}\n"
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.9\"} ${sorted[$p90_idx]}\n"
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.95\"} ${sorted[$p95_idx]}\n"
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.99\"} ${sorted[$p99_idx]}\n"
+            output+="tri_agent_request_duration_ms_count{model=\"${model}\"} ${count}\n"
+
+            # Calculate sum
+            local sum=0
+            for lat in "${sorted[@]}"; do
+                sum=$((sum + lat))
+            done
+            output+="tri_agent_request_duration_ms_sum{model=\"${model}\"} ${sum}\n"
+        else
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.5\"} 0\n"
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.9\"} 0\n"
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.95\"} 0\n"
+            output+="tri_agent_request_duration_ms{model=\"${model}\",quantile=\"0.99\"} 0\n"
+            output+="tri_agent_request_duration_ms_count{model=\"${model}\"} 0\n"
+            output+="tri_agent_request_duration_ms_sum{model=\"${model}\"} 0\n"
+        fi
+    done
+
+    echo -e "$output"
+}
+
+# Get routing decision metrics
+get_routing_metrics() {
+    local output=""
+    local routing_log="${LOG_DIR}/routing-decisions.jsonl"
+
+    local claude_routes=0 gemini_routes=0 codex_routes=0
+
+    if [[ -f "$routing_log" ]] && command -v jq &>/dev/null; then
+        # Count today's routing decisions
+        local today
+        today=$(date +%Y-%m-%d)
+
+        while IFS= read -r line; do
+            local timestamp model
+            timestamp=$(echo "$line" | jq -r '.timestamp // ""' 2>/dev/null)
+            model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null)
+
+            if [[ "$timestamp" == "${today}"* ]]; then
+                case "$model" in
+                    claude) ((claude_routes++)) || true ;;
+                    gemini) ((gemini_routes++)) || true ;;
+                    codex)  ((codex_routes++)) || true ;;
+                esac
+            fi
+        done < "$routing_log"
+    fi
+
+    output+="# HELP tri_agent_routing_decisions_total Total routing decisions per model (today)\n"
+    output+="# TYPE tri_agent_routing_decisions_total counter\n"
+    output+="tri_agent_routing_decisions_total{model=\"claude\"} ${claude_routes}\n"
+    output+="tri_agent_routing_decisions_total{model=\"gemini\"} ${gemini_routes}\n"
+    output+="tri_agent_routing_decisions_total{model=\"codex\"} ${codex_routes}\n"
+
+    echo -e "$output"
+}
+
+# Get health metrics
+get_health_metrics() {
+    local output=""
+    local health_file="${STATE_DIR}/health.json"
+
+    output+="# HELP tri_agent_health_status Health check status (1=healthy, 0=unhealthy)\n"
+    output+="# TYPE tri_agent_health_status gauge\n"
+
+    if [[ -f "$health_file" ]] && command -v jq &>/dev/null; then
+        for model in claude gemini codex; do
+            local status
+            status=$(jq -r ".${model}.status // \"unknown\"" "$health_file" 2>/dev/null)
+            local value=0
+            [[ "$status" == "healthy" ]] && value=1
+            output+="tri_agent_health_status{component=\"${model}\"} ${value}\n"
+        done
+
+        # Overall system health
+        local overall
+        overall=$(jq -r '.overall // "unknown"' "$health_file" 2>/dev/null)
+        local overall_value=0
+        [[ "$overall" == "healthy" ]] && overall_value=1
+        output+="tri_agent_health_status{component=\"system\"} ${overall_value}\n"
+    else
+        output+="tri_agent_health_status{component=\"claude\"} 0\n"
+        output+="tri_agent_health_status{component=\"gemini\"} 0\n"
+        output+="tri_agent_health_status{component=\"codex\"} 0\n"
+        output+="tri_agent_health_status{component=\"system\"} 0\n"
+    fi
+
+    echo -e "$output"
+}
+
+# Get system info metrics
+get_system_metrics() {
+    local output=""
+
+    output+="# HELP tri_agent_info System information\n"
+    output+="# TYPE tri_agent_info gauge\n"
+    output+="tri_agent_info{version=\"2.0.0\"} 1\n"
+
+    # Uptime (seconds since state dir was created)
+    if [[ -d "$STATE_DIR" ]]; then
+        local state_time
+        state_time=$(stat -c %Y "$STATE_DIR" 2>/dev/null || stat -f %m "$STATE_DIR" 2>/dev/null || echo "0")
+        local now
+        now=$(date +%s)
+        local uptime=$((now - state_time))
+        output+="# HELP tri_agent_uptime_seconds System uptime in seconds\n"
+        output+="# TYPE tri_agent_uptime_seconds gauge\n"
+        output+="tri_agent_uptime_seconds ${uptime}\n"
+    fi
+
+    echo -e "$output"
+}
+
+#===============================================================================
+# Output Functions
+#===============================================================================
+
+export_prometheus() {
+    echo "# Tri-Agent Metrics"
+    echo "# Generated at $(date -Iseconds)"
+    echo ""
+    get_system_metrics
+    echo ""
+    get_breaker_metrics
+    echo ""
+    get_request_metrics
+    echo ""
+    get_routing_metrics
+    echo ""
+    get_health_metrics
+}
+
+export_json() {
+    local output="{}"
+
+    # Get breaker states
+    local breakers='{"claude":{},"gemini":{},"codex":{}}'
+    for model in claude gemini codex; do
+        local state_file="${BREAKER_DIR}/${model}.state"
+        local failure_file="${BREAKER_DIR}/${model}.failures"
+        local state="CLOSED"
+        local failures=0
+
+        [[ -f "$state_file" ]] && state=$(cat "$state_file" 2>/dev/null || echo "CLOSED")
+        [[ -f "$failure_file" ]] && failures=$(cat "$failure_file" 2>/dev/null || echo "0")
+
+        breakers=$(echo "$breakers" | jq --arg m "$model" --arg s "$state" --argjson f "$failures" \
+            '.[$m] = {"state": $s, "failures": $f}')
+    done
+
+    # Get request counts (simplified)
+    local today
+    today=$(date +%Y-%m-%d)
+    local cost_file="${COST_LOG}/${today}.jsonl"
+    local requests='{"claude":0,"gemini":0,"codex":0}'
+    local errors='{"claude":0,"gemini":0,"codex":0}'
+
+    if [[ -f "$cost_file" ]] && command -v jq &>/dev/null; then
+        requests=$(jq -s '[.[] | .model] | group_by(.) | map({(.[0]): length}) | add // {}' "$cost_file" 2>/dev/null || echo '{}')
+        errors=$(jq -s '[.[] | select(.status != "success") | .model] | group_by(.) | map({(.[0]): length}) | add // {}' "$cost_file" 2>/dev/null || echo '{}')
+    fi
+
+    # Combine into final JSON
+    if command -v jq &>/dev/null; then
+        jq -n \
+            --arg ts "$(date -Iseconds)" \
+            --argjson breakers "$breakers" \
+            --argjson requests "$requests" \
+            --argjson errors "$errors" \
+            '{
+                "timestamp": $ts,
+                "version": "2.0.0",
+                "circuit_breakers": $breakers,
+                "requests_today": $requests,
+                "errors_today": $errors
+            }'
+    else
+        echo '{"error": "jq not available for JSON output"}'
+    fi
+}
+
+#===============================================================================
+# HTTP Server (Simple nc-based)
+#===============================================================================
+
+start_http_server() {
+    local port="$1"
+
+    echo "Starting metrics server on port ${port}..."
+    echo "Metrics available at http://localhost:${port}/metrics"
+    echo "Press Ctrl+C to stop"
+    echo ""
+
+    # Check for nc/netcat
+    if ! command -v nc &>/dev/null; then
+        echo "Error: 'nc' (netcat) not found. Install netcat to use HTTP server mode." >&2
+        echo "Alternative: Use --once and pipe to your preferred HTTP server" >&2
+        exit 1
+    fi
+
+    # Simple HTTP server using nc
+    while true; do
+        local response
+        response=$(export_prometheus)
+        local length=${#response}
+
+        {
+            echo -e "HTTP/1.1 200 OK\r"
+            echo -e "Content-Type: text/plain; charset=utf-8\r"
+            echo -e "Content-Length: ${length}\r"
+            echo -e "Connection: close\r"
+            echo -e "\r"
+            echo "$response"
+        } | nc -l -p "$port" -q 1 2>/dev/null || nc -l "$port" 2>/dev/null || {
+            echo "Error: Could not bind to port ${port}" >&2
+            exit 1
+        }
+    done
+}
+
+#===============================================================================
+# Parse Arguments
+#===============================================================================
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --port)
+            HTTP_PORT="$2"
+            shift 2
+            ;;
+        --once)
+            RUN_ONCE=true
+            shift
+            ;;
+        --json)
+            JSON_OUTPUT=true
+            RUN_ONCE=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+    esac
+done
+
+#===============================================================================
+# Main
+#===============================================================================
+
+# Ensure directories exist
+mkdir -p "$STATE_DIR" "$BREAKER_DIR" "$LOG_DIR" "$COST_LOG"
+
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+    export_json
+elif [[ "$RUN_ONCE" == "true" ]]; then
+    export_prometheus
+else
+    start_http_server "$HTTP_PORT"
+fi

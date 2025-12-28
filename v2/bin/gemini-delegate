@@ -473,7 +473,8 @@ if [[ $EXIT_CODE -eq 124 ]]; then
     exit 1
 
 elif [[ $EXIT_CODE -ne 0 ]]; then
-    local error_reason="Unknown error (exit code: $EXIT_CODE)"
+    # Declare error_reason outside conditional block to avoid bash issues with local
+    error_reason="Unknown error (exit code: $EXIT_CODE)"
 
     # Check for rate limit
     if echo "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
@@ -494,7 +495,6 @@ elif [[ $EXIT_CODE -ne 0 ]]; then
         error_reason="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
     fi
     
-    local masked_reason
     masked_reason=$(mask_secrets_local "$error_reason")
     json_output "error" "ABSTAIN" "0.0" "$masked_reason" "" "$DURATION_MS"
     exit 1

@@ -15,12 +15,13 @@
 #   - Detailed reasoning summaries
 #===============================================================================
 
-set -e
+set -euo pipefail
 
 # Configuration
 MODEL="gpt-5.2-codex"
 REASONING="xhigh"
 TIMEOUT=300  # 5 minutes max
+MAX_STDIN_SIZE=500000  # 500KB limit
 
 # Handle help flag before getopts (getopts doesn't support long options)
 case "${1:-}" in
@@ -92,9 +93,13 @@ $FILE_CONTENT
 --- END FILE ---"
 fi
 
-# Check for stdin (piped content)
+# Check for stdin (piped content) with size limit
 if [[ ! -t 0 ]]; then
-    STDIN_CONTENT=$(cat)
+    STDIN_CONTENT=$(head -c $MAX_STDIN_SIZE)
+    # Warn if truncated
+    if read -n 1 -t 0 2>/dev/null; then
+        echo "[CODEX] Warning: Stdin truncated to ${MAX_STDIN_SIZE} bytes (500KB limit)" >&2
+    fi
     FULL_PROMPT="$PROMPT
 
 --- CONTENT ---

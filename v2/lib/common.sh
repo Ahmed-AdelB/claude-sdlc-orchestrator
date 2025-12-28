@@ -20,6 +20,14 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # =============================================================================
+# Performance: Initialization Flag (#performance)
+# =============================================================================
+# Prevent redundant initialization when sourced multiple times
+if [[ "${_COMMON_SH_INITIALIZED:-}" == "1" ]]; then
+    return 0 2>/dev/null || true
+fi
+
+# =============================================================================
 # Directory Configuration
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -243,7 +251,45 @@ mask_secrets() {
     echo "$input"
 }
 
+# =============================================================================
+# Performance: Config Caching (#performance)
+# =============================================================================
+# Cache config values to avoid repeated YAML parsing
+declare -A _CONFIG_CACHE 2>/dev/null || true
+_CONFIG_CACHE_FILE=""
+_CONFIG_CACHE_MTIME=""
+
+# Clear config cache (call when config changes)
+clear_config_cache() {
+    _CONFIG_CACHE=()
+    _CONFIG_CACHE_FILE=""
+    _CONFIG_CACHE_MTIME=""
+}
+
+# Check if config file has changed (invalidate cache)
+_check_config_cache_validity() {
+    local config="${1:-$CONFIG_FILE}"
+
+    if [[ ! -f "$config" ]]; then
+        return 1
+    fi
+
+    local current_mtime
+    current_mtime=$(stat -c %Y "$config" 2>/dev/null || stat -f %m "$config" 2>/dev/null || echo "0")
+
+    if [[ "$config" != "$_CONFIG_CACHE_FILE" ]] || [[ "$current_mtime" != "$_CONFIG_CACHE_MTIME" ]]; then
+        # Config changed, invalidate cache
+        _CONFIG_CACHE=()
+        _CONFIG_CACHE_FILE="$config"
+        _CONFIG_CACHE_MTIME="$current_mtime"
+        return 1
+    fi
+
+    return 0
+}
+
 # Read a value from YAML config (requires yq or python3)
+# Performance: Uses caching to avoid repeated YAML parsing
 read_config() {
     local key="$1"
     local default="${2:-}"
@@ -251,6 +297,21 @@ read_config() {
 
     if [[ ! -f "$config" ]]; then
         echo "$default"
+        return
+    fi
+
+    # Check cache validity
+    _check_config_cache_validity "$config" || true
+
+    # Check if value is cached
+    local cache_key="${config}:${key}"
+    if [[ -n "${_CONFIG_CACHE[$cache_key]+isset}" ]]; then
+        local cached_value="${_CONFIG_CACHE[$cache_key]}"
+        if [[ -n "$cached_value" ]]; then
+            echo "$cached_value"
+        else
+            echo "$default"
+        fi
         return
     fi
 
@@ -273,7 +334,27 @@ except:
 " 2>/dev/null || echo "")
     fi
 
+    # Cache the result
+    _CONFIG_CACHE[$cache_key]="$value"
+
     echo "${value:-$default}"
+}
+
+# Validate that a value is a positive integer
+_validate_numeric() {
+    local value="$1"
+
+    # Handle empty value
+    if [[ -z "$value" ]]; then
+        return 1
+    fi
+
+    # Check if it's a non-negative integer
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        return 0
+    fi
+
+    return 1
 }
 
 # Validate JSON string
@@ -350,6 +431,7 @@ log_debug "Trace ID: ${TRACE_ID}"
 # Parse JSON envelope from delegate output
 # Usage: parse_delegate_envelope "$json_output"
 # Returns: Sets global variables DELEGATE_MODEL, DELEGATE_STATUS, DELEGATE_DECISION, etc.
+# Performance: Uses a single jq call to extract all fields (#performance)
 parse_delegate_envelope() {
     local json="$1"
 
@@ -364,21 +446,27 @@ parse_delegate_envelope() {
         return 1
     fi
 
-    # Validate JSON
-    if ! printf '%s' "$json" | jq . >/dev/null 2>&1; then
+    # Performance: Extract all fields in a single jq call
+    local parsed
+    parsed=$(printf '%s' "$json" | jq -r '
+        [
+            (.model // "unknown"),
+            (.status // "error"),
+            (.decision // "ABSTAIN"),
+            (.confidence // 0 | tostring),
+            (.reasoning // ""),
+            (.output // ""),
+            (.trace_id // ""),
+            (.duration_ms // 0 | tostring)
+        ] | @tsv
+    ' 2>/dev/null) || {
         log_error "[${TRACE_ID:-unknown}] Invalid JSON envelope: ${json:0:100}..." 2>/dev/null || true
         return 1
-    fi
+    }
 
-    # Extract fields using jq
-    DELEGATE_MODEL=$(printf '%s' "$json" | jq -r '.model // "unknown"')
-    DELEGATE_STATUS=$(printf '%s' "$json" | jq -r '.status // "error"')
-    DELEGATE_DECISION=$(printf '%s' "$json" | jq -r '.decision // "ABSTAIN"')
-    DELEGATE_CONFIDENCE=$(printf '%s' "$json" | jq -r '.confidence // 0')
-    DELEGATE_REASONING=$(printf '%s' "$json" | jq -r '.reasoning // ""')
-    DELEGATE_OUTPUT=$(printf '%s' "$json" | jq -r '.output // ""')
-    DELEGATE_TRACE_ID=$(printf '%s' "$json" | jq -r '.trace_id // ""')
-    DELEGATE_DURATION_MS=$(printf '%s' "$json" | jq -r '.duration_ms // 0')
+    # Parse tab-separated values
+    IFS=$'\t' read -r DELEGATE_MODEL DELEGATE_STATUS DELEGATE_DECISION DELEGATE_CONFIDENCE \
+        DELEGATE_REASONING DELEGATE_OUTPUT DELEGATE_TRACE_ID DELEGATE_DURATION_MS <<< "$parsed"
 
     export DELEGATE_MODEL DELEGATE_STATUS DELEGATE_DECISION DELEGATE_CONFIDENCE
     export DELEGATE_REASONING DELEGATE_OUTPUT DELEGATE_TRACE_ID DELEGATE_DURATION_MS
@@ -464,3 +552,12 @@ export -f log_debug
 export -f log_info
 export -f log_warn
 export -f log_error
+export -f clear_config_cache
+export -f _validate_numeric
+
+# =============================================================================
+# Performance: Mark Initialization Complete (#performance)
+# =============================================================================
+# This prevents redundant initialization when common.sh is sourced multiple times
+_COMMON_SH_INITIALIZED=1
+export _COMMON_SH_INITIALIZED

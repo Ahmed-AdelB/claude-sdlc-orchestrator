@@ -230,30 +230,66 @@ run_health_check() {
     local timestamp
     timestamp="$(date -Iseconds)"
 
-    # Collect all checks
+    # Performance: Run independent checks in parallel (#performance)
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap "rm -rf '$tmp_dir'" EXIT
+
+    # Start all independent checks in background
+    check_cli_available "claude" > "$tmp_dir/claude_cli" &
+    local pid_claude_cli=$!
+    check_cli_available "gemini" > "$tmp_dir/gemini_cli" &
+    local pid_gemini_cli=$!
+    check_cli_available "codex" > "$tmp_dir/codex_cli" &
+    local pid_codex_cli=$!
+
+    check_claude_auth > "$tmp_dir/claude_auth" &
+    local pid_claude_auth=$!
+    check_gemini_auth > "$tmp_dir/gemini_auth" &
+    local pid_gemini_auth=$!
+    check_codex_auth > "$tmp_dir/codex_auth" &
+    local pid_codex_auth=$!
+
+    check_circuit_breaker "claude" > "$tmp_dir/claude_cb" &
+    local pid_claude_cb=$!
+    check_circuit_breaker "gemini" > "$tmp_dir/gemini_cb" &
+    local pid_gemini_cb=$!
+    check_circuit_breaker "codex" > "$tmp_dir/codex_cb" &
+    local pid_codex_cb=$!
+
+    check_disk_space > "$tmp_dir/disk" &
+    local pid_disk=$!
+    check_error_rate > "$tmp_dir/errors" &
+    local pid_errors=$!
+    check_session_running > "$tmp_dir/session" &
+    local pid_session=$!
+
+    # Wait for all background jobs
+    wait $pid_claude_cli $pid_gemini_cli $pid_codex_cli \
+         $pid_claude_auth $pid_gemini_auth $pid_codex_auth \
+         $pid_claude_cb $pid_gemini_cb $pid_codex_cb \
+         $pid_disk $pid_errors $pid_session 2>/dev/null || true
+
+    # Collect results
     local claude_cli gemini_cli codex_cli
-    claude_cli=$(check_cli_available "claude")
-    gemini_cli=$(check_cli_available "gemini")
-    codex_cli=$(check_cli_available "codex")
+    claude_cli=$(cat "$tmp_dir/claude_cli" 2>/dev/null || echo "unknown")
+    gemini_cli=$(cat "$tmp_dir/gemini_cli" 2>/dev/null || echo "unknown")
+    codex_cli=$(cat "$tmp_dir/codex_cli" 2>/dev/null || echo "unknown")
 
     local claude_auth gemini_auth codex_auth
-    claude_auth=$(check_claude_auth)
-    gemini_auth=$(check_gemini_auth)
-    codex_auth=$(check_codex_auth)
+    claude_auth=$(cat "$tmp_dir/claude_auth" 2>/dev/null || echo "unknown")
+    gemini_auth=$(cat "$tmp_dir/gemini_auth" 2>/dev/null || echo "unknown")
+    codex_auth=$(cat "$tmp_dir/codex_auth" 2>/dev/null || echo "unknown")
 
     local claude_cb gemini_cb codex_cb
-    claude_cb=$(check_circuit_breaker "claude")
-    gemini_cb=$(check_circuit_breaker "gemini")
-    codex_cb=$(check_circuit_breaker "codex")
+    claude_cb=$(cat "$tmp_dir/claude_cb" 2>/dev/null || echo "CLOSED")
+    gemini_cb=$(cat "$tmp_dir/gemini_cb" 2>/dev/null || echo "CLOSED")
+    codex_cb=$(cat "$tmp_dir/codex_cb" 2>/dev/null || echo "CLOSED")
 
-    local disk_status
-    disk_status=$(check_disk_space)
-
-    local error_count
-    error_count=$(check_error_rate)
-
-    local session_status
-    session_status=$(check_session_running)
+    local disk_status error_count session_status
+    disk_status=$(cat "$tmp_dir/disk" 2>/dev/null || echo "unknown")
+    error_count=$(cat "$tmp_dir/errors" 2>/dev/null || echo "0")
+    session_status=$(cat "$tmp_dir/session" 2>/dev/null || echo "unknown")
 
     # Determine overall status
     local overall_status="OK"

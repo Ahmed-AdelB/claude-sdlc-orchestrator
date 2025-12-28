@@ -86,9 +86,9 @@ _get_totals_file() {
 # =============================================================================
 
 # Validate numeric fields (non-negative integers only)
-_validate_numeric() {
+_sanitize_numeric() {
     local value="$1"
-    local field="$2"
+    local field="${2:-value}"
 
     if [[ -z "$value" ]]; then
         echo "0"
@@ -122,9 +122,9 @@ record_request() {
     timestamp="$(date -Iseconds)"
     date_str="$(date +%Y-%m-%d)"
 
-    input_tokens="$(_validate_numeric "$input_tokens" "input_tokens")"
-    output_tokens="$(_validate_numeric "$output_tokens" "output_tokens")"
-    duration_ms="$(_validate_numeric "$duration_ms" "duration_ms")"
+    input_tokens="$(_sanitize_numeric "$input_tokens" "input_tokens")"
+    output_tokens="$(_sanitize_numeric "$output_tokens" "output_tokens")"
+    duration_ms="$(_sanitize_numeric "$duration_ms" "duration_ms")"
 
     # Normalize model name
     case "$model" in
