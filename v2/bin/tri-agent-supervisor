@@ -1,0 +1,500 @@
+#!/bin/bash
+# =============================================================================
+# tri-agent-supervisor - Autonomous Supervisor for Tri-Agent Session
+# =============================================================================
+# Monitors the primary agent's work, runs audits/tests, and provides feedback.
+# Uses ALL THREE models (Claude + Codex + Gemini) for failure analysis.
+# Never stops primary session - documents issues and sends to task queue.
+#
+# Usage:
+#   tri-agent-supervisor [--daemon]
+#   tri-agent-supervisor --status
+#   tri-agent-supervisor --help
+# =============================================================================
+
+set -euo pipefail
+
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/common.sh"
+source "${SCRIPT_DIR}/../lib/state.sh"
+
+# Source supervisor modules if they exist
+[[ -f "${SCRIPT_DIR}/../lib/supervisor-planner.sh" ]] && source "${SCRIPT_DIR}/../lib/supervisor-planner.sh"
+[[ -f "${SCRIPT_DIR}/../lib/supervisor-communicator.sh" ]] && source "${SCRIPT_DIR}/../lib/supervisor-communicator.sh"
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+SUPERVISOR_STATE_DIR="${STATE_DIR}/supervisor"
+FEEDBACK_DIR="${TASKS_DIR}/supervisor_feedback"
+TASK_QUEUE_DIR="${TASKS_DIR}/queue"
+AUDIT_LOG_DIR="${LOG_DIR}/audit"
+STATUS_FILE="${SUPERVISOR_STATE_DIR}/status.json"
+LAST_COMMIT_FILE="${SUPERVISOR_STATE_DIR}/last_checked_commit"
+WATCH_INTERVAL="${SUPERVISOR_WATCH_INTERVAL:-30}" # Seconds
+PRIMARY_SESSION="${TRI_AGENT_PRIMARY_SESSION:-tri-agent-aadel-v2}"
+TMUX_SOCKET="${TRI_AGENT_TMUX_SOCKET:-tri-agent}"
+
+# Rate limiting
+MAX_NOTIFICATIONS_PER_MINUTE=1
+LAST_NOTIFICATION_TIME=0
+
+# Ensure directories
+ensure_dir "$SUPERVISOR_STATE_DIR"
+ensure_dir "$FEEDBACK_DIR"
+ensure_dir "$TASK_QUEUE_DIR"
+ensure_dir "$AUDIT_LOG_DIR"
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+update_status() {
+    local state="$1"
+    local message="${2:-""}"
+    local timestamp=$(iso_timestamp)
+    
+    cat > "$STATUS_FILE" <<EOF
+{
+  "state": "$state",
+  "message": "$message",
+  "updated_at": "$timestamp",
+  "trace_id": "${TRACE_ID}"
+}
+EOF
+}
+
+get_last_checked_commit() {
+    if [[ -f "$LAST_COMMIT_FILE" ]]; then
+        cat "$LAST_COMMIT_FILE"
+    else
+        # If no last commit, start from HEAD
+        git rev-parse HEAD
+    fi
+}
+
+set_last_checked_commit() {
+    echo "$1" > "$LAST_COMMIT_FILE"
+}
+
+# =============================================================================
+# Audit Functions
+# =============================================================================
+
+run_security_audit() {
+    local commit_hash="$1"
+    local report_file="${AUDIT_LOG_DIR}/security_${commit_hash}.json"
+    
+    log_info "Running security audit for $commit_hash..."
+    
+    # Run audit tool in JSON mode
+    "${BIN_DIR}/tri-agent-security-audit" --full --json --output "$report_file" || true
+    
+    # Analyze result
+    if [[ -f "$report_file" ]]; then
+        local criticals=$(jq -r 'select(.severity == "CRITICAL") | .description' "$report_file" 2>/dev/null || echo "")
+        if [[ -n "$criticals" ]]; then
+            log_error "Critical security issues found!"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+run_tests() {
+    local commit_hash="$1"
+    local log_file="${AUDIT_LOG_DIR}/tests_${commit_hash}.log"
+    
+    log_info "Running tests for $commit_hash..."
+    
+    # Run tests (with timeout to prevent hanging)
+    if timeout 300 "${AUTONOMOUS_ROOT}/tests/run_tests.sh" > "$log_file" 2>&1; then
+        log_info "Tests passed."
+        return 0
+    else
+        log_error "Tests failed or timed out. See $log_file"
+        return 1
+    fi
+}
+
+send_feedback() {
+    local commit_hash="$1"
+    local severity="$2"
+    local title="$3"
+    local message="$4"
+    local report_file="$5"
+
+    local feedback_file="${FEEDBACK_DIR}/ISSUE_${commit_hash}_${severity}.md"
+
+    cat > "$feedback_file" <<EOF
+# Supervisor Feedback: [${severity}] ${title}
+
+**Context:** Commit \`${commit_hash}\`
+**Time:** $(date)
+
+## Issue
+${message}
+
+## Remediation
+Please address this immediately. See detailed report: \`${report_file}\`
+
+## Severity
+${severity}
+EOF
+
+    log_warn "Feedback sent: $feedback_file"
+}
+
+# =============================================================================
+# Tri-Agent Analysis Functions
+# =============================================================================
+
+# Analyze failure using all 3 models
+analyze_with_tri_agent() {
+    local failure_log="$1"
+    local analysis_type="${2:-code}"  # code|security|architecture
+    local output_file="${AUDIT_LOG_DIR}/analysis_$(date +%s).json"
+
+    log_info "Starting tri-agent failure analysis..."
+
+    local failure_content=""
+    if [[ -f "$failure_log" ]]; then
+        failure_content=$(head -c 10000 "$failure_log")  # Limit to 10KB
+    fi
+
+    local claude_analysis="" codex_fix="" gemini_review=""
+
+    # Claude: Deep reasoning, security analysis (if delegate exists)
+    if [[ -x "${BIN_DIR}/claude-delegate" ]]; then
+        log_info "Getting Claude analysis..."
+        claude_analysis=$("${BIN_DIR}/claude-delegate" \
+            "Analyze this ${analysis_type} failure and identify root cause: ${failure_content}" 2>/dev/null || echo "Claude analysis unavailable")
+    fi
+
+    # Codex: Implementation fixes
+    if [[ -x "${BIN_DIR}/codex-ask" ]]; then
+        log_info "Getting Codex fix recommendations..."
+        codex_fix=$("${BIN_DIR}/codex-ask" \
+            "Generate a specific code fix for this failure: ${failure_content}" 2>/dev/null || echo "Codex fix unavailable")
+    fi
+
+    # Gemini: Architecture review (large context)
+    if [[ -x "${BIN_DIR}/gemini-ask" ]]; then
+        log_info "Getting Gemini architecture review..."
+        gemini_review=$("${BIN_DIR}/gemini-ask" \
+            "Review the architecture impact of this failure and suggest improvements: ${failure_content}" 2>/dev/null || echo "Gemini review unavailable")
+    fi
+
+    # Combine into JSON
+    cat > "$output_file" <<EOF
+{
+    "timestamp": "$(iso_timestamp)",
+    "analysis_type": "$analysis_type",
+    "failure_log": "$failure_log",
+    "claude_analysis": $(echo "$claude_analysis" | jq -Rs .),
+    "codex_fix": $(echo "$codex_fix" | jq -Rs .),
+    "gemini_review": $(echo "$gemini_review" | jq -Rs .)
+}
+EOF
+
+    echo "$output_file"
+}
+
+# Send notification to primary session (rate limited)
+notify_primary_session() {
+    local message="$1"
+    local priority="${2:-INFO}"
+
+    local current_time=$(date +%s)
+    local time_diff=$((current_time - LAST_NOTIFICATION_TIME))
+
+    # Rate limit: max 1 notification per minute
+    if [[ $time_diff -lt 60 ]]; then
+        log_debug "Rate limiting notification (${time_diff}s since last)"
+        return 0
+    fi
+
+    # Check if primary session exists
+    if ! tmux -L "$TMUX_SOCKET" has-session -t "$PRIMARY_SESSION" 2>/dev/null; then
+        log_warn "Primary session $PRIMARY_SESSION not found"
+        return 1
+    fi
+
+    # Send notification via tmux
+    tmux -L "$TMUX_SOCKET" send-keys -t "$PRIMARY_SESSION" \
+        "SUPERVISOR [$priority]: $message" Enter
+
+    LAST_NOTIFICATION_TIME=$current_time
+    log_info "Notification sent to primary session: $message"
+}
+
+# Create task file for primary session
+create_task_for_primary() {
+    local issue_id="$1"
+    local severity="$2"
+    local title="$3"
+    local description="$4"
+    local analysis_file="${5:-}"
+
+    local task_file="${TASK_QUEUE_DIR}/${severity}_${issue_id}_$(date +%s).md"
+
+    cat > "$task_file" <<EOF
+# SUPERVISOR TASK: ${issue_id}
+
+## Priority: ${severity}
+
+## Title
+${title}
+
+## Description
+${description}
+
+## Analysis
+$(if [[ -n "$analysis_file" && -f "$analysis_file" ]]; then cat "$analysis_file"; else echo "No analysis available"; fi)
+
+## Instructions
+1. Review the issue details above
+2. Implement the recommended fix
+3. Run tests to verify the fix
+4. Move this file to tasks/completed/ when done
+
+## Created
+- Time: $(date)
+- By: tri-agent-supervisor
+- Trace ID: ${TRACE_ID}
+EOF
+
+    log_info "Task created: $task_file"
+    echo "$task_file"
+}
+
+# Run comprehensive tests (all test types)
+run_comprehensive_tests() {
+    local commit_hash="$1"
+    local log_file="${AUDIT_LOG_DIR}/comprehensive_tests_${commit_hash}.log"
+    local exit_code=0
+
+    log_info "Running comprehensive tests for $commit_hash..."
+
+    {
+        echo "=== Comprehensive Test Run for $commit_hash ==="
+        echo "Started: $(date)"
+        echo ""
+
+        # 1. Main test suite
+        echo "--- Running main test suite ---"
+        if timeout 300 "${AUTONOMOUS_ROOT}/tests/run_tests.sh" all 2>&1; then
+            echo "Main tests: PASSED"
+        else
+            echo "Main tests: FAILED"
+            exit_code=1
+        fi
+        echo ""
+
+        # 2. Coverage check
+        if [[ -x "${BIN_DIR}/tri-agent-coverage" ]]; then
+            echo "--- Running coverage check ---"
+            if "${BIN_DIR}/tri-agent-coverage" --run --threshold 70 2>&1; then
+                echo "Coverage: PASSED"
+            else
+                echo "Coverage: WARNING (below threshold)"
+            fi
+            echo ""
+        fi
+
+        # 3. Preflight checks
+        if [[ -x "${BIN_DIR}/tri-agent-preflight" ]]; then
+            echo "--- Running preflight checks ---"
+            if "${BIN_DIR}/tri-agent-preflight" --quick 2>&1; then
+                echo "Preflight: PASSED"
+            else
+                echo "Preflight: FAILED"
+                exit_code=1
+            fi
+            echo ""
+        fi
+
+        echo "Completed: $(date)"
+        echo "Exit code: $exit_code"
+    } > "$log_file" 2>&1
+
+    return $exit_code
+}
+
+# =============================================================================
+# Main Loop
+# =============================================================================
+
+main_loop() {
+    log_info "Supervisor started. Watching repo for $PRIMARY_SESSION..."
+    log_info "Watch interval: ${WATCH_INTERVAL}s"
+    update_status "IDLE" "Waiting for changes"
+
+    while true; do
+        current_head=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        last_checked=$(get_last_checked_commit)
+
+        if [[ "$current_head" != "$last_checked" && "$current_head" != "unknown" ]]; then
+            log_info "New commit detected: $current_head (was $last_checked)"
+            update_status "AUDITING" "Processing commit $current_head"
+
+            local has_critical=false
+            local has_high=false
+
+            # 1. Security Audit
+            update_status "AUDITING" "Running security checks"
+            if ! run_security_audit "$current_head"; then
+                has_critical=true
+                local security_report="${AUDIT_LOG_DIR}/security_${current_head}.json"
+
+                # Run tri-agent analysis for security issues
+                update_status "ANALYZING" "Tri-agent security analysis"
+                local analysis_file=$(analyze_with_tri_agent "$security_report" "security")
+
+                # Create task for primary session
+                local task_file=$(create_task_for_primary \
+                    "SEC-${current_head:0:8}" \
+                    "CRITICAL" \
+                    "Security Audit Failed" \
+                    "Critical vulnerabilities detected in commit $current_head" \
+                    "$analysis_file")
+
+                # Send feedback and notify
+                send_feedback "$current_head" "CRITICAL" "Security Audit Failed" \
+                    "Critical vulnerabilities detected. Task created: $task_file" \
+                    "$security_report"
+                notify_primary_session "CRITICAL: Security issue found. Check tasks/queue/" "CRITICAL"
+            fi
+
+            # 2. Comprehensive Tests
+            update_status "TESTING" "Running comprehensive test suite"
+            if ! run_comprehensive_tests "$current_head"; then
+                has_high=true
+                local test_log="${AUDIT_LOG_DIR}/comprehensive_tests_${current_head}.log"
+
+                # Run tri-agent analysis for test failures
+                update_status "ANALYZING" "Tri-agent test failure analysis"
+                local analysis_file=$(analyze_with_tri_agent "$test_log" "code")
+
+                # Create task for primary session
+                local task_file=$(create_task_for_primary \
+                    "TEST-${current_head:0:8}" \
+                    "HIGH" \
+                    "Tests Failed" \
+                    "Test suite failed after commit $current_head" \
+                    "$analysis_file")
+
+                # Send feedback and notify
+                send_feedback "$current_head" "HIGH" "Tests Failed" \
+                    "Test suite failed. Task created: $task_file" \
+                    "$test_log"
+                notify_primary_session "HIGH: Tests failed. Check tasks/queue/" "HIGH"
+            fi
+
+            # 3. Generate Audit Report
+            update_status "REPORTING" "Generating audit report"
+            generate_audit_report "$current_head" "$has_critical" "$has_high"
+
+            # Update state
+            set_last_checked_commit "$current_head"
+            log_info "Audit complete for $current_head (critical: $has_critical, high: $has_high)"
+            update_status "IDLE" "Last checked: ${current_head:0:8} at $(date +%H:%M:%S)"
+        fi
+
+        sleep "$WATCH_INTERVAL"
+    done
+}
+
+# Generate audit report for a commit
+generate_audit_report() {
+    local commit_hash="$1"
+    local has_critical="${2:-false}"
+    local has_high="${3:-false}"
+    local report_file="${AUDIT_LOG_DIR}/report_${commit_hash}.json"
+
+    local status="PASS"
+    [[ "$has_high" == "true" ]] && status="WARN"
+    [[ "$has_critical" == "true" ]] && status="FAIL"
+
+    cat > "$report_file" <<EOF
+{
+    "timestamp": "$(iso_timestamp)",
+    "commit_hash": "$commit_hash",
+    "status": "$status",
+    "has_critical": $has_critical,
+    "has_high": $has_high,
+    "trace_id": "${TRACE_ID}",
+    "primary_session": "$PRIMARY_SESSION"
+}
+EOF
+
+    log_info "Audit report: $report_file"
+}
+
+# Show status and exit
+show_status() {
+    if [[ -f "$STATUS_FILE" ]]; then
+        cat "$STATUS_FILE" | jq .
+    else
+        echo "Supervisor not running or no status file found"
+    fi
+    exit 0
+}
+
+# Show help
+show_help() {
+    cat <<EOF
+tri-agent-supervisor - Autonomous Supervisor for Tri-Agent Session
+
+Usage:
+    tri-agent-supervisor [OPTIONS]
+
+Options:
+    --daemon    Run in background (detached)
+    --status    Show current supervisor status
+    --help      Show this help message
+
+Environment Variables:
+    SUPERVISOR_WATCH_INTERVAL    Polling interval in seconds (default: 30)
+    TRI_AGENT_PRIMARY_SESSION    Primary session name (default: tri-agent-aadel-v2)
+    TRI_AGENT_TMUX_SOCKET        Tmux socket name (default: tri-agent)
+
+The supervisor monitors the primary tri-agent session, runs tests and security
+audits after each commit, and creates tasks in tasks/queue/ for any issues found.
+It uses ALL THREE models (Claude + Codex + Gemini) for failure analysis.
+
+The supervisor NEVER stops the primary session - it only documents issues.
+EOF
+    exit 0
+}
+
+# Parse arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --daemon)
+                # Daemonize (handled by systemd or nohup externally)
+                shift
+                ;;
+            --status)
+                show_status
+                ;;
+            --help|-h)
+                show_help
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_help
+                ;;
+        esac
+    done
+}
+
+# Handle signals
+trap 'log_info "Supervisor stopping..."; update_status "STOPPED" "Signal received"; exit 0' SIGINT SIGTERM
+
+# Parse arguments and start
+parse_args "$@"
+main_loop

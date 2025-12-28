@@ -1,0 +1,47 @@
+[Unit]
+Description=Tri-Agent Supervisor Service - Monitors and validates primary session
+Documentation=file:///home/aadel/projects/claude-sdlc-orchestrator/v2/docs/SUPERVISOR_SYSTEM_DESIGN.md
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aadel
+Group=aadel
+WorkingDirectory=/home/aadel/projects/claude-sdlc-orchestrator/v2
+ExecStart=/home/aadel/projects/claude-sdlc-orchestrator/v2/bin/tri-agent-supervisor
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Environment
+Environment="HOME=/home/aadel"
+Environment="PATH=/home/aadel/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="AUTONOMOUS_ROOT=/home/aadel/projects/claude-sdlc-orchestrator/v2"
+Environment="TRI_AGENT_PRIMARY_SESSION=tri-agent-aadel-v2"
+Environment="TRI_AGENT_TMUX_SOCKET=tri-agent"
+Environment="SUPERVISOR_WATCH_INTERVAL=30"
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=append:/home/aadel/projects/claude-sdlc-orchestrator/v2/logs/supervisor.log
+StandardError=append:/home/aadel/projects/claude-sdlc-orchestrator/v2/logs/supervisor-error.log
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/aadel/projects/claude-sdlc-orchestrator/v2/state
+ReadWritePaths=/home/aadel/projects/claude-sdlc-orchestrator/v2/logs
+ReadWritePaths=/home/aadel/projects/claude-sdlc-orchestrator/v2/tasks
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
