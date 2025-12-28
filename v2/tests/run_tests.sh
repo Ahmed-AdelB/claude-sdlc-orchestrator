@@ -20,6 +20,8 @@ INTEGRATION_DIR="${SCRIPT_DIR}/integration"
 FUZZ_DIR="${SCRIPT_DIR}/fuzz"
 PROPERTY_DIR="${SCRIPT_DIR}/property"
 STRESS_DIR="${SCRIPT_DIR}/stress"
+VALIDATION_DIR="${SCRIPT_DIR}/validation"
+CHAOS_DIR="${SCRIPT_DIR}/chaos"
 
 # Colors
 if [[ -t 1 ]]; then
@@ -82,7 +84,10 @@ ${BOLD}TEST TYPES:${RESET}
     fuzz         Run fuzzing tests
     property     Run property-based tests
     stress       Run stress/concurrency tests
+    validation   Run deep feature validation tests
+    chaos        Run chaos engineering tests
     advanced     Run fuzz + property + stress tests
+    deep         Run validation + chaos tests
 
 ${BOLD}OPTIONS:${RESET}
     -v, --verbose    Show detailed error messages
@@ -114,7 +119,7 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
-        unit|integration|fuzz|property|stress|advanced|all)
+        unit|integration|fuzz|property|stress|validation|chaos|advanced|deep|all)
             TEST_TYPE="$1"
             shift
             ;;
@@ -239,6 +244,45 @@ run_advanced_tests() {
     run_stress_tests
 }
 
+run_validation_tests() {
+    log_section "Deep Feature Validation Tests"
+
+    local validation_tests=("$VALIDATION_DIR"/test_*.sh)
+
+    if [[ ! -e "${validation_tests[0]}" ]]; then
+        echo "  No validation tests found in ${VALIDATION_DIR}"
+        return 0
+    fi
+
+    for test_file in "${validation_tests[@]}"; do
+        if [[ -f "$test_file" ]]; then
+            run_test_file "$test_file" || true
+        fi
+    done
+}
+
+run_chaos_tests() {
+    log_section "Chaos Engineering Tests"
+
+    local chaos_tests=("$CHAOS_DIR"/test_*.sh)
+
+    if [[ ! -e "${chaos_tests[0]}" ]]; then
+        echo "  No chaos tests found in ${CHAOS_DIR}"
+        return 0
+    fi
+
+    for test_file in "${chaos_tests[@]}"; do
+        if [[ -f "$test_file" ]]; then
+            run_test_file "$test_file" || true
+        fi
+    done
+}
+
+run_deep_tests() {
+    run_validation_tests
+    run_chaos_tests
+}
+
 print_summary() {
     echo ""
     echo -e "${BOLD}${BLUE}============================================================${RESET}"
@@ -296,10 +340,20 @@ main() {
         advanced)
             run_advanced_tests
             ;;
+        validation)
+            run_validation_tests
+            ;;
+        chaos)
+            run_chaos_tests
+            ;;
+        deep)
+            run_deep_tests
+            ;;
         all)
             run_unit_tests
             run_integration_tests
             run_advanced_tests
+            run_deep_tests
             ;;
     esac
 
