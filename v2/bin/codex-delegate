@@ -383,12 +383,9 @@ if ! [[ "$CODEX_STREAM_IDLE_TIMEOUT_MS" =~ ^[0-9]+$ ]]; then
 fi
 
 # Build config overrides
+# Note: model_providers.* settings removed - require full provider config in config.toml
 CODEX_CONFIG_ARGS=(
     -c "model_reasoning_effort=\"${REASONING}\""
-    -c "features.remote_compaction=${CODEX_CONTEXT_COMPACTION}"
-    -c "model_providers.openai.request_max_retries=${CODEX_REQUEST_MAX_RETRIES}"
-    -c "model_providers.openai.stream_max_retries=${CODEX_STREAM_MAX_RETRIES}"
-    -c "model_providers.openai.stream_idle_timeout_ms=${CODEX_STREAM_IDLE_TIMEOUT_MS}"
 )
 
 OUTPUT=$(timeout "$TIMEOUT" "$CODEX_CMD" exec \
@@ -415,7 +412,7 @@ if [[ $EXIT_CODE -eq 124 ]]; then
     exit 1
 
 elif [[ $EXIT_CODE -ne 0 ]]; then
-    local error_reason="Unknown error (exit code: $EXIT_CODE)"
+    error_reason="Unknown error (exit code: $EXIT_CODE)"
 
     # Check for rate limit
     if echo "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
@@ -451,7 +448,6 @@ elif [[ $EXIT_CODE -ne 0 ]]; then
         error_reason="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
     fi
 
-    local masked_reason
     masked_reason=$(mask_secrets_local "$error_reason")
     json_output "error" "ABSTAIN" "0.0" "$masked_reason" "" "$DURATION_MS"
     exit 1
