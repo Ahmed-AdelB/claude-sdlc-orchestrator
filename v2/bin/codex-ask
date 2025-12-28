@@ -22,11 +22,34 @@ MODEL="gpt-5.2-codex"
 REASONING="xhigh"
 TIMEOUT=300  # 5 minutes max
 
+# Handle help flag before getopts (getopts doesn't support long options)
+case "${1:-}" in
+    -h|--help)
+        echo "Usage: codex-ask [-f file] [-p profile] \"your prompt\""
+        echo ""
+        echo "Options:"
+        echo "  -f FILE      Include file content in the prompt"
+        echo "  -p PROFILE   Use specific profile (max-reasoning, balanced, fast)"
+        echo "  -h, --help   Show this help message"
+        echo ""
+        echo "Profiles:"
+        echo "  max-reasoning  - xhigh effort, detailed summaries (default)"
+        echo "  balanced       - high effort, standard summaries"
+        echo "  fast           - medium effort, minimal overhead"
+        echo ""
+        echo "Examples:"
+        echo "  codex-ask \"Implement a REST API for user management\""
+        echo "  codex-ask -f src/utils.ts \"Add error handling to all functions\""
+        echo "  codex-ask -p fast \"Quick fix for this null pointer\""
+        exit 0
+        ;;
+esac
+
 # Parse arguments
 FILE_INPUT=""
 PROFILE="max-reasoning"
 
-while getopts "f:p:" opt; do
+while getopts "f:p:h" opt; do
     case $opt in
         f) FILE_INPUT="$OPTARG" ;;
         p) PROFILE="$OPTARG" ;;

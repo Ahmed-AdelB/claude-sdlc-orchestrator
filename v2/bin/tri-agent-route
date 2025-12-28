@@ -112,6 +112,9 @@ run_consensus() {
     local prompt="$1"
     local temp_dir=$(mktemp -d)
 
+    # Ensure cleanup on exit/interrupt
+    trap 'rm -rf "$temp_dir" 2>/dev/null || true' EXIT INT TERM
+
     echo -e "${MAGENTA}[CONSENSUS]${NC} Querying all three models..." >&2
     echo ""
 

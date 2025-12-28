@@ -24,9 +24,26 @@ set -e
 MODEL="gemini-3-pro-preview"
 TIMEOUT=300  # 5 minutes max
 
+# Handle help flag before getopts (getopts doesn't support long options)
+case "${1:-}" in
+    -h|--help)
+        echo "Usage: gemini-ask [-f file] \"your prompt\""
+        echo ""
+        echo "Options:"
+        echo "  -f FILE      Include file content in the prompt"
+        echo "  -h, --help   Show this help message"
+        echo ""
+        echo "Examples:"
+        echo "  gemini-ask \"Analyze the architecture of this project\""
+        echo "  gemini-ask -f src/main.ts \"Explain this code in detail\""
+        echo "  cat large-file.ts | gemini-ask \"Review this for bugs\""
+        exit 0
+        ;;
+esac
+
 # Parse arguments
 FILE_INPUT=""
-while getopts "f:" opt; do
+while getopts "f:h" opt; do
     case $opt in
         f) FILE_INPUT="$OPTARG" ;;
         *) ;;
