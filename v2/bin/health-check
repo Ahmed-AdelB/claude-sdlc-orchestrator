@@ -1,0 +1,714 @@
+#!/bin/bash
+#===============================================================================
+# health-check - Health monitoring for tri-agent system
+#===============================================================================
+# Usage:
+#   health-check                 Run health check and display status
+#   health-check --status        Show current health status
+#   health-check --json          Output machine-readable JSON
+#   health-check --daemon        Run as daemon with periodic checks
+#   health-check --notify        Enable desktop notifications on failures
+#   health-check --interval N    Check interval in seconds (default: 60)
+#   health-check --help          Show this help
+#
+# Checks:
+#   - CLI availability (claude, gemini, codex)
+#   - Authentication status for each model
+#   - Circuit breaker states
+#   - Disk space
+#   - Recent error rates
+#
+# Outputs:
+#   - Status: OK, DEGRADED, FAIL
+#   - Writes to state/health.json
+#===============================================================================
+
+# Strict mode
+set -eo pipefail
+
+# Script location
+# Resolve symlinks to find actual script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../lib"
+
+# Set required environment variables
+export STATE_DIR="${STATE_DIR:-$HOME/.claude/autonomous/state}"
+export BREAKERS_DIR="${STATE_DIR}/breakers"
+export LOG_DIR="${LOG_DIR:-$HOME/.claude/autonomous/logs}"
+export TRACE_ID="${TRACE_ID:-health-$(date +%Y%m%d%H%M%S)-$$}"
+
+# Ensure directories exist
+mkdir -p "$STATE_DIR" "$BREAKERS_DIR" "$LOG_DIR" 2>/dev/null || true
+
+# Configuration
+HEALTH_FILE="${STATE_DIR}/health.json"
+CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
+ENABLE_NOTIFY="${ENABLE_NOTIFY:-false}"
+DAEMON_MODE=false
+JSON_OUTPUT=false
+STATUS_ONLY=false
+
+# Colors
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' RESET=''
+fi
+
+#===============================================================================
+# Health Check Functions
+#===============================================================================
+
+# Check if a CLI tool is available
+check_cli_available() {
+    local cli="$1"
+    if command -v "$cli" &>/dev/null; then
+        echo "ok"
+    else
+        echo "missing"
+    fi
+}
+
+# Check Claude CLI auth status
+check_claude_auth() {
+    if ! command -v claude &>/dev/null; then
+        echo "cli_missing"
+        return
+    fi
+
+    # Try a simple command with timeout
+    if timeout 5s claude --version &>/dev/null 2>&1; then
+        echo "ok"
+    else
+        echo "check_failed"
+    fi
+}
+
+# Check Gemini CLI auth status
+check_gemini_auth() {
+    if ! command -v gemini &>/dev/null; then
+        echo "cli_missing"
+        return
+    fi
+
+    # Check for OAuth credentials
+    local oauth_file="$HOME/.gemini/oauth_creds.json"
+    if [[ -f "$oauth_file" ]]; then
+        # Check if credentials are not expired (basic check)
+        if [[ -s "$oauth_file" ]]; then
+            echo "ok"
+        else
+            echo "creds_empty"
+        fi
+    else
+        echo "no_creds"
+    fi
+}
+
+# Check Codex CLI auth status
+check_codex_auth() {
+    if ! command -v codex &>/dev/null; then
+        echo "cli_missing"
+        return
+    fi
+
+    # Check for config file
+    local config_file="$HOME/.codex/config.toml"
+    if [[ -f "$config_file" ]]; then
+        # Check for API key in environment
+        if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            echo "ok"
+        else
+            echo "no_api_key"
+        fi
+    else
+        echo "no_config"
+    fi
+}
+
+# Check circuit breaker state for a model
+check_circuit_breaker() {
+    local model="$1"
+    local state_file="${BREAKERS_DIR}/${model}.state"
+
+    if [[ ! -f "$state_file" ]]; then
+        echo "CLOSED"
+        return
+    fi
+
+    # Source state file safely
+    local state="CLOSED"
+    state=$(grep '^state=' "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "CLOSED")
+    echo "$state"
+}
+
+# Check disk space
+check_disk_space() {
+    local path="${1:-$HOME/.claude/autonomous}"
+    local threshold_percent="${2:-90}"
+
+    if [[ ! -d "$path" ]]; then
+        echo "path_missing"
+        return
+    fi
+
+    local usage
+    usage=$(df "$path" | tail -1 | awk '{print $5}' | tr -d '%')
+
+    if [[ $usage -ge $threshold_percent ]]; then
+        echo "critical:${usage}%"
+    elif [[ $usage -ge $((threshold_percent - 10)) ]]; then
+        echo "warning:${usage}%"
+    else
+        echo "ok:${usage}%"
+    fi
+}
+
+# Check recent error rate from logs
+check_error_rate() {
+    local log_file="${LOG_DIR}/sessions/$(date +%Y-%m-%d).jsonl"
+    local error_threshold="${1:-10}"
+    local time_window_minutes="${2:-60}"
+
+    if [[ ! -f "$log_file" ]]; then
+        echo "0"
+        return
+    fi
+
+    # Count ERROR and FATAL entries in last hour
+    local cutoff_time
+    if date --version &>/dev/null 2>&1; then
+        cutoff_time=$(date -d "-${time_window_minutes} minutes" -Iseconds)
+    else
+        cutoff_time=$(date -v-${time_window_minutes}M -Iseconds)
+    fi
+
+    local error_count
+    if command -v jq &>/dev/null; then
+        error_count=$(grep -E '"level":"(ERROR|FATAL)"' "$log_file" 2>/dev/null | \
+            jq -r --arg cutoff "$cutoff_time" 'select(.timestamp >= $cutoff)' 2>/dev/null | \
+            wc -l | tr -d ' ')
+    else
+        error_count=$(grep -cE '"level":"(ERROR|FATAL)"' "$log_file" 2>/dev/null || echo 0)
+    fi
+
+    echo "${error_count:-0}"
+}
+
+# Check if a tmux session is running
+check_session_running() {
+    local session_name="${1:-claude-tri-agent}"
+
+    if command -v tmux &>/dev/null; then
+        if tmux has-session -t "$session_name" 2>/dev/null; then
+            echo "running"
+        else
+            echo "stopped"
+        fi
+    else
+        echo "tmux_missing"
+    fi
+}
+
+#===============================================================================
+# Main Health Check
+#===============================================================================
+
+run_health_check() {
+    local timestamp
+    timestamp="$(date -Iseconds)"
+
+    # Collect all checks
+    local claude_cli gemini_cli codex_cli
+    claude_cli=$(check_cli_available "claude")
+    gemini_cli=$(check_cli_available "gemini")
+    codex_cli=$(check_cli_available "codex")
+
+    local claude_auth gemini_auth codex_auth
+    claude_auth=$(check_claude_auth)
+    gemini_auth=$(check_gemini_auth)
+    codex_auth=$(check_codex_auth)
+
+    local claude_cb gemini_cb codex_cb
+    claude_cb=$(check_circuit_breaker "claude")
+    gemini_cb=$(check_circuit_breaker "gemini")
+    codex_cb=$(check_circuit_breaker "codex")
+
+    local disk_status
+    disk_status=$(check_disk_space)
+
+    local error_count
+    error_count=$(check_error_rate)
+
+    local session_status
+    session_status=$(check_session_running)
+
+    # Determine overall status
+    local overall_status="OK"
+    local issues=()
+
+    # Check CLIs
+    if [[ "$claude_cli" != "ok" ]]; then
+        overall_status="FAIL"
+        issues+=("Claude CLI missing")
+    fi
+    if [[ "$gemini_cli" != "ok" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Gemini CLI missing")
+    fi
+    if [[ "$codex_cli" != "ok" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Codex CLI missing")
+    fi
+
+    # Check auth
+    if [[ "$claude_auth" != "ok" ]]; then
+        overall_status="FAIL"
+        issues+=("Claude auth: ${claude_auth}")
+    fi
+    if [[ "$gemini_auth" != "ok" && "$gemini_auth" != "cli_missing" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Gemini auth: ${gemini_auth}")
+    fi
+    if [[ "$codex_auth" != "ok" && "$codex_auth" != "cli_missing" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Codex auth: ${codex_auth}")
+    fi
+
+    # Check circuit breakers
+    if [[ "$claude_cb" == "OPEN" ]]; then
+        overall_status="FAIL"
+        issues+=("Claude circuit breaker OPEN")
+    fi
+    if [[ "$gemini_cb" == "OPEN" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Gemini circuit breaker OPEN")
+    fi
+    if [[ "$codex_cb" == "OPEN" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Codex circuit breaker OPEN")
+    fi
+
+    # Check disk
+    if [[ "$disk_status" == critical:* ]]; then
+        overall_status="FAIL"
+        issues+=("Disk space critical: ${disk_status#*:}")
+    elif [[ "$disk_status" == warning:* ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Disk space warning: ${disk_status#*:}")
+    fi
+
+    # Check error rate
+    if [[ $error_count -ge 20 ]]; then
+        overall_status="FAIL"
+        issues+=("High error rate: ${error_count} errors/hour")
+    elif [[ $error_count -ge 10 ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Elevated error rate: ${error_count} errors/hour")
+    fi
+
+    # Build issues JSON array
+    local issues_json="[]"
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        issues_json=$(printf '%s\n' "${issues[@]}" | jq -R . | jq -s .)
+    fi
+
+    # Build JSON output
+    local health_json
+    health_json=$(cat <<EOF
+{
+    "status": "${overall_status}",
+    "timestamp": "${timestamp}",
+    "trace_id": "${TRACE_ID:-unknown}",
+    "checks": {
+        "cli": {
+            "claude": "${claude_cli}",
+            "gemini": "${gemini_cli}",
+            "codex": "${codex_cli}"
+        },
+        "auth": {
+            "claude": "${claude_auth}",
+            "gemini": "${gemini_auth}",
+            "codex": "${codex_auth}"
+        },
+        "circuit_breakers": {
+            "claude": "${claude_cb}",
+            "gemini": "${gemini_cb}",
+            "codex": "${codex_cb}"
+        },
+        "disk": "${disk_status}",
+        "error_rate": ${error_count},
+        "session": "${session_status}"
+    },
+    "issues": ${issues_json}
+}
+EOF
+)
+
+    # Write to health file
+    mkdir -p "$(dirname "$HEALTH_FILE")"
+    echo "$health_json" > "$HEALTH_FILE"
+
+    # Return the JSON
+    echo "$health_json"
+
+    # Return appropriate exit code
+    case "$overall_status" in
+        OK)       return 0 ;;
+        DEGRADED) return 1 ;;
+        FAIL)     return 2 ;;
+    esac
+}
+
+#===============================================================================
+# Display Functions
+#===============================================================================
+
+display_status() {
+    local json="$1"
+    local status
+    status=$(echo "$json" | jq -r '.status')
+
+    echo ""
+    case "$status" in
+        OK)
+            echo -e "${BOLD}${GREEN}============================================================${RESET}"
+            echo -e "${BOLD}${GREEN}         TRI-AGENT HEALTH CHECK: OK                        ${RESET}"
+            echo -e "${BOLD}${GREEN}============================================================${RESET}"
+            ;;
+        DEGRADED)
+            echo -e "${BOLD}${YELLOW}============================================================${RESET}"
+            echo -e "${BOLD}${YELLOW}      TRI-AGENT HEALTH CHECK: DEGRADED                     ${RESET}"
+            echo -e "${BOLD}${YELLOW}============================================================${RESET}"
+            ;;
+        FAIL)
+            echo -e "${BOLD}${RED}============================================================${RESET}"
+            echo -e "${BOLD}${RED}        TRI-AGENT HEALTH CHECK: FAIL                        ${RESET}"
+            echo -e "${BOLD}${RED}============================================================${RESET}"
+            ;;
+    esac
+    echo ""
+
+    echo -e "${BOLD}CLI Status:${RESET}"
+    local claude_cli gemini_cli codex_cli
+    claude_cli=$(echo "$json" | jq -r '.checks.cli.claude')
+    gemini_cli=$(echo "$json" | jq -r '.checks.cli.gemini')
+    codex_cli=$(echo "$json" | jq -r '.checks.cli.codex')
+
+    [[ "$claude_cli" == "ok" ]] && echo -e "  Claude:  ${GREEN}OK${RESET}" || echo -e "  Claude:  ${RED}MISSING${RESET}"
+    [[ "$gemini_cli" == "ok" ]] && echo -e "  Gemini:  ${GREEN}OK${RESET}" || echo -e "  Gemini:  ${RED}MISSING${RESET}"
+    [[ "$codex_cli" == "ok" ]] && echo -e "  Codex:   ${GREEN}OK${RESET}" || echo -e "  Codex:   ${RED}MISSING${RESET}"
+    echo ""
+
+    echo -e "${BOLD}Authentication:${RESET}"
+    local claude_auth gemini_auth codex_auth
+    claude_auth=$(echo "$json" | jq -r '.checks.auth.claude')
+    gemini_auth=$(echo "$json" | jq -r '.checks.auth.gemini')
+    codex_auth=$(echo "$json" | jq -r '.checks.auth.codex')
+
+    [[ "$claude_auth" == "ok" ]] && echo -e "  Claude:  ${GREEN}OK${RESET}" || echo -e "  Claude:  ${YELLOW}${claude_auth}${RESET}"
+    [[ "$gemini_auth" == "ok" ]] && echo -e "  Gemini:  ${GREEN}OK${RESET}" || echo -e "  Gemini:  ${YELLOW}${gemini_auth}${RESET}"
+    [[ "$codex_auth" == "ok" ]] && echo -e "  Codex:   ${GREEN}OK${RESET}" || echo -e "  Codex:   ${YELLOW}${codex_auth}${RESET}"
+    echo ""
+
+    echo -e "${BOLD}Circuit Breakers:${RESET}"
+    local claude_cb gemini_cb codex_cb
+    claude_cb=$(echo "$json" | jq -r '.checks.circuit_breakers.claude')
+    gemini_cb=$(echo "$json" | jq -r '.checks.circuit_breakers.gemini')
+    codex_cb=$(echo "$json" | jq -r '.checks.circuit_breakers.codex')
+
+    case "$claude_cb" in
+        CLOSED)    echo -e "  Claude:  ${GREEN}CLOSED${RESET}" ;;
+        HALF_OPEN) echo -e "  Claude:  ${YELLOW}HALF_OPEN${RESET}" ;;
+        OPEN)      echo -e "  Claude:  ${RED}OPEN${RESET}" ;;
+    esac
+    case "$gemini_cb" in
+        CLOSED)    echo -e "  Gemini:  ${GREEN}CLOSED${RESET}" ;;
+        HALF_OPEN) echo -e "  Gemini:  ${YELLOW}HALF_OPEN${RESET}" ;;
+        OPEN)      echo -e "  Gemini:  ${RED}OPEN${RESET}" ;;
+    esac
+    case "$codex_cb" in
+        CLOSED)    echo -e "  Codex:   ${GREEN}CLOSED${RESET}" ;;
+        HALF_OPEN) echo -e "  Codex:   ${YELLOW}HALF_OPEN${RESET}" ;;
+        OPEN)      echo -e "  Codex:   ${RED}OPEN${RESET}" ;;
+    esac
+    echo ""
+
+    echo -e "${BOLD}System:${RESET}"
+    local disk_status error_rate session
+    disk_status=$(echo "$json" | jq -r '.checks.disk')
+    error_rate=$(echo "$json" | jq -r '.checks.error_rate')
+    session=$(echo "$json" | jq -r '.checks.session')
+
+    if [[ "$disk_status" == ok:* ]]; then
+        echo -e "  Disk:    ${GREEN}${disk_status#*:}${RESET}"
+    elif [[ "$disk_status" == warning:* ]]; then
+        echo -e "  Disk:    ${YELLOW}${disk_status#*:}${RESET}"
+    else
+        echo -e "  Disk:    ${RED}${disk_status#*:}${RESET}"
+    fi
+
+    if [[ $error_rate -lt 10 ]]; then
+        echo -e "  Errors:  ${GREEN}${error_rate}/hour${RESET}"
+    elif [[ $error_rate -lt 20 ]]; then
+        echo -e "  Errors:  ${YELLOW}${error_rate}/hour${RESET}"
+    else
+        echo -e "  Errors:  ${RED}${error_rate}/hour${RESET}"
+    fi
+
+    [[ "$session" == "running" ]] && echo -e "  Session: ${GREEN}RUNNING${RESET}" || echo -e "  Session: ${YELLOW}${session}${RESET}"
+    echo ""
+
+    # Show issues if any
+    local issue_count
+    issue_count=$(echo "$json" | jq '.issues | length')
+    if [[ $issue_count -gt 0 ]]; then
+        echo -e "${BOLD}${RED}Issues:${RESET}"
+        echo "$json" | jq -r '.issues[]' | while read -r issue; do
+            echo -e "  - ${RED}${issue}${RESET}"
+        done
+        echo ""
+    fi
+
+    local timestamp
+    timestamp=$(echo "$json" | jq -r '.timestamp')
+    echo -e "${CYAN}Last checked: ${timestamp}${RESET}"
+    echo ""
+}
+
+show_current_status() {
+    if [[ -f "$HEALTH_FILE" ]]; then
+        cat "$HEALTH_FILE"
+    else
+        echo '{"status": "UNKNOWN", "message": "No health check has been run yet"}'
+    fi
+}
+
+#===============================================================================
+# Desktop Notifications
+#===============================================================================
+
+send_notification() {
+    local title="$1"
+    local message="$2"
+    local urgency="${3:-normal}"
+
+    if [[ "$ENABLE_NOTIFY" != "true" ]]; then
+        return
+    fi
+
+    # Try notify-send (Linux)
+    if command -v notify-send &>/dev/null; then
+        notify-send -u "$urgency" "$title" "$message"
+        return
+    fi
+
+    # Try osascript (macOS)
+    if command -v osascript &>/dev/null; then
+        osascript -e "display notification \"$message\" with title \"$title\""
+        return
+    fi
+
+    # Log if no notification method available
+    echo "[NOTIFY] $title: $message" >&2
+}
+
+#===============================================================================
+# Daemon Mode
+#===============================================================================
+
+run_daemon() {
+    local interval="${CHECK_INTERVAL}"
+    local last_status="OK"
+
+    echo "Starting health check daemon (interval: ${interval}s)"
+    echo "Press Ctrl+C to stop"
+    echo ""
+
+    # Trap for clean shutdown
+    trap 'echo ""; echo "Daemon stopped"; exit 0' INT TERM
+
+    while true; do
+        local json
+        json=$(run_health_check 2>/dev/null)
+        local current_status
+        current_status=$(echo "$json" | jq -r '.status')
+        local timestamp
+        timestamp=$(date +%H:%M:%S)
+
+        # Log status change
+        if [[ "$current_status" != "$last_status" ]]; then
+            case "$current_status" in
+                OK)
+                    echo -e "[${timestamp}] ${GREEN}Status changed: ${last_status} -> ${current_status}${RESET}"
+                    send_notification "Tri-Agent Health" "System recovered - Status: OK" "normal"
+                    ;;
+                DEGRADED)
+                    echo -e "[${timestamp}] ${YELLOW}Status changed: ${last_status} -> ${current_status}${RESET}"
+                    local issues
+                    issues=$(echo "$json" | jq -r '.issues | join(", ")')
+                    send_notification "Tri-Agent Health Warning" "Status: DEGRADED - $issues" "normal"
+                    ;;
+                FAIL)
+                    echo -e "[${timestamp}] ${RED}Status changed: ${last_status} -> ${current_status}${RESET}"
+                    local issues
+                    issues=$(echo "$json" | jq -r '.issues | join(", ")')
+                    send_notification "Tri-Agent Health CRITICAL" "Status: FAIL - $issues" "critical"
+                    ;;
+            esac
+            last_status="$current_status"
+        else
+            # Periodic status log
+            case "$current_status" in
+                OK)       echo -e "[${timestamp}] ${GREEN}Status: OK${RESET}" ;;
+                DEGRADED) echo -e "[${timestamp}] ${YELLOW}Status: DEGRADED${RESET}" ;;
+                FAIL)     echo -e "[${timestamp}] ${RED}Status: FAIL${RESET}" ;;
+            esac
+        fi
+
+        sleep "$interval"
+    done
+}
+
+#===============================================================================
+# Help
+#===============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}health-check${RESET} - Health monitoring for tri-agent system
+
+${BOLD}USAGE:${RESET}
+    health-check [OPTIONS]
+
+${BOLD}OPTIONS:${RESET}
+    --status          Show current health status (from cache)
+    --json            Output machine-readable JSON only
+    --daemon          Run as daemon with periodic checks
+    --notify          Enable desktop notifications on failures
+    --interval N      Check interval in seconds (default: 60)
+    --help, -h        Show this help message
+
+${BOLD}CHECKS PERFORMED:${RESET}
+    - CLI availability (claude, gemini, codex)
+    - Authentication status for each model
+    - Circuit breaker states
+    - Disk space usage
+    - Recent error rates from logs
+    - Tmux session status
+
+${BOLD}STATUS VALUES:${RESET}
+    OK        All systems operational
+    DEGRADED  Some non-critical issues detected
+    FAIL      Critical issues that need attention
+
+${BOLD}EXAMPLES:${RESET}
+    health-check                     Run health check
+    health-check --json              Output JSON only
+    health-check --daemon --notify   Run daemon with notifications
+    health-check --status            Show cached status
+
+${BOLD}OUTPUT:${RESET}
+    Results are written to: ${HEALTH_FILE}
+EOF
+}
+
+#===============================================================================
+# Parse Arguments
+#===============================================================================
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --status)
+                STATUS_ONLY=true
+                shift
+                ;;
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --daemon)
+                DAEMON_MODE=true
+                shift
+                ;;
+            --notify)
+                ENABLE_NOTIFY=true
+                shift
+                ;;
+            --interval)
+                CHECK_INTERVAL="$2"
+                shift 2
+                ;;
+            --help|-h|help)
+                show_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                echo "Run 'health-check --help' for usage" >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+
+main() {
+    parse_args "$@"
+
+    if [[ "$STATUS_ONLY" == "true" ]]; then
+        show_current_status
+        exit 0
+    fi
+
+    if [[ "$DAEMON_MODE" == "true" ]]; then
+        run_daemon
+        exit 0
+    fi
+
+    # Run health check (capture output and exit code separately)
+    local json exit_code
+    json=$(run_health_check) && exit_code=0 || exit_code=$?
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo "$json"
+    else
+        display_status "$json"
+    fi
+
+    exit $exit_code
+}
+
+main "$@"

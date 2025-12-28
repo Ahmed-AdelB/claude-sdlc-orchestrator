@@ -1,0 +1,77 @@
+version: '3.8'
+
+#===============================================================================
+# docker-compose.yml - Claude Code Sandbox with persistence
+#===============================================================================
+# Usage:
+#   cd ~/.claude/autonomous
+#   docker compose up -d             # Start container (Docker Compose v2)
+#   docker compose exec claude bash  # Enter container
+#   docker compose logs -f           # View logs
+#   docker compose down              # Stop container
+# Legacy (if using docker-compose v1):
+#   docker-compose up -d
+#===============================================================================
+
+services:
+  claude:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-sandbox
+    hostname: claude-sandbox
+
+    # Keep container running
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+    # Resource limits (adjust as needed)
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 2G
+
+    # Mount volumes
+    volumes:
+      # Your projects workspace
+      - ~/projects:/workspace:rw
+
+      # Persist Claude session data
+      - claude-sessions:/root/.claude-code
+
+      # Persist autonomous configuration
+      - ./:/root/.claude/autonomous:ro
+
+      # Optional: Mount SSH keys for git (read-only)
+      # - ~/.ssh:/root/.ssh:ro
+
+      # Optional: Mount git config
+      - ~/.gitconfig:/root/.gitconfig:ro
+
+    # Environment variables
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_AUTONOMOUS_MODE=true
+      - TERM=xterm-256color
+
+    # Network (optional: remove for extra isolation)
+    network_mode: bridge
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "claude", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+# Named volumes for persistence
+volumes:
+  claude-sessions:
+    driver: local

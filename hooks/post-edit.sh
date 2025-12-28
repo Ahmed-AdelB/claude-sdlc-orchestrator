@@ -27,10 +27,21 @@ if [[ -n "$FILE_PATH" ]]; then
     fi
     # Resolve to absolute path and validate it exists
     if [[ -f "$FILE_PATH" ]]; then
-        FILE_PATH=$(realpath "$FILE_PATH" 2>/dev/null) || {
+        RESOLVED=$(realpath "$FILE_PATH" 2>/dev/null) || {
             echo "[SECURITY] Cannot resolve file path - aborting" >&2
             exit 1
         }
+
+        # SECURITY: Verify resolved path is within project directory (prevent symlink attacks)
+        PROJECT_DIR=$(pwd)
+        if [[ ! "$RESOLVED" =~ ^$PROJECT_DIR ]]; then
+            echo "[SECURITY] File outside project directory - aborting" >&2
+            echo "[SECURITY] Resolved path: $RESOLVED" >&2
+            echo "[SECURITY] Project directory: $PROJECT_DIR" >&2
+            exit 1
+        fi
+
+        FILE_PATH="$RESOLVED"
     fi
 fi
 

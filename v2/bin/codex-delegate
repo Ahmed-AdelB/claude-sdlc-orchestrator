@@ -1,0 +1,464 @@
+#!/bin/bash
+#===============================================================================
+# codex-delegate - Wrapper for Codex CLI with JSON envelope output
+#===============================================================================
+# Wraps Codex CLI execution and outputs structured JSON response envelope.
+# Uses GPT-5.2-Codex with xhigh reasoning effort for maximum capability.
+#
+# Usage:
+#   codex-delegate "Review this code for security issues"
+#   codex-delegate "Should we approve this PR?" --timeout 120
+#   echo "code here" | codex-delegate "Analyze this for bugs"
+#
+# JSON envelope format:
+# {
+#   "model": "codex",
+#   "status": "success|error",
+#   "decision": "APPROVE|REJECT|ABSTAIN",
+#   "confidence": 0.0-1.0,
+#   "reasoning": "...",
+#   "output": "...",
+#   "trace_id": "...",
+#   "duration_ms": N
+# }
+#===============================================================================
+
+# Source common utilities (strict mode, trace ID, logging)
+# Resolve symlinks to find actual script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../lib"
+
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=../lib/common.sh
+    source "${LIB_DIR}/common.sh"
+else
+    echo '{"model":"codex","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"common.sh not found","output":"","trace_id":"unknown","duration_ms":0}'
+    exit 1
+fi
+
+# Set component for logging
+COMPONENT="CODEX"
+export COMPONENT
+
+# Ensure TRACE_ID is set even if common.sh failed (#87 fix)
+TRACE_ID="${TRACE_ID:-codex-$(date +%Y%m%d%H%M%S)-$$}"
+export TRACE_ID
+
+#===============================================================================
+# Configuration
+#===============================================================================
+DEFAULT_TIMEOUT=480  # 8 minutes for xhigh reasoning
+MAX_TIMEOUT=900      # 15 minutes max for complex tasks
+CODEX_CMD="${CODEX_CMD:-codex}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.2-codex}"
+CODEX_REASONING="${CODEX_REASONING:-xhigh}"
+CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"  # workspace-write | danger-full-access
+CODEX_CONTEXT_COMPACTION="${CODEX_CONTEXT_COMPACTION:-true}"
+CODEX_REQUEST_MAX_RETRIES="${CODEX_REQUEST_MAX_RETRIES:-4}"
+CODEX_STREAM_MAX_RETRIES="${CODEX_STREAM_MAX_RETRIES:-10}"
+CODEX_STREAM_IDLE_TIMEOUT_MS="${CODEX_STREAM_IDLE_TIMEOUT_MS:-300000}"
+
+#===============================================================================
+# Usage
+#===============================================================================
+usage() {
+    cat <<EOF
+Usage: codex-delegate [OPTIONS] "prompt"
+
+Options:
+  --timeout N       Timeout in seconds (default: $DEFAULT_TIMEOUT, max: $MAX_TIMEOUT)
+  --model MODEL     Codex model to use (default: $CODEX_MODEL)
+  --reasoning LVL   Reasoning effort: none, minimal, low, medium, high, xhigh (default: $CODEX_REASONING)
+  --sandbox MODE    Sandbox mode: workspace-write | danger-full-access (default: $CODEX_SANDBOX)
+  -s MODE           Shorthand for --sandbox
+  --print           Also print to stderr
+  --help            Show this help message
+
+Examples:
+  codex-delegate "Review this code for security issues"
+  codex-delegate --timeout 120 --reasoning high "Analyze the architecture"
+  codex-delegate -s danger-full-access "Run tests with full access"
+  cat code.ts | codex-delegate "Check for bugs"
+
+JSON Output:
+  {"model":"codex","status":"...","decision":"...","confidence":0.0-1.0,"reasoning":"...","output":"...","trace_id":"...","duration_ms":N}
+EOF
+}
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+TIMEOUT=$DEFAULT_TIMEOUT
+MODEL="$CODEX_MODEL"
+REASONING="$CODEX_REASONING"
+SANDBOX="$CODEX_SANDBOX"
+PRINT_STDERR=false
+PROMPT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --timeout)
+            TIMEOUT="$2"
+            # Validate timeout is a positive number
+            if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [[ $TIMEOUT -lt 1 ]]; then
+                log_warn "Invalid timeout value: $TIMEOUT, using default $DEFAULT_TIMEOUT"
+                TIMEOUT=$DEFAULT_TIMEOUT
+            elif [[ $TIMEOUT -gt $MAX_TIMEOUT ]]; then
+                TIMEOUT=$MAX_TIMEOUT
+            fi
+            shift 2
+            ;;
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        --reasoning)
+            REASONING="$2"
+            shift 2
+            ;;
+        --sandbox|-s)
+            SANDBOX="$2"
+            # Validate sandbox mode
+            if [[ "$SANDBOX" != "workspace-write" && "$SANDBOX" != "danger-full-access" ]]; then
+                log_warn "Invalid sandbox mode: $SANDBOX, using default $CODEX_SANDBOX"
+                SANDBOX="$CODEX_SANDBOX"
+            fi
+            shift 2
+            ;;
+        --print)
+            PRINT_STDERR=true
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        -*)
+            log_warn "Unknown option: $1"
+            shift
+            ;;
+        *)
+            PROMPT="$1"
+            shift
+            ;;
+    esac
+done
+
+#===============================================================================
+# Validate Input
+#===============================================================================
+if [[ -z "$PROMPT" ]]; then
+    echo '{"model":"codex","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"No prompt provided","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    exit 1
+fi
+
+# Check if Codex CLI exists
+if ! command_exists "$CODEX_CMD"; then
+    echo '{"model":"codex","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"Codex CLI not found","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    exit 1
+fi
+
+#===============================================================================
+# Helper Functions
+#===============================================================================
+
+
+# Escape string for JSON (using jq for reliable escaping)
+json_escape() {
+    local str="$1"
+    # Use jq for reliable JSON escaping (handles all control characters)
+    # Falls back to python, then sed if neither available
+    printf '%s' "$str" | jq -Rs '.[:-1]' 2>/dev/null | sed 's/^"//; s/"$//' || \
+    printf '%s' "$str" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null || \
+    printf '%s' "$str" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' | tr '\n' ' ' | head -c 10000
+}
+
+# Extract decision from output (APPROVE, REJECT, ABSTAIN)
+extract_decision() {
+    local output="$1"
+    local decision="ABSTAIN"
+
+    # Look for explicit decision keywords (case insensitive)
+    if echo "$output" | grep -qiE '\b(APPROVE|APPROVED|LGTM|ACCEPT|YES)\b'; then
+        decision="APPROVE"
+    elif echo "$output" | grep -qiE '\b(REJECT|REJECTED|DENY|DENIED|NO|BLOCK)\b'; then
+        decision="REJECT"
+    elif echo "$output" | grep -qiE '\b(ABSTAIN|UNSURE|UNCLEAR|CANNOT DETERMINE|NEED MORE)\b'; then
+        decision="ABSTAIN"
+    fi
+
+    echo "$decision"
+}
+
+# Calculate confidence from output patterns (0.0 - 1.0)
+calculate_confidence() {
+    local output="$1"
+    local decision="$2"
+    local confidence=0.5  # Default moderate confidence
+
+    # Strong affirmatives increase confidence
+    if echo "$output" | grep -qiE '\b(definitely|certainly|absolutely|clearly|strongly)\b'; then
+        confidence=0.9
+    # Moderate affirmatives
+    elif echo "$output" | grep -qiE '\b(likely|probably|appears|seems|looks)\b'; then
+        confidence=0.7
+    # Weak/uncertain language
+    elif echo "$output" | grep -qiE '\b(maybe|might|could|possibly|perhaps|unsure)\b'; then
+        confidence=0.4
+    # Very uncertain
+    elif echo "$output" | grep -qiE '\b(difficult to say|hard to tell|cannot determine|need more)\b'; then
+        confidence=0.2
+    fi
+
+    # If decision is ABSTAIN, cap confidence
+    if [[ "$decision" == "ABSTAIN" ]]; then
+        confidence=$(echo "$confidence" | awk '{if($1 > 0.3) print 0.3; else print $1}')
+    fi
+
+    printf "%.2f" "$confidence"
+}
+
+# Extract reasoning summary (first few sentences or key points)
+extract_reasoning() {
+    local output="$1"
+    local max_len=500
+
+    # Try to extract reasoning after keywords
+    local reasoning
+    reasoning=$(echo "$output" | grep -iE '(because|reason|rationale|due to|since|therefore):?' | head -3 | tr '\n' ' ')
+
+    if [[ -z "$reasoning" ]]; then
+        # Take first 500 chars as summary
+        reasoning="${output:0:$max_len}"
+    fi
+
+    # Truncate if too long
+    if [[ ${#reasoning} -gt $max_len ]]; then
+        reasoning="${reasoning:0:$max_len}..."
+    fi
+
+    echo "$reasoning"
+}
+
+#===============================================================================
+# Main Execution
+#===============================================================================
+
+# Read stdin if available (for piped content) with size limit
+MAX_STDIN_SIZE=500000  # 500KB limit to prevent memory issues
+STDIN_CONTENT=""
+if [[ ! -t 0 ]]; then
+    STDIN_CONTENT=$(head -c $MAX_STDIN_SIZE)
+    # Check if there was more content (stdin still has data)
+    if read -n 1 -t 0 2>/dev/null; then
+        log_warn "Stdin truncated to ${MAX_STDIN_SIZE} bytes (500KB limit)"
+    fi
+fi
+
+# Build full prompt
+FULL_PROMPT="$PROMPT"
+if [[ -n "$STDIN_CONTENT" ]]; then
+    FULL_PROMPT="$PROMPT
+
+--- INPUT ---
+$STDIN_CONTENT
+--- END INPUT ---"
+fi
+
+# Add tri-agent instruction for clear decision output
+FULL_PROMPT="$FULL_PROMPT
+
+IMPORTANT: When providing your analysis, if a decision is required, please clearly state one of:
+- APPROVE: if the change/code is acceptable
+- REJECT: if the change/code should not proceed
+- ABSTAIN: if you cannot make a determination
+
+Include your reasoning for the decision."
+
+# Log start (#81 fix - mask secrets in logs)
+MASKED_PROMPT=$(mask_secrets "$FULL_PROMPT")
+log_codex "INFO" "DELEGATE_START" "Starting Codex delegate" \
+    "{\"trace_id\":\"${TRACE_ID}\",\"prompt_length\":${#FULL_PROMPT},\"timeout\":${TIMEOUT},\"model\":\"${MODEL}\",\"reasoning\":\"${REASONING}\",\"sandbox\":\"${SANDBOX}\"}"
+
+# Record start time
+START_MS=$(epoch_ms)
+
+# Execute Codex CLI with maximum settings
+# Uses: codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' --skip-git-repo-check "prompt"
+OUTPUT=""
+EXIT_CODE=0
+STDERR_OUTPUT=""
+
+# Create secure temp file for stderr (#89 fix)
+STDERR_TMP=$(mktemp -t "codex.${TRACE_ID}.stderr.XXXXXXXXXX")
+chmod 600 "$STDERR_TMP"
+trap 'rm -f "$STDERR_TMP"' EXIT
+
+# Normalize context compaction + network tuning settings
+if [[ "$CODEX_CONTEXT_COMPACTION" != "true" && "$CODEX_CONTEXT_COMPACTION" != "false" ]]; then
+    log_warn "Invalid CODEX_CONTEXT_COMPACTION: $CODEX_CONTEXT_COMPACTION, using true"
+    CODEX_CONTEXT_COMPACTION="true"
+fi
+if ! [[ "$CODEX_REQUEST_MAX_RETRIES" =~ ^[0-9]+$ ]]; then
+    log_warn "Invalid CODEX_REQUEST_MAX_RETRIES: $CODEX_REQUEST_MAX_RETRIES, using 4"
+    CODEX_REQUEST_MAX_RETRIES="4"
+fi
+if ! [[ "$CODEX_STREAM_MAX_RETRIES" =~ ^[0-9]+$ ]]; then
+    log_warn "Invalid CODEX_STREAM_MAX_RETRIES: $CODEX_STREAM_MAX_RETRIES, using 10"
+    CODEX_STREAM_MAX_RETRIES="10"
+fi
+if ! [[ "$CODEX_STREAM_IDLE_TIMEOUT_MS" =~ ^[0-9]+$ ]]; then
+    log_warn "Invalid CODEX_STREAM_IDLE_TIMEOUT_MS: $CODEX_STREAM_IDLE_TIMEOUT_MS, using 300000"
+    CODEX_STREAM_IDLE_TIMEOUT_MS="300000"
+fi
+
+# Build config overrides
+CODEX_CONFIG_ARGS=(
+    -c "model_reasoning_effort=\"${REASONING}\""
+    -c "features.remote_compaction=${CODEX_CONTEXT_COMPACTION}"
+    -c "model_providers.openai.request_max_retries=${CODEX_REQUEST_MAX_RETRIES}"
+    -c "model_providers.openai.stream_max_retries=${CODEX_STREAM_MAX_RETRIES}"
+    -c "model_providers.openai.stream_idle_timeout_ms=${CODEX_STREAM_IDLE_TIMEOUT_MS}"
+)
+
+OUTPUT=$(timeout "$TIMEOUT" "$CODEX_CMD" exec \
+    -m "$MODEL" \
+    "${CODEX_CONFIG_ARGS[@]}" \
+    -s "$SANDBOX" \
+    --skip-git-repo-check \
+    "$FULL_PROMPT" \
+    2>"$STDERR_TMP") || EXIT_CODE=$?
+
+STDERR_OUTPUT=$(cat "$STDERR_TMP" 2>/dev/null || echo "")
+
+# Calculate duration
+END_MS=$(epoch_ms)
+DURATION_MS=$((END_MS - START_MS))
+
+# Handle results
+if [[ $EXIT_CODE -eq 124 ]]; then
+    # Timeout
+    log_codex "ERROR" "DELEGATE_TIMEOUT" "Codex delegate timed out" \
+        "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
+
+    ESCAPED_MSG=$(json_escape "Request timed out after ${TIMEOUT}s")
+    echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    exit 1
+
+elif [[ $EXIT_CODE -ne 0 ]]; then
+    # Check for rate limit
+    if echo "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
+        log_codex "WARN" "RATE_LIMIT" "Codex rate limit hit" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+
+        ESCAPED_MSG=$(json_escape "Rate limit exceeded. Please try again later.")
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        exit 1
+    fi
+
+    # Check for auth issues
+    if echo "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401|api.key)'; then
+        log_codex "ERROR" "AUTH_ERROR" "Codex authentication failed" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+
+        ESCAPED_MSG=$(json_escape "Authentication failed. Check OPENAI_API_KEY environment variable.")
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        exit 1
+    fi
+
+    # Check for model not found
+    if echo "$STDERR_OUTPUT" | grep -qiE '(model.*not found|invalid model|unknown model)'; then
+        log_codex "ERROR" "MODEL_ERROR" "Codex model not available" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"model\":\"${MODEL}\",\"duration_ms\":${DURATION_MS}}"
+
+        ESCAPED_MSG=$(json_escape "Model ${MODEL} not available. Try a different model.")
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        exit 1
+    fi
+
+    # Check for Codex-specific reasoning errors (#109)
+    if echo "$STDERR_OUTPUT" | grep -qiE '(reasoning.*budget|reasoning.*exceeded|reasoning.*timeout)'; then
+        log_codex "ERROR" "REASONING_BUDGET_ERROR" "Codex reasoning budget exceeded" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"reasoning\":\"${REASONING}\",\"duration_ms\":${DURATION_MS}}"
+
+        ESCAPED_MSG=$(json_escape "Reasoning budget exceeded. Try reducing complexity or using lower reasoning effort.")
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        exit 1
+    fi
+
+    # Check for context compaction failure
+    if echo "$STDERR_OUTPUT" | grep -qiE '(context.*compact|context_compaction_failed)'; then
+        log_codex "ERROR" "CONTEXT_COMPACTION_ERROR" "Codex context compaction failed" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+
+        ESCAPED_MSG=$(json_escape "Context compaction failed. Try a smaller input or use Gemini for large context.")
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        exit 1
+    fi
+
+    # Check for sandbox permission denied
+    if echo "$STDERR_OUTPUT" | grep -qiE '(sandbox.*permission|sandbox.*denied|permission.*sandbox)'; then
+        log_codex "ERROR" "SANDBOX_ERROR" "Codex sandbox permission denied" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+
+        ESCAPED_MSG=$(json_escape "Sandbox permission denied. Try using -s workspace-write or danger-full-access.")
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        exit 1
+    fi
+
+    # Check for output token limit
+    if echo "$STDERR_OUTPUT" | grep -qiE '(output.*token.*limit|max.*output.*tokens)'; then
+        log_codex "ERROR" "OUTPUT_LIMIT_ERROR" "Codex output token limit exceeded" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+
+        ESCAPED_MSG=$(json_escape "Output token limit exceeded. Try a more focused prompt.")
+        echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        exit 1
+    fi
+
+    # General error (#81 fix - mask secrets in error output)
+    log_codex "ERROR" "DELEGATE_ERROR" "Codex delegate failed" \
+        "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
+
+    ERROR_MSG="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
+    ERROR_MSG=$(mask_secrets "$ERROR_MSG")
+    ESCAPED_MSG=$(json_escape "$ERROR_MSG")
+    echo "{\"model\":\"codex\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    exit 1
+fi
+
+# Success - parse output
+DECISION=$(extract_decision "$OUTPUT")
+CONFIDENCE=$(calculate_confidence "$OUTPUT" "$DECISION")
+REASONING_TEXT=$(extract_reasoning "$OUTPUT")
+
+# Escape for JSON
+ESCAPED_OUTPUT=$(json_escape "$OUTPUT")
+ESCAPED_REASONING=$(json_escape "$REASONING_TEXT")
+
+# Build JSON envelope
+JSON_ENVELOPE=$(cat <<EOF
+{"model":"codex","status":"success","decision":"${DECISION}","confidence":${CONFIDENCE},"reasoning":"${ESCAPED_REASONING}","output":"${ESCAPED_OUTPUT}","trace_id":"${TRACE_ID}","duration_ms":${DURATION_MS}}
+EOF
+)
+
+# Log completion
+log_codex "INFO" "DELEGATE_COMPLETE" "Codex delegate completed" \
+    "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"${DECISION}\",\"confidence\":${CONFIDENCE},\"duration_ms\":${DURATION_MS}}"
+
+# Output JSON to stdout
+echo "$JSON_ENVELOPE"
+
+# Also print to stderr if requested
+if [[ "$PRINT_STDERR" == "true" ]]; then
+    echo "[CODEX] Decision: $DECISION (confidence: $CONFIDENCE)" >&2
+    echo "[CODEX] Duration: ${DURATION_MS}ms" >&2
+fi
+
+exit 0

@@ -1,0 +1,779 @@
+#!/bin/bash
+# =============================================================================
+# tri-agent-router - Intelligent Multi-Signal Task Router v2.0.0
+# =============================================================================
+# Routes tasks to the optimal model (Claude, Gemini, or Codex) based on:
+# - Keyword analysis (design/architect -> Claude, implement/build -> Codex, etc.)
+# - File size detection (>50KB -> Gemini)
+# - Token estimation (bytes/4 heuristic, >100K -> Gemini)
+# - File count (>10 files -> Gemini)
+# - Combined confidence scoring
+# - YAML policy file driven rules
+#
+# Usage:
+#   tri-agent-router "Analyze this codebase"           # Auto-route to best model
+#   tri-agent-router --claude "Complex architecture"   # Force Claude
+#   tri-agent-router --gemini "Large file analysis"    # Force Gemini
+#   tri-agent-router --codex "Implement feature"       # Force Codex
+#   tri-agent-router --consensus "Critical decision"   # Query all three
+#   tri-agent-router -f file1.ts -f file2.ts "Review"  # Include files
+#   tri-agent-router --json "Task"                     # Output JSON response
+#
+# Exit Codes:
+#   0 - Success
+#   1 - Invalid arguments
+#   2 - Routing failed (no model available)
+#   3 - Delegate execution failed
+#   4 - User cancelled (low confidence, no confirmation)
+# =============================================================================
+
+VERSION="2.0.0"
+
+# Handle --help and --version before sourcing libraries (to avoid library issues)
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            cat << 'EOF'
+tri-agent-router - Intelligent Multi-Signal Task Router v2.0.0
+
+USAGE:
+    tri-agent-router [OPTIONS] "prompt"
+
+OPTIONS:
+    --claude        Force route to Claude Opus 4.5
+    --gemini        Force route to Gemini 3 Pro
+    --codex         Force route to Codex GPT-5.2
+    --consensus     Query all three models and synthesize results
+    -f, --file      Include file(s) in context (can be repeated)
+    --json          Output result as JSON
+    --dry-run       Show routing decision without executing
+    --no-confirm    Skip user confirmation for low confidence
+    --verbose       Show detailed routing analysis
+    -h, --help      Show this help message
+    --version       Show version information
+
+EXAMPLES:
+    # Auto-route based on task analysis
+    tri-agent-router "Analyze the authentication flow"
+
+    # Force specific model
+    tri-agent-router --claude "Design the database schema"
+    tri-agent-router --codex "Implement the login endpoint"
+
+    # Include files for context
+    tri-agent-router -f src/auth.ts -f src/types.ts "Review authentication"
+
+    # Multi-model consensus
+    tri-agent-router --consensus "Should we use microservices?"
+
+    # JSON output for scripting
+    tri-agent-router --json "Quick analysis"
+
+ROUTING LOGIC:
+    Gemini (1M context):
+      - Files > 50KB
+      - Estimated tokens > 100K
+      - > 10 files
+      - Keywords: "entire codebase", "analyze everything"
+
+    Codex (GPT-5.2 xhigh):
+      - Keywords: implement, build, create, fix, debug, prototype
+
+    Claude (Opus 4.5):
+      - Keywords: design, architect, security, plan, review
+      - Default for complex reasoning tasks
+
+EOF
+            exit 0
+            ;;
+        --version)
+            echo "tri-agent-router version ${VERSION}"
+            echo "Part of the Tri-Agent System"
+            exit 0
+            ;;
+    esac
+done
+
+# Determine script location
+# Resolve symlinks to find actual script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+LIB_DIR="$(dirname "$SCRIPT_DIR")/lib"
+
+# Source common utilities with workaround for strict mode issues
+# Set LOG_LEVEL before sourcing to avoid unbound variable issues
+export LOG_LEVEL="${LOG_LEVEL:-INFO}"
+
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=../lib/common.sh
+    source "${LIB_DIR}/common.sh"
+else
+    # Fallback to basic strict mode if common.sh not found
+    set -euo pipefail
+    echo "[WARN] common.sh not found, running with basic settings" >&2
+    AUTONOMOUS_ROOT="${HOME}/.claude/autonomous"
+    CONFIG_DIR="${AUTONOMOUS_ROOT}/config"
+    LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+    BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+    TRACE_ID="tri-$(date +%Y%m%d%H%M%S)-$$"
+fi
+
+# =============================================================================
+# Configuration
+# =============================================================================
+ROUTING_POLICY="${CONFIG_DIR}/routing-policy.yaml"
+ROUTING_LOG="${LOG_DIR}/routing-decisions.jsonl"
+VERSION="2.0.0"
+
+# Default thresholds (can be overridden by policy file)
+DEFAULT_CONFIDENCE_THRESHOLD=0.7
+DEFAULT_FILE_SIZE_THRESHOLD=51200      # 50KB
+DEFAULT_TOKEN_THRESHOLD=100000         # 100K tokens
+DEFAULT_FILE_COUNT_THRESHOLD=10
+
+# (Usage and version help are handled before library loading)
+
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+FORCE_MODEL=""
+CONSENSUS=false
+INPUT_FILES=()
+JSON_OUTPUT=false
+DRY_RUN=false
+NO_CONFIRM=false
+VERBOSE=false
+PROMPT=""
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --claude)
+                FORCE_MODEL="claude"
+                shift
+                ;;
+            --gemini)
+                FORCE_MODEL="gemini"
+                shift
+                ;;
+            --codex)
+                FORCE_MODEL="codex"
+                shift
+                ;;
+            --consensus)
+                CONSENSUS=true
+                shift
+                ;;
+            -f|--file)
+                if [[ -n "${2:-}" ]]; then
+                    INPUT_FILES+=("$2")
+                    shift 2
+                else
+                    log_error "Option $1 requires a file argument"
+                    exit 1
+                fi
+                ;;
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --no-confirm)
+                NO_CONFIRM=true
+                shift
+                ;;
+            --verbose|-v)
+                VERBOSE=true
+                shift
+                ;;
+            -h|--help|--version)
+                # Already handled before library loading
+                exit 0
+                ;;
+            --)
+                shift
+                PROMPT="$*"
+                break
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                echo "Use --help for usage information" >&2
+                exit 1
+                ;;
+            *)
+                # Collect remaining args as prompt
+                PROMPT="$*"
+                break
+                ;;
+        esac
+    done
+}
+
+# =============================================================================
+# Policy File Reading
+# =============================================================================
+read_policy_value() {
+    local key="$1"
+    local default="${2:-}"
+
+    if [[ -f "$ROUTING_POLICY" ]]; then
+        read_config "$key" "$default" "$ROUTING_POLICY"
+    else
+        echo "$default"
+    fi
+}
+
+get_confidence_threshold() {
+    read_policy_value ".settings.confidence_threshold" "$DEFAULT_CONFIDENCE_THRESHOLD"
+}
+
+get_file_size_threshold() {
+    read_policy_value ".settings.file_size_threshold" "$DEFAULT_FILE_SIZE_THRESHOLD"
+}
+
+get_token_threshold() {
+    read_policy_value ".settings.token_threshold" "$DEFAULT_TOKEN_THRESHOLD"
+}
+
+get_file_count_threshold() {
+    read_policy_value ".settings.file_count_threshold" "$DEFAULT_FILE_COUNT_THRESHOLD"
+}
+
+# =============================================================================
+# Signal Analysis Functions
+# =============================================================================
+
+# Calculate total file size in bytes
+calculate_file_size() {
+    local total=0
+    for file in "${INPUT_FILES[@]}"; do
+        if [[ -f "$file" ]]; then
+            local size
+            size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
+            total=$((total + size))
+        fi
+    done
+    echo "$total"
+}
+
+# Estimate tokens (bytes / 4 heuristic)
+estimate_tokens() {
+    local prompt_bytes=${#PROMPT}
+    local file_bytes
+    file_bytes=$(calculate_file_size)
+    local total_bytes=$((prompt_bytes + file_bytes))
+    echo $((total_bytes / 4))
+}
+
+# Check keyword patterns and return model + confidence
+analyze_keywords() {
+    local prompt_lower
+    prompt_lower=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]')
+
+    # Track matches for each model
+    local claude_score=0
+    local gemini_score=0
+    local codex_score=0
+    local matched_model=""
+    local matched_reason=""
+
+    # Gemini patterns (large context, analysis)
+    if echo "$prompt_lower" | grep -qE "(entire|full|whole|complete)\s*(codebase|project|repository|repo)"; then
+        gemini_score=90
+        matched_reason="Full codebase analysis detected"
+    elif echo "$prompt_lower" | grep -qE "(multimodal|image|video|pdf|screenshot|diagram)"; then
+        gemini_score=92
+        matched_reason="Multimodal content detected"
+    elif echo "$prompt_lower" | grep -qE "(analyze|summarize)\s*(all|everything|entire)"; then
+        gemini_score=85
+        matched_reason="Large-scale analysis detected"
+    fi
+
+    # Codex patterns (implementation, rapid coding)
+    if echo "$prompt_lower" | grep -qE "\b(implement|build|create|generate|scaffold|prototype)\b"; then
+        codex_score=85
+        matched_reason="Implementation task detected"
+    elif echo "$prompt_lower" | grep -qE "\b(fix|debug|repair|patch|hotfix|bugfix)\b"; then
+        codex_score=80
+        matched_reason="Bug fix task detected"
+    elif echo "$prompt_lower" | grep -qE "\b(refactor|restructure|optimize code)\b"; then
+        codex_score=78
+        matched_reason="Refactoring task detected"
+    elif echo "$prompt_lower" | grep -qE "(test|spec)\s*(generate|write|create)"; then
+        codex_score=80
+        matched_reason="Test generation detected"
+    fi
+
+    # Claude patterns (architecture, complex reasoning)
+    if echo "$prompt_lower" | grep -qE "\b(architect|design|pattern|structure|system design)\b"; then
+        claude_score=90
+        matched_reason="Architecture task detected"
+    elif echo "$prompt_lower" | grep -qE "\b(security|vulnerability|owasp|penetration|audit)\b"; then
+        claude_score=92
+        matched_reason="Security analysis detected"
+    elif echo "$prompt_lower" | grep -qE "\b(analyze|evaluate|compare|tradeoff|decision|complex)\b"; then
+        claude_score=88
+        matched_reason="Complex reasoning detected"
+    elif echo "$prompt_lower" | grep -qE "\b(plan|strategy|approach|roadmap)\b"; then
+        claude_score=85
+        matched_reason="Planning task detected"
+    elif echo "$prompt_lower" | grep -qE "\b(review|critique|feedback)\b"; then
+        claude_score=82
+        matched_reason="Code review detected"
+    elif echo "$prompt_lower" | grep -qE "\b(ultrathink|think hard|deep think)\b"; then
+        claude_score=98
+        matched_reason="Extended thinking requested"
+    fi
+
+    # Determine winner
+    if [[ $gemini_score -ge $codex_score && $gemini_score -ge $claude_score && $gemini_score -gt 0 ]]; then
+        matched_model="gemini"
+        echo "${matched_model}:${gemini_score}:${matched_reason}"
+    elif [[ $codex_score -ge $gemini_score && $codex_score -ge $claude_score && $codex_score -gt 0 ]]; then
+        matched_model="codex"
+        echo "${matched_model}:${codex_score}:${matched_reason}"
+    elif [[ $claude_score -gt 0 ]]; then
+        matched_model="claude"
+        echo "${matched_model}:${claude_score}:${matched_reason}"
+    else
+        # No clear match
+        echo "claude:60:Default to Claude orchestrator"
+    fi
+}
+
+# =============================================================================
+# Routing Decision Engine
+# =============================================================================
+
+compute_routing_decision() {
+    local forced_model="$1"
+
+    # If model is forced, return immediately with high confidence
+    if [[ -n "$forced_model" ]]; then
+        echo "${forced_model}:100:Forced via --${forced_model} flag"
+        return 0
+    fi
+
+    # Get thresholds from policy
+    local file_size_threshold
+    local token_threshold
+    local file_count_threshold
+    file_size_threshold=$(get_file_size_threshold)
+    token_threshold=$(get_token_threshold)
+    file_count_threshold=$(get_file_count_threshold)
+
+    # Calculate signals
+    local total_file_size
+    local estimated_tokens
+    local file_count=${#INPUT_FILES[@]}
+
+    total_file_size=$(calculate_file_size)
+    estimated_tokens=$(estimate_tokens)
+
+    # Check size-based routing to Gemini first (highest priority)
+    if [[ $total_file_size -gt $file_size_threshold ]]; then
+        echo "gemini:95:File size (${total_file_size} bytes) exceeds ${file_size_threshold} threshold"
+        return 0
+    fi
+
+    if [[ $estimated_tokens -gt $token_threshold ]]; then
+        echo "gemini:95:Token estimate (${estimated_tokens}) exceeds ${token_threshold} threshold"
+        return 0
+    fi
+
+    if [[ $file_count -gt $file_count_threshold ]]; then
+        echo "gemini:90:File count (${file_count}) exceeds ${file_count_threshold} threshold"
+        return 0
+    fi
+
+    # Fall back to keyword analysis
+    analyze_keywords
+}
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+log_routing_decision() {
+    local model="$1"
+    local confidence="$2"
+    local reason="$3"
+    local executed="${4:-false}"
+
+    # Ensure log directory exists
+    mkdir -p "$(dirname "$ROUTING_LOG")"
+
+    # Create JSON log entry
+    local log_entry
+    log_entry=$(cat << EOF
+{"timestamp":"$(iso_timestamp)","trace_id":"${TRACE_ID}","model":"${model}","confidence":${confidence},"reason":"${reason}","prompt_length":${#PROMPT},"file_count":${#INPUT_FILES[@]},"executed":${executed},"forced":"${FORCE_MODEL:-none}","consensus":${CONSENSUS}}
+EOF
+)
+
+    echo "$log_entry" >> "$ROUTING_LOG"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        log_info "Routing decision logged: ${model} (confidence: ${confidence}%)"
+    fi
+}
+
+# =============================================================================
+# User Confirmation
+# =============================================================================
+
+prompt_user_confirmation() {
+    local model="$1"
+    local confidence="$2"
+    local reason="$3"
+
+    if [[ "$NO_CONFIRM" == "true" ]]; then
+        return 0
+    fi
+
+    # Check if running interactively
+    if [[ ! -t 0 ]]; then
+        log_warn "Low confidence (${confidence}%) but running non-interactively. Proceeding with ${model}."
+        return 0
+    fi
+
+    echo "" >&2
+    echo -e "${YELLOW}[LOW CONFIDENCE ROUTING]${RESET}" >&2
+    echo -e "  Model:      ${CYAN}${model}${RESET}" >&2
+    echo -e "  Confidence: ${YELLOW}${confidence}%${RESET}" >&2
+    echo -e "  Reason:     ${reason}" >&2
+    echo "" >&2
+    echo -e "Options:" >&2
+    echo -e "  [Y] Proceed with ${model}" >&2
+    echo -e "  [c] Use Claude instead" >&2
+    echo -e "  [g] Use Gemini instead" >&2
+    echo -e "  [x] Use Codex instead" >&2
+    echo -e "  [n] Cancel" >&2
+    echo "" >&2
+    read -rp "Your choice [Y/c/g/x/n]: " choice
+
+    case "${choice,,}" in
+        y|"")
+            return 0
+            ;;
+        c)
+            FORCE_MODEL="claude"
+            return 0
+            ;;
+        g)
+            FORCE_MODEL="gemini"
+            return 0
+            ;;
+        x)
+            FORCE_MODEL="codex"
+            return 0
+            ;;
+        n)
+            log_info "User cancelled routing"
+            exit 4
+            ;;
+        *)
+            log_warn "Invalid choice, proceeding with ${model}"
+            return 0
+            ;;
+    esac
+}
+
+# =============================================================================
+# Delegate Execution
+# =============================================================================
+
+execute_claude() {
+    local prompt="$1"
+    local full_prompt="$prompt"
+
+    # Append file contents
+    for file in "${INPUT_FILES[@]}"; do
+        if [[ -f "$file" ]]; then
+            full_prompt="${full_prompt}
+
+--- FILE: ${file} ---
+$(cat "$file")
+--- END FILE ---"
+        fi
+    done
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        log_info "Executing Claude Opus 4.5"
+    fi
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        claude --dangerously-skip-permissions -p "$full_prompt" --output-format json 2>&1
+    else
+        claude --dangerously-skip-permissions -p "$full_prompt" 2>&1
+    fi
+}
+
+execute_gemini() {
+    local prompt="$1"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        log_info "Executing Gemini 3 Pro"
+    fi
+
+    # Build command with files
+    local cmd_args=("$prompt")
+    for file in "${INPUT_FILES[@]}"; do
+        if [[ -f "$file" ]]; then
+            cmd_args=("-f" "$file" "${cmd_args[@]}")
+        fi
+    done
+
+    "${BIN_DIR}/gemini-ask" "${cmd_args[@]}" 2>&1
+}
+
+execute_codex() {
+    local prompt="$1"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        log_info "Executing Codex GPT-5.2"
+    fi
+
+    # Build command with files
+    local cmd_args=("$prompt")
+    for file in "${INPUT_FILES[@]}"; do
+        if [[ -f "$file" ]]; then
+            cmd_args=("-f" "$file" "${cmd_args[@]}")
+        fi
+    done
+
+    "${BIN_DIR}/codex-ask" "${cmd_args[@]}" 2>&1
+}
+
+execute_delegate() {
+    local model="$1"
+    local prompt="$2"
+
+    case "$model" in
+        claude)
+            execute_claude "$prompt"
+            ;;
+        gemini)
+            execute_gemini "$prompt"
+            ;;
+        codex)
+            execute_codex "$prompt"
+            ;;
+        *)
+            log_error "Unknown model: $model"
+            exit 2
+            ;;
+    esac
+}
+
+# =============================================================================
+# Consensus Mode
+# =============================================================================
+
+run_consensus() {
+    local prompt="$1"
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    log_info "Running tri-agent consensus..."
+
+    # Build file args for delegates
+    local file_args=""
+    for file in "${INPUT_FILES[@]}"; do
+        file_args="${file_args} -f ${file}"
+    done
+
+    # Run all three in parallel
+    (
+        execute_claude "$prompt" > "${temp_dir}/claude.txt" 2>&1
+    ) &
+    local claude_pid=$!
+
+    (
+        execute_gemini "$prompt" > "${temp_dir}/gemini.txt" 2>&1
+    ) &
+    local gemini_pid=$!
+
+    (
+        execute_codex "$prompt" > "${temp_dir}/codex.txt" 2>&1
+    ) &
+    local codex_pid=$!
+
+    # Wait for all to complete
+    wait $claude_pid 2>/dev/null || true
+    wait $gemini_pid 2>/dev/null || true
+    wait $codex_pid 2>/dev/null || true
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        # JSON output format
+        cat << EOF
+{
+  "trace_id": "${TRACE_ID}",
+  "mode": "consensus",
+  "timestamp": "$(iso_timestamp)",
+  "results": {
+    "claude": $(jq -Rs . < "${temp_dir}/claude.txt"),
+    "gemini": $(jq -Rs . < "${temp_dir}/gemini.txt"),
+    "codex": $(jq -Rs . < "${temp_dir}/codex.txt")
+  }
+}
+EOF
+    else
+        # Human-readable output
+        echo ""
+        echo -e "${MAGENTA}================================================================${RESET}"
+        echo -e "${MAGENTA}           TRI-AGENT CONSENSUS RESULTS                         ${RESET}"
+        echo -e "${MAGENTA}================================================================${RESET}"
+        echo ""
+
+        echo -e "${BLUE}+------------------------------------------------------------------+${RESET}"
+        echo -e "${BLUE}|                    CLAUDE OPUS 4.5                              |${RESET}"
+        echo -e "${BLUE}+------------------------------------------------------------------+${RESET}"
+        cat "${temp_dir}/claude.txt"
+        echo ""
+
+        echo -e "${GREEN}+------------------------------------------------------------------+${RESET}"
+        echo -e "${GREEN}|                  GEMINI 3 PRO PREVIEW                           |${RESET}"
+        echo -e "${GREEN}+------------------------------------------------------------------+${RESET}"
+        cat "${temp_dir}/gemini.txt"
+        echo ""
+
+        echo -e "${YELLOW}+------------------------------------------------------------------+${RESET}"
+        echo -e "${YELLOW}|                    CODEX GPT-5.2                                |${RESET}"
+        echo -e "${YELLOW}+------------------------------------------------------------------+${RESET}"
+        cat "${temp_dir}/codex.txt"
+        echo ""
+
+        echo -e "${MAGENTA}================================================================${RESET}"
+        echo -e "${MAGENTA}                    END CONSENSUS                               ${RESET}"
+        echo -e "${MAGENTA}================================================================${RESET}"
+    fi
+
+    # Cleanup
+    rm -rf "$temp_dir"
+
+    # Log the consensus run
+    log_routing_decision "consensus" 100 "Tri-agent consensus executed" true
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+    parse_arguments "$@"
+
+    # Validate prompt
+    if [[ -z "$PROMPT" ]]; then
+        log_error "No prompt provided"
+        echo "Usage: tri-agent-router [OPTIONS] \"prompt\"" >&2
+        echo "Use --help for more information" >&2
+        exit 1
+    fi
+
+    # Validate input files
+    for file in "${INPUT_FILES[@]}"; do
+        if [[ ! -f "$file" ]]; then
+            log_error "File not found: $file"
+            exit 1
+        fi
+    done
+
+    # Handle consensus mode
+    if [[ "$CONSENSUS" == "true" ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "DRY RUN: Would execute tri-agent consensus"
+            echo "  Prompt: ${PROMPT:0:100}..."
+            echo "  Files: ${#INPUT_FILES[@]}"
+            exit 0
+        fi
+        run_consensus "$PROMPT"
+        exit 0
+    fi
+
+    # Compute routing decision
+    local decision
+    decision=$(compute_routing_decision "$FORCE_MODEL")
+
+    # Parse decision
+    local model confidence reason
+    IFS=':' read -r model confidence reason <<< "$decision"
+
+    # Get confidence threshold
+    local threshold
+    threshold=$(get_confidence_threshold)
+    # Convert threshold (e.g., 0.7) to integer percentage (70)
+    # Use awk instead of bc for portability
+    threshold_int=$(echo "$threshold" | awk '{printf "%.0f", $1 * 100}')
+
+    # Display routing decision
+    if [[ "$VERBOSE" == "true" ]] || [[ "$DRY_RUN" == "true" ]]; then
+        echo "" >&2
+        echo -e "${CYAN}[ROUTING ANALYSIS]${RESET}" >&2
+        echo -e "  Selected Model:  ${BOLD}$(get_model_display_name "$model")${RESET}" >&2
+        echo -e "  Confidence:      ${confidence}%" >&2
+        echo -e "  Reason:          ${reason}" >&2
+        echo -e "  Prompt Length:   ${#PROMPT} chars" >&2
+        echo -e "  Files:           ${#INPUT_FILES[@]}" >&2
+        if [[ ${#INPUT_FILES[@]} -gt 0 ]]; then
+            echo -e "  Total File Size: $(calculate_file_size) bytes" >&2
+            echo -e "  Est. Tokens:     $(estimate_tokens)" >&2
+        fi
+        echo "" >&2
+    fi
+
+    # Handle dry run
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "DRY RUN: Would route to ${model}"
+        log_routing_decision "$model" "$confidence" "$reason" false
+        exit 0
+    fi
+
+    # Check confidence threshold
+    if [[ "$confidence" -lt "$threshold_int" ]]; then
+        prompt_user_confirmation "$model" "$confidence" "$reason"
+        # Re-compute if user selected different model
+        if [[ -n "$FORCE_MODEL" ]] && [[ "$FORCE_MODEL" != "$model" ]]; then
+            model="$FORCE_MODEL"
+            confidence=100
+            reason="User override after low confidence"
+        fi
+    fi
+
+    # Log the routing decision
+    log_routing_decision "$model" "$confidence" "$reason" true
+
+    # Show routing indicator (unless JSON output)
+    if [[ "$JSON_OUTPUT" != "true" ]]; then
+        case "$model" in
+            claude)
+                echo -e "${BLUE}[ROUTE]${RESET} Using Claude Opus 4.5" >&2
+                ;;
+            gemini)
+                echo -e "${GREEN}[ROUTE]${RESET} Using Gemini 3 Pro (high thinking)" >&2
+                ;;
+            codex)
+                echo -e "${YELLOW}[ROUTE]${RESET} Using Codex GPT-5.2 (xhigh reasoning)" >&2
+                ;;
+        esac
+    fi
+
+    # Execute delegate
+    execute_delegate "$model" "$PROMPT"
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_error "Delegate execution failed with exit code: $exit_code"
+        exit 3
+    fi
+}
+
+# Run main
+main "$@"

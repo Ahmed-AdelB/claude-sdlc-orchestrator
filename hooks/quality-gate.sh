@@ -223,9 +223,9 @@ if [ $FAILED -gt 0 ]; then
     log_error "Quality gate FAILED"
     echo ""
     echo "Please fix the issues above before proceeding."
-    # Note: Exit code 1 is non-blocking, 2 would block
-    # Quality gate failures are reported but don't block
-    exit 1
+    # Exit code 2 blocks commits in Claude Code (exit 1 is non-blocking)
+    # Quality gate failures MUST block commits to maintain quality standards
+    exit 2
 fi
 
 if [ $WARNINGS -gt 0 ]; then

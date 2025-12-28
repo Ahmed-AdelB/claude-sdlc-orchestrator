@@ -1,0 +1,93 @@
+#!/bin/bash
+#===============================================================================
+# gemini-ask - Delegate tasks to Gemini 3 Pro Preview with high thinking
+#===============================================================================
+# Usage:
+#   gemini-ask "Analyze this entire codebase and summarize the architecture"
+#   gemini-ask "Review this 100KB file for security issues" < large-file.ts
+#   gemini-ask -f file.md "Summarize this document"
+#
+# Features:
+#   - Uses Gemini 3 Pro Preview model
+#   - High thinking level enabled
+#   - Auto-approve mode (YOLO)
+#   - 1M token context window
+#   - Supports stdin for large content
+#
+# IMPORTANT: Before first use, run `gemini` interactively once to complete
+# OAuth authentication. The CLI may hang if not authenticated.
+#===============================================================================
+
+set -e
+
+# Configuration
+MODEL="gemini-3-pro-preview"
+TIMEOUT=300  # 5 minutes max
+
+# Parse arguments
+FILE_INPUT=""
+while getopts "f:" opt; do
+    case $opt in
+        f) FILE_INPUT="$OPTARG" ;;
+        *) ;;
+    esac
+done
+shift $((OPTIND-1))
+
+PROMPT="$*"
+
+if [[ -z "$PROMPT" ]]; then
+    echo "Usage: gemini-ask [-f file] \"your prompt\""
+    echo ""
+    echo "Options:"
+    echo "  -f FILE   Include file content in the prompt"
+    echo ""
+    echo "Examples:"
+    echo "  gemini-ask \"Analyze the architecture of this project\""
+    echo "  gemini-ask -f src/main.ts \"Explain this code in detail\""
+    echo "  cat large-file.ts | gemini-ask \"Review this for bugs\""
+    exit 1
+fi
+
+# Build the full prompt
+FULL_PROMPT="$PROMPT"
+
+# Add file content if specified
+if [[ -n "$FILE_INPUT" && -f "$FILE_INPUT" ]]; then
+    FILE_CONTENT=$(cat "$FILE_INPUT")
+    FULL_PROMPT="$PROMPT
+
+--- FILE: $FILE_INPUT ---
+$FILE_CONTENT
+--- END FILE ---"
+fi
+
+# Check for stdin (piped content)
+if [[ ! -t 0 ]]; then
+    STDIN_CONTENT=$(cat)
+    FULL_PROMPT="$PROMPT
+
+--- CONTENT ---
+$STDIN_CONTENT
+--- END CONTENT ---"
+fi
+
+# Log the request
+echo "[GEMINI] Model: $MODEL (high thinking)" >&2
+echo "[GEMINI] Prompt length: ${#FULL_PROMPT} chars" >&2
+
+# Execute Gemini with maximum settings
+# Note: Use positional prompt (not -p which is deprecated)
+timeout $TIMEOUT gemini \
+    -m "$MODEL" \
+    --approval-mode yolo \
+    "$FULL_PROMPT" \
+    2>&1
+
+EXIT_CODE=$?
+
+if [[ $EXIT_CODE -eq 124 ]]; then
+    echo "[GEMINI] Request timed out after ${TIMEOUT}s" >&2
+fi
+
+exit $EXIT_CODE

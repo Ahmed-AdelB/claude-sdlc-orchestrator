@@ -1,0 +1,775 @@
+#!/bin/bash
+# =============================================================================
+# tri-agent-preflight - Pre-flight validation before starting tri-agent session
+# =============================================================================
+# Validates all prerequisites for running the tri-agent system
+#
+# Usage: tri-agent-preflight [--quick|--full] [--json] [--quiet]
+#
+# Options:
+#   --quick   Skip live API tests (default)
+#   --full    Include live API connectivity tests (30s timeout per model)
+#   --json    Output only JSON report (no terminal colors)
+#   --quiet   Suppress terminal output, only set exit code
+#   --help    Show this help message
+#
+# Checks:
+# 1. CLI installation (claude, gemini, codex, tmux, jq, yq)
+# 2. Authentication status:
+#    - Claude: implicit (oauth)
+#    - Gemini: oauth-personal (~/.gemini/oauth_creds.json)
+#    - Codex: auth.json or config.toml
+# 3. Live API connectivity tests (with --full flag, 30s timeout per model)
+# 4. Config file validation (tri-agent.yaml exists and valid)
+# 5. Directory structure exists
+# 6. Circuit breaker states
+#
+# Exit Codes:
+# - 0: All checks passed
+# - 1: Critical failure (cannot proceed)
+# - 2: Warnings only (degraded mode possible)
+#
+# Output: JSON status report
+# =============================================================================
+
+# Enable strict mode but allow unbound variables for compatibility
+set -eo pipefail
+
+# =============================================================================
+# Directory Setup - resolve symlinks to find actual script location
+# =============================================================================
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+
+# Core directories
+CONFIG_DIR="${AUTONOMOUS_ROOT}/config"
+STATE_DIR="${AUTONOMOUS_ROOT}/state"
+LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+SESSIONS_DIR="${AUTONOMOUS_ROOT}/sessions"
+TASKS_DIR="${AUTONOMOUS_ROOT}/tasks"
+BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+BREAKERS_DIR="${STATE_DIR}/breakers"
+LOCKS_DIR="${STATE_DIR}/locks"
+
+# Files
+CONFIG_FILE="${CONFIG_DIR}/tri-agent.yaml"
+
+# =============================================================================
+# Trace ID Generation
+# =============================================================================
+generate_trace_id() {
+    local prefix="${1:-pre}"
+    local timestamp
+    local random_suffix
+
+    timestamp="$(date +%Y%m%d%H%M%S)"
+
+    if command -v uuidgen &>/dev/null; then
+        random_suffix="$(uuidgen | cut -d'-' -f1)"
+    elif [[ -r /dev/urandom ]]; then
+        random_suffix="$(head -c 4 /dev/urandom | xxd -p 2>/dev/null || echo "$$")"
+    else
+        random_suffix="${RANDOM}${RANDOM}"
+    fi
+
+    echo "${prefix}-${timestamp}-${random_suffix}"
+}
+
+TRACE_ID="${TRACE_ID:-$(generate_trace_id)}"
+export TRACE_ID
+
+# =============================================================================
+# Color Setup
+# =============================================================================
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    MAGENTA='\033[0;35m'
+    CYAN='\033[0;36m'
+    WHITE='\033[0;37m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' WHITE='' BOLD='' RESET=''
+fi
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+iso_timestamp() {
+    date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S"
+}
+
+log_info()  { echo -e "[$(date +%H:%M:%S)] ${GREEN}[INFO]${RESET}  $*" >&2; }
+log_warn()  { echo -e "[$(date +%H:%M:%S)] ${YELLOW}[WARN]${RESET}  $*" >&2; }
+log_error() { echo -e "[$(date +%H:%M:%S)] ${RED}[ERROR]${RESET} $*" >&2; }
+log_debug() { [[ "${DEBUG:-0}" == "1" ]] && echo -e "[$(date +%H:%M:%S)] [DEBUG] $*" >&2 || true; }
+
+# Validate YAML config file
+validate_config() {
+    local cfg="${1:-$CONFIG_FILE}"
+
+    [[ -f "$cfg" ]] || return 1
+
+    if command -v yq &>/dev/null; then
+        yq eval '.' "$cfg" &>/dev/null || return 1
+        # Check required sections
+        local has_models has_routing
+        has_models=$(yq eval '.models // ""' "$cfg" 2>/dev/null)
+        has_routing=$(yq eval '.routing // ""' "$cfg" 2>/dev/null)
+        [[ -n "$has_models" && "$has_models" != "null" ]] || return 1
+        [[ -n "$has_routing" && "$has_routing" != "null" ]] || return 1
+    elif command -v python3 &>/dev/null; then
+        # Note: Use 'except Exception' not bare 'except' to avoid catching SystemExit
+        python3 -c "
+import yaml
+import sys
+try:
+    with open('$cfg') as f:
+        config = yaml.safe_load(f)
+    if config is None or 'models' not in config or 'routing' not in config:
+        sys.exit(1)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" || return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
+# Configuration
+# =============================================================================
+PREFLIGHT_MODE="${PREFLIGHT_MODE:-quick}"
+JSON_OUTPUT="${JSON_OUTPUT:-false}"
+QUIET_MODE="${QUIET_MODE:-false}"
+API_TIMEOUT=30
+
+# Result accumulators
+declare -a CRITICAL_FAILURES=()
+declare -a WARNINGS=()
+declare -A CHECK_RESULTS=()
+
+# =============================================================================
+# Output Functions
+# =============================================================================
+
+print_line() {
+    [[ "$QUIET_MODE" == "true" ]] && return 0
+    echo -e "$*"
+}
+
+print_check() {
+    local name="$1"
+    local status="$2"
+    local details="${3:-}"
+
+    [[ "$QUIET_MODE" == "true" ]] && return 0
+    [[ "$JSON_OUTPUT" == "true" ]] && return 0
+
+    local icon="" color=""
+
+    case "$status" in
+        pass)     icon="[PASS]"; color="${GREEN}" ;;
+        warn)     icon="[WARN]"; color="${YELLOW}" ;;
+        fail)     icon="[FAIL]"; color="${RED}" ;;
+        skip)     icon="[SKIP]"; color="${CYAN}" ;;
+        *)        icon="[????]"; color="${WHITE}" ;;
+    esac
+
+    if [[ -n "$details" ]]; then
+        printf "  ${color}%-8s${RESET} %-30s %s\n" "$icon" "$name" "$details"
+    else
+        printf "  ${color}%-8s${RESET} %s\n" "$icon" "$name"
+    fi
+}
+
+print_section() {
+    local title="$1"
+    [[ "$QUIET_MODE" == "true" ]] && return 0
+    [[ "$JSON_OUTPUT" == "true" ]] && return 0
+
+    print_line ""
+    print_line "${BOLD}${BLUE}=== $title ===${RESET}"
+}
+
+# =============================================================================
+# Check Functions
+# =============================================================================
+
+check_cli() {
+    local name="$1"
+    local package="${2:-$name}"
+    local critical="${3:-true}"
+
+    if command -v "$name" &>/dev/null; then
+        local version=""
+        case "$name" in
+            claude)  version=$(claude --version 2>/dev/null | head -1 || echo "installed") ;;
+            gemini)  version=$(gemini --version 2>/dev/null | head -1 || echo "installed") ;;
+            codex)   version=$(codex --version 2>/dev/null | head -1 || echo "installed") ;;
+            tmux)    version=$(tmux -V 2>/dev/null || echo "installed") ;;
+            jq)      version=$(jq --version 2>/dev/null || echo "installed") ;;
+            yq)      version=$(yq --version 2>/dev/null | head -1 || echo "installed") ;;
+            *)       version="installed" ;;
+        esac
+        CHECK_RESULTS["cli_${name}"]="pass"
+        print_check "$name" "pass" "$version"
+        return 0
+    else
+        CHECK_RESULTS["cli_${name}"]="fail"
+        if [[ "$critical" == "true" ]]; then
+            CRITICAL_FAILURES+=("Missing required CLI: $name (install: $package)")
+            print_check "$name" "fail" "NOT FOUND - install: $package"
+        else
+            WARNINGS+=("Optional CLI not found: $name")
+            print_check "$name" "warn" "not installed (optional)"
+        fi
+        return 1
+    fi
+}
+
+check_claude_auth() {
+    local claude_config="$HOME/.claude.json"
+    local claude_dir="$HOME/.claude"
+
+    if [[ -f "$claude_config" ]] || [[ -d "$claude_dir" ]]; then
+        if command -v claude &>/dev/null; then
+            CHECK_RESULTS["auth_claude"]="pass"
+            print_check "Claude Auth" "pass" "implicit oauth (Claude Max)"
+            return 0
+        fi
+    fi
+
+    if command -v claude &>/dev/null; then
+        CHECK_RESULTS["auth_claude"]="warn"
+        WARNINGS+=("Claude auth status unknown - may require login")
+        print_check "Claude Auth" "warn" "status unknown - run 'claude' to verify"
+        return 0
+    fi
+
+    CHECK_RESULTS["auth_claude"]="fail"
+    CRITICAL_FAILURES+=("Claude CLI not installed or not authenticated")
+    print_check "Claude Auth" "fail" "CLI not found"
+    return 1
+}
+
+check_gemini_auth() {
+    local gemini_creds="$HOME/.gemini/oauth_creds.json"
+    local gemini_settings="$HOME/.gemini/settings.json"
+
+    if [[ -f "$gemini_creds" ]] && [[ -s "$gemini_creds" ]]; then
+        if command -v jq &>/dev/null && jq . "$gemini_creds" &>/dev/null 2>&1; then
+            CHECK_RESULTS["auth_gemini"]="pass"
+            print_check "Gemini Auth" "pass" "oauth-personal ($gemini_creds)"
+            return 0
+        else
+            CHECK_RESULTS["auth_gemini"]="warn"
+            WARNINGS+=("Gemini credentials file exists but may be invalid")
+            print_check "Gemini Auth" "warn" "credentials may be invalid"
+            return 1
+        fi
+    fi
+
+    if [[ -f "$gemini_settings" ]]; then
+        CHECK_RESULTS["auth_gemini"]="warn"
+        WARNINGS+=("Gemini settings found but oauth_creds.json missing")
+        print_check "Gemini Auth" "warn" "settings exist, run 'gemini' to authenticate"
+        return 1
+    fi
+
+    CHECK_RESULTS["auth_gemini"]="fail"
+    CRITICAL_FAILURES+=("Gemini not authenticated - run 'gemini' to login")
+    print_check "Gemini Auth" "fail" "NOT FOUND: $gemini_creds"
+    return 1
+}
+
+check_codex_auth() {
+    local codex_auth="$HOME/.codex/auth.json"
+    local codex_config="$HOME/.codex/config.toml"
+    local openai_key="${OPENAI_API_KEY:-}"
+
+    if [[ -f "$codex_auth" ]] && [[ -s "$codex_auth" ]]; then
+        if command -v jq &>/dev/null && jq . "$codex_auth" &>/dev/null 2>&1; then
+            CHECK_RESULTS["auth_codex"]="pass"
+            print_check "Codex Auth" "pass" "auth.json found"
+            return 0
+        fi
+    fi
+
+    if [[ -f "$codex_config" ]]; then
+        CHECK_RESULTS["auth_codex"]="pass"
+        print_check "Codex Auth" "pass" "config.toml found"
+        return 0
+    fi
+
+    if [[ -n "$openai_key" ]]; then
+        CHECK_RESULTS["auth_codex"]="pass"
+        print_check "Codex Auth" "pass" "OPENAI_API_KEY set"
+        return 0
+    fi
+
+    CHECK_RESULTS["auth_codex"]="fail"
+    CRITICAL_FAILURES+=("Codex not authenticated - run 'codex auth' or set OPENAI_API_KEY")
+    print_check "Codex Auth" "fail" "no auth found"
+    return 1
+}
+
+check_directory() {
+    local name="$1"
+    local path="$2"
+    local create="${3:-false}"
+
+    if [[ -d "$path" ]]; then
+        CHECK_RESULTS["dir_${name}"]="pass"
+        print_check "$name" "pass" "$path"
+        return 0
+    elif [[ "$create" == "true" ]]; then
+        mkdir -p "$path"
+        CHECK_RESULTS["dir_${name}"]="pass"
+        print_check "$name" "pass" "$path (created)"
+        return 0
+    else
+        CHECK_RESULTS["dir_${name}"]="fail"
+        WARNINGS+=("Directory not found: $path")
+        print_check "$name" "warn" "NOT FOUND: $path"
+        return 1
+    fi
+}
+
+check_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        CHECK_RESULTS["config"]="fail"
+        CRITICAL_FAILURES+=("Config file not found: $CONFIG_FILE")
+        print_check "tri-agent.yaml" "fail" "NOT FOUND: $CONFIG_FILE"
+        return 1
+    fi
+
+    if validate_config "$CONFIG_FILE"; then
+        CHECK_RESULTS["config"]="pass"
+        local version="unknown"
+        if command -v yq &>/dev/null; then
+            version=$(yq eval '.system.version // "unknown"' "$CONFIG_FILE" 2>/dev/null)
+        fi
+        print_check "tri-agent.yaml" "pass" "valid (v${version})"
+        return 0
+    else
+        CHECK_RESULTS["config"]="fail"
+        CRITICAL_FAILURES+=("Config file is invalid: $CONFIG_FILE")
+        print_check "tri-agent.yaml" "fail" "INVALID YAML"
+        return 1
+    fi
+}
+
+check_circuit_breakers() {
+    local models=("claude" "gemini" "codex")
+    local any_open=false
+
+    for model in "${models[@]}"; do
+        local state_file="${BREAKERS_DIR}/${model}.state"
+        local state="UNINITIALIZED"
+
+        if [[ -f "$state_file" ]]; then
+            state=$(grep "^state=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "UNKNOWN")
+        fi
+
+        CHECK_RESULTS["breaker_${model}"]="$state"
+
+        case "$state" in
+            CLOSED)
+                print_check "CB: $model" "pass" "CLOSED"
+                ;;
+            OPEN)
+                print_check "CB: $model" "warn" "OPEN (in cooldown)"
+                any_open=true
+                WARNINGS+=("Circuit breaker OPEN for $model")
+                ;;
+            HALF_OPEN)
+                print_check "CB: $model" "warn" "HALF_OPEN (testing)"
+                ;;
+            *)
+                print_check "CB: $model" "skip" "not initialized"
+                ;;
+        esac
+    done
+
+    [[ "$any_open" == "true" ]] && return 1
+    return 0
+}
+
+test_api_connectivity() {
+    local model="$1"
+    local test_prompt="Respond with exactly: PREFLIGHT_OK"
+    local result=""
+    local exit_code=0
+
+    print_check "API: $model" "skip" "testing (${API_TIMEOUT}s timeout)..."
+
+    case "$model" in
+        claude)
+            result=$(timeout "${API_TIMEOUT}s" claude --print "$test_prompt" 2>&1) || exit_code=$?
+            ;;
+        gemini)
+            result=$(timeout "${API_TIMEOUT}s" gemini -y "$test_prompt" 2>&1) || exit_code=$?
+            ;;
+        codex)
+            result=$(timeout "${API_TIMEOUT}s" codex exec "$test_prompt" 2>&1) || exit_code=$?
+            ;;
+    esac
+
+    # Move cursor up to overwrite the "testing" line
+    [[ "$QUIET_MODE" != "true" && "$JSON_OUTPUT" != "true" ]] && printf "\033[1A\033[2K"
+
+    if [[ $exit_code -eq 0 ]]; then
+        CHECK_RESULTS["api_${model}"]="pass"
+        print_check "API: $model" "pass" "connected"
+        return 0
+    elif [[ $exit_code -eq 124 ]]; then
+        CHECK_RESULTS["api_${model}"]="timeout"
+        WARNINGS+=("API timeout for $model (>${API_TIMEOUT}s)")
+        print_check "API: $model" "warn" "TIMEOUT (>${API_TIMEOUT}s)"
+        return 1
+    else
+        CHECK_RESULTS["api_${model}"]="fail"
+        local error_snippet=$(echo "$result" | head -1 | cut -c1-50)
+        WARNINGS+=("API connection failed for $model")
+        print_check "API: $model" "warn" "connection error"
+        return 1
+    fi
+}
+
+# =============================================================================
+# JSON Report Generation
+# =============================================================================
+
+generate_json_report() {
+    local exit_code="$1"
+    local status="pass"
+
+    [[ $exit_code -eq 1 ]] && status="critical_failure"
+    [[ $exit_code -eq 2 ]] && status="warnings"
+
+    if command -v jq &>/dev/null; then
+        local checks_json="{}"
+        for key in "${!CHECK_RESULTS[@]}"; do
+            checks_json=$(echo "$checks_json" | jq --arg k "$key" --arg v "${CHECK_RESULTS[$key]}" '. + {($k): $v}')
+        done
+
+        local critical_json="[]"
+        for item in "${CRITICAL_FAILURES[@]}"; do
+            critical_json=$(echo "$critical_json" | jq --arg i "$item" '. + [$i]')
+        done
+
+        local warnings_json="[]"
+        for item in "${WARNINGS[@]}"; do
+            warnings_json=$(echo "$warnings_json" | jq --arg i "$item" '. + [$i]')
+        done
+
+        jq -n \
+            --arg trace_id "${TRACE_ID}" \
+            --arg timestamp "$(iso_timestamp)" \
+            --arg status "$status" \
+            --arg exit_code "$exit_code" \
+            --arg mode "$PREFLIGHT_MODE" \
+            --argjson checks "$checks_json" \
+            --argjson critical "$critical_json" \
+            --argjson warnings "$warnings_json" \
+            '{
+                trace_id: $trace_id,
+                timestamp: $timestamp,
+                status: $status,
+                exit_code: ($exit_code | tonumber),
+                mode: $mode,
+                checks: $checks,
+                critical_failures: $critical,
+                warnings: $warnings
+            }'
+    else
+        cat <<EOF
+{
+  "trace_id": "${TRACE_ID}",
+  "timestamp": "$(iso_timestamp)",
+  "status": "$status",
+  "exit_code": $exit_code,
+  "mode": "$PREFLIGHT_MODE",
+  "checks": {
+    "cli_claude": "${CHECK_RESULTS[cli_claude]:-unknown}",
+    "cli_gemini": "${CHECK_RESULTS[cli_gemini]:-unknown}",
+    "cli_codex": "${CHECK_RESULTS[cli_codex]:-unknown}",
+    "cli_tmux": "${CHECK_RESULTS[cli_tmux]:-unknown}",
+    "cli_jq": "${CHECK_RESULTS[cli_jq]:-unknown}",
+    "cli_yq": "${CHECK_RESULTS[cli_yq]:-unknown}",
+    "auth_claude": "${CHECK_RESULTS[auth_claude]:-unknown}",
+    "auth_gemini": "${CHECK_RESULTS[auth_gemini]:-unknown}",
+    "auth_codex": "${CHECK_RESULTS[auth_codex]:-unknown}",
+    "config": "${CHECK_RESULTS[config]:-unknown}"
+  },
+  "critical_failures_count": ${#CRITICAL_FAILURES[@]},
+  "warnings_count": ${#WARNINGS[@]}
+}
+EOF
+    fi
+}
+
+# =============================================================================
+# Help Message
+# =============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}tri-agent-preflight${RESET} - Pre-flight validation for tri-agent system
+
+${BOLD}USAGE${RESET}
+    tri-agent-preflight [OPTIONS]
+
+${BOLD}OPTIONS${RESET}
+    --quick     Skip live API tests (default)
+    --full      Include live API connectivity tests (30s timeout per model)
+    --json      Output only JSON report (no terminal colors)
+    --quiet     Suppress terminal output, only set exit code
+    --help      Show this help message
+
+${BOLD}CHECKS PERFORMED${RESET}
+    1. CLI Installation
+       - claude, gemini, codex (required)
+       - tmux, jq (required)
+       - yq (optional, used for config parsing)
+
+    2. Authentication
+       - Claude: Implicit oauth (Claude Max subscription)
+       - Gemini: oauth-personal (~/.gemini/oauth_creds.json)
+       - Codex: auth.json or OPENAI_API_KEY
+
+    3. Configuration
+       - tri-agent.yaml exists and is valid YAML
+       - Required sections present (models, routing)
+
+    4. Directory Structure
+       - All required directories exist
+
+    5. Circuit Breakers
+       - Check state of each model's circuit breaker
+
+    6. Live API Tests (--full only)
+       - Send test prompt to each model
+       - 30 second timeout per model
+
+${BOLD}EXIT CODES${RESET}
+    0   All checks passed
+    1   Critical failure (cannot proceed)
+    2   Warnings only (degraded mode possible)
+
+${BOLD}EXAMPLES${RESET}
+    # Quick validation (default)
+    tri-agent-preflight
+
+    # Full validation including API tests
+    tri-agent-preflight --full
+
+    # Get JSON report only
+    tri-agent-preflight --json
+
+    # Silent check (for scripts)
+    if tri-agent-preflight --quiet; then
+        echo "Ready to start"
+    fi
+
+EOF
+}
+
+# =============================================================================
+# Main Execution
+# =============================================================================
+
+main() {
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quick)
+                PREFLIGHT_MODE="quick"
+                shift
+                ;;
+            --full)
+                PREFLIGHT_MODE="full"
+                shift
+                ;;
+            --json)
+                JSON_OUTPUT="true"
+                shift
+                ;;
+            --quiet)
+                QUIET_MODE="true"
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Use --help for usage information" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    # Print header
+    if [[ "$JSON_OUTPUT" != "true" && "$QUIET_MODE" != "true" ]]; then
+        print_line ""
+        print_line "${BOLD}${MAGENTA}Tri-Agent Pre-flight Validation${RESET}"
+        print_line "${CYAN}Trace ID: ${TRACE_ID}${RESET}"
+        print_line "${CYAN}Mode: ${PREFLIGHT_MODE}${RESET}"
+    fi
+
+    # ==========================================================================
+    # 1. CLI Checks
+    # ==========================================================================
+    print_section "CLI Installation"
+
+    check_cli "claude" "npm install -g @anthropic-ai/claude-code" true || true
+    check_cli "gemini" "npm install -g @google/gemini-cli" true || true
+    check_cli "codex" "npm install -g @openai/codex" true || true
+    check_cli "tmux" "apt install tmux / brew install tmux" true || true
+    check_cli "jq" "apt install jq / brew install jq" true || true
+    check_cli "yq" "pip install yq / brew install yq" false || true
+
+    # ==========================================================================
+    # 2. Authentication Checks
+    # ==========================================================================
+    print_section "Authentication"
+
+    check_claude_auth || true
+    check_gemini_auth || true
+    check_codex_auth || true
+
+    # ==========================================================================
+    # 3. Configuration Check
+    # ==========================================================================
+    print_section "Configuration"
+
+    check_config || true
+
+    local schema_file="${CONFIG_DIR}/schema.yaml"
+    if [[ -f "$schema_file" ]]; then
+        print_check "schema.yaml" "pass" "$schema_file"
+    else
+        print_check "schema.yaml" "skip" "not found (optional)"
+    fi
+
+    # ==========================================================================
+    # 4. Directory Structure
+    # ==========================================================================
+    print_section "Directory Structure"
+
+    check_directory "config" "${CONFIG_DIR}" true || true
+    check_directory "lib" "${LIB_DIR}" true || true
+    check_directory "bin" "${BIN_DIR}" true || true
+    check_directory "logs" "${LOG_DIR}" true || true
+    check_directory "state" "${STATE_DIR}" true || true
+    check_directory "sessions" "${SESSIONS_DIR}" true || true
+    check_directory "tasks" "${TASKS_DIR}" true || true
+
+    # ==========================================================================
+    # 5. Circuit Breaker States
+    # ==========================================================================
+    print_section "Circuit Breakers"
+
+    check_circuit_breakers || true
+
+    # ==========================================================================
+    # 6. Live API Tests (--full mode only)
+    # ==========================================================================
+    if [[ "$PREFLIGHT_MODE" == "full" ]]; then
+        print_section "Live API Connectivity Tests"
+
+        if [[ "${CHECK_RESULTS[cli_claude]:-}" == "pass" && "${CHECK_RESULTS[auth_claude]:-}" == "pass" ]]; then
+            test_api_connectivity "claude" || true
+        else
+            print_check "API: claude" "skip" "CLI or auth not available"
+        fi
+
+        if [[ "${CHECK_RESULTS[cli_gemini]:-}" == "pass" && "${CHECK_RESULTS[auth_gemini]:-}" == "pass" ]]; then
+            test_api_connectivity "gemini" || true
+        else
+            print_check "API: gemini" "skip" "CLI or auth not available"
+        fi
+
+        if [[ "${CHECK_RESULTS[cli_codex]:-}" == "pass" && "${CHECK_RESULTS[auth_codex]:-}" == "pass" ]]; then
+            test_api_connectivity "codex" || true
+        else
+            print_check "API: codex" "skip" "CLI or auth not available"
+        fi
+    else
+        print_section "Live API Tests"
+        print_check "API tests" "skip" "use --full to enable"
+    fi
+
+    # ==========================================================================
+    # Summary and Exit
+    # ==========================================================================
+    local exit_code=0
+
+    if [[ ${#CRITICAL_FAILURES[@]} -gt 0 ]]; then
+        exit_code=1
+    elif [[ ${#WARNINGS[@]} -gt 0 ]]; then
+        exit_code=2
+    fi
+
+    # Print summary
+    if [[ "$JSON_OUTPUT" != "true" && "$QUIET_MODE" != "true" ]]; then
+        print_line ""
+        print_line "${BOLD}=== Summary ===${RESET}"
+
+        if [[ $exit_code -eq 0 ]]; then
+            print_line "${GREEN}${BOLD}All checks passed!${RESET} System ready for tri-agent operation."
+        elif [[ $exit_code -eq 2 ]]; then
+            print_line "${YELLOW}${BOLD}Warnings detected.${RESET} System can run in degraded mode."
+            print_line ""
+            print_line "${YELLOW}Warnings:${RESET}"
+            for warn in "${WARNINGS[@]}"; do
+                print_line "  - $warn"
+            done
+        else
+            print_line "${RED}${BOLD}Critical failures detected.${RESET} Cannot proceed."
+            print_line ""
+            print_line "${RED}Critical Failures:${RESET}"
+            for fail in "${CRITICAL_FAILURES[@]}"; do
+                print_line "  - $fail"
+            done
+            if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+                print_line ""
+                print_line "${YELLOW}Additional Warnings:${RESET}"
+                for warn in "${WARNINGS[@]}"; do
+                    print_line "  - $warn"
+                done
+            fi
+        fi
+        print_line ""
+    fi
+
+    # Output JSON report
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        generate_json_report "$exit_code"
+    fi
+
+    # Write status to health file for monitoring
+    local health_file="${STATE_DIR}/preflight.json"
+    mkdir -p "$(dirname "$health_file")"
+    generate_json_report "$exit_code" > "$health_file" 2>/dev/null || true
+
+    exit $exit_code
+}
+
+# Run main
+main "$@"

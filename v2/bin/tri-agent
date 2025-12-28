@@ -1,0 +1,675 @@
+#!/bin/bash
+# =============================================================================
+# tri-agent - Main unified launcher for tri-agent orchestration system
+# =============================================================================
+# Replaces: claude-24h.sh + claude-tri-agent.sh
+#
+# Usage:
+#   tri-agent [OPTIONS] [PROJECT_DIR]
+#
+# Options:
+#   --mode MODE         Operation mode: autonomous|tri-agent|consensus (default: tri-agent)
+#   --validate          Run pre-flight validation only
+#   --resume            Resume existing session
+#   --attach            Attach to existing session
+#   --kill              Kill existing session
+#   --status            Show session status
+#   -h, --help          Show this help
+#
+# Modes:
+#   autonomous  - Claude runs independently with auto-delegation
+#   tri-agent   - Claude orchestrates with Gemini and Codex delegation
+#   consensus   - All decisions require multi-model consensus
+#
+# Subscription Context:
+#   Claude Max: $200/month (900 msgs/5hr Opus, unlimited Sonnet)
+#   ChatGPT Pro: $200/month (Codex GPT-5.2 xhigh reasoning)
+#   Google AI Ultra: $20/month (Gemini 3 Pro 1M context)
+# =============================================================================
+
+# Source common library - resolve symlinks to find actual script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck source=../lib/common.sh
+source "${AUTONOMOUS_ROOT}/lib/common.sh"
+
+# =============================================================================
+# Configuration
+# =============================================================================
+VERSION="2.0.0"
+DEFAULT_MODE="tri-agent"
+TMUX_SOCKET="tri-agent"
+SESSION_PREFIX="tri-agent"
+
+# =============================================================================
+# Help and Usage
+# =============================================================================
+show_help() {
+    cat <<EOF
+tri-agent v${VERSION} - Unified AI orchestration launcher
+
+Usage: tri-agent [OPTIONS] [PROJECT_DIR]
+
+Options:
+  --mode MODE     Operation mode: autonomous|tri-agent|consensus|veto
+                  Default: ${DEFAULT_MODE}
+  --validate      Run pre-flight validation only
+  --resume        Resume existing session
+  --attach        Attach to existing session
+  --kill          Kill existing session
+  --status        Show session status
+  -h, --help      Show this help
+
+Modes:
+  autonomous     Claude runs independently with auto-delegation hints
+  tri-agent      Claude orchestrates, delegates to Gemini/Codex
+  consensus      All major decisions require 2/3 model approval
+  veto           Consensus mode where Claude has veto power on security/architecture
+
+Examples:
+  tri-agent ~/projects/myapp
+  tri-agent --mode consensus ~/projects/myapp
+  tri-agent --mode veto ~/projects/myapp
+  tri-agent --validate
+  tri-agent --attach
+
+Environment:
+  AUTONOMOUS_ROOT  Override config directory (default: ~/.claude/autonomous)
+  TRI_AGENT_MODE   Default mode override
+  TRACE_ID         Inherit trace ID from parent process
+EOF
+}
+
+# =============================================================================
+# Session Management
+# =============================================================================
+
+# Generate session name
+get_session_name() {
+    local project_dir="${1:-$(pwd)}"
+    local project_name
+    project_name=$(basename "$project_dir")
+    local user="${USER:-$(whoami)}"
+    echo "${SESSION_PREFIX}-${user}-${project_name}"
+}
+
+# Check if session exists
+session_exists() {
+    local session_name="$1"
+    tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null
+}
+
+# Get session status
+get_session_status() {
+    local session_name="$1"
+    if session_exists "$session_name"; then
+        local info
+        info=$(tmux -L "$TMUX_SOCKET" list-sessions -F "#{session_name}: #{session_windows} windows, #{session_attached} attached" 2>/dev/null | grep "^$session_name:")
+        echo "RUNNING: $info"
+    else
+        echo "NOT_RUNNING"
+    fi
+}
+
+# Kill existing session
+kill_session() {
+    local session_name="$1"
+    if session_exists "$session_name"; then
+        tmux -L "$TMUX_SOCKET" kill-session -t "$session_name"
+        log_info "Session killed: $session_name"
+        return 0
+    else
+        log_warn "Session not found: $session_name"
+        return 1
+    fi
+}
+
+# Attach to existing session
+attach_session() {
+    local session_name="$1"
+    if session_exists "$session_name"; then
+        log_info "Attaching to session: $session_name"
+        exec tmux -L "$TMUX_SOCKET" attach-session -t "$session_name"
+    else
+        log_error "Session not found: $session_name"
+        return 1
+    fi
+}
+
+# =============================================================================
+# CLI Validation
+# =============================================================================
+
+# Check if Claude CLI is available
+check_claude_cli() {
+    if command_exists claude; then
+        log_debug "Claude CLI found"
+        return 0
+    else
+        log_error "Claude CLI not found"
+        return 1
+    fi
+}
+
+# Check if Gemini CLI is available
+check_gemini_cli() {
+    if command_exists gemini; then
+        log_debug "Gemini CLI found"
+        return 0
+    else
+        log_warn "Gemini CLI not found (delegation disabled)"
+        return 1
+    fi
+}
+
+# Check if Codex CLI is available
+check_codex_cli() {
+    if command_exists codex; then
+        log_debug "Codex CLI found"
+        return 0
+    else
+        log_warn "Codex CLI not found (delegation disabled)"
+        return 1
+    fi
+}
+
+# Validate all required CLIs
+validate_all_clis() {
+    local errors=0
+
+    # Required
+    check_claude_cli || ((errors++))
+    require_command tmux "tmux"
+
+    # Optional but recommended
+    check_gemini_cli || true
+    check_codex_cli || true
+
+    if [[ $errors -gt 0 ]]; then
+        log_error "Critical CLI validation failed"
+        return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
+# System Prompt Builder
+# =============================================================================
+
+# Build system prompt based on mode
+build_system_prompt() {
+    local mode="$1"
+    local project_dir="$2"
+
+    local base_prompt="You are operating in ${mode} mode within the tri-agent orchestration system."
+
+    case "$mode" in
+        autonomous)
+            cat <<EOF
+${base_prompt}
+
+## AUTONOMOUS MODE
+You have full autonomy to complete tasks. Use your judgment for all decisions.
+Delegation hints are available but optional:
+- For large context (>100K tokens): consider gemini-delegate
+- For rapid implementation: consider codex-delegate
+EOF
+            ;;
+
+        tri-agent)
+            # Read delegation prompt from config
+            local delegation_prompt
+            delegation_prompt=$(read_config ".delegation.system_prompt" "" "${CONFIG_FILE}")
+
+            if [[ -n "$delegation_prompt" ]]; then
+                echo "${base_prompt}"
+                echo ""
+                echo "$delegation_prompt"
+            else
+                cat <<EOF
+${base_prompt}
+
+## TRI-AGENT MODE - AUTO-DELEGATION ENABLED
+
+You can delegate tasks to specialized models:
+1. **Gemini 3 Pro** (1M context): \`tri-agent-router --gemini "task"\`
+2. **Codex GPT-5.2** (xhigh): \`tri-agent-router --codex "task"\`
+
+### When to Delegate:
+- Files >50KB or >100K tokens → Gemini
+- "implement", "build", "fix" → Codex
+- Keep architecture/security decisions in Claude
+- Use \`tri-agent-consensus "question"\` for critical decisions
+EOF
+            fi
+            ;;
+
+        consensus)
+            cat <<EOF
+${base_prompt}
+
+## CONSENSUS MODE - ALL MAJOR DECISIONS REQUIRE APPROVAL
+
+For any significant decision or action:
+1. Use \`tri-agent-consensus "Should we [action]?"\`
+2. Wait for 2/3 model approval before proceeding
+3. Document the consensus result in your response
+
+Consensus is required for:
+- Architecture changes
+- Security-sensitive operations
+- Destructive actions (delete, overwrite)
+- External API calls
+- Production deployments
+EOF
+            ;;
+
+        veto)
+            cat <<EOF
+${base_prompt}
+
+## CONSENSUS VETO MODE - CLAUDE HAS VETO POWER
+
+For any significant decision or action:
+1. Use \`tri-agent-consensus --mode veto "Should we [action]?"\`
+2. Wait for the result before proceeding
+3. If decision is REJECTED (even if by veto), do not proceed.
+
+Veto Power:
+- You (Claude) have veto power over Security and Architecture decisions.
+- Use it wisely to prevent risky actions even if other models approve.
+
+Consensus is required for:
+- Architecture changes
+- Security-sensitive operations
+- Destructive actions
+EOF
+            ;;
+    esac
+}
+
+# =============================================================================
+# Session Creation
+# =============================================================================
+
+# Build Claude command
+build_claude_command() {
+    local mode="$1"
+    local project_dir="$2"
+    local system_prompt
+    system_prompt=$(build_system_prompt "$mode" "$project_dir")
+
+    # Build command with flags
+    local cmd="claude"
+    cmd+=" --dangerously-skip-permissions"
+
+    # Add system prompt via environment
+    echo "export TRI_AGENT_MODE='${mode}'"
+    echo "export TRI_AGENT_PROJECT='${project_dir}'"
+    echo "export TRACE_ID='${TRACE_ID}'"
+    echo "cd '${project_dir}'"
+    echo "${cmd}"
+}
+
+# Create new tmux session
+# $1: session_name, $2: mode, $3: project_dir, $4: orchestrator (claude|codex)
+create_session() {
+    local session_name="$1"
+    local mode="$2"
+    local project_dir="$3"
+    local orchestrator="${4:-claude}"
+
+    log_info "Creating session: $session_name (mode: $mode, orchestrator: $orchestrator)"
+    log_info "Project: $project_dir"
+    log_info "Trace ID: $TRACE_ID"
+
+    # Kill existing session if exists
+    if session_exists "$session_name"; then
+        log_warn "Killing existing session: $session_name"
+        kill_session "$session_name"
+    fi
+
+    # Create session script
+    local session_script="${SESSIONS_DIR}/${session_name}.sh"
+    mkdir -p "$SESSIONS_DIR"
+
+    # Generate and save system prompt to file
+    local system_prompt_file="${SESSIONS_DIR}/${session_name}.system-prompt.txt"
+    build_system_prompt "$mode" "$project_dir" > "$system_prompt_file"
+
+    # Generate orchestrator-specific session script (#111)
+    if [[ "$orchestrator" == "codex" ]]; then
+        # Codex as primary orchestrator (degraded mode)
+        local codex_model codex_reasoning
+        codex_model=$(read_config ".models.codex.model" "gpt-5.2-codex" "${CONFIG_FILE}")
+        codex_reasoning=$(read_config ".models.codex.reasoning_effort" "xhigh" "${CONFIG_FILE}")
+
+        cat > "$session_script" <<EOF
+#!/bin/bash
+# Auto-generated session script for ${session_name} (CODEX ORCHESTRATOR)
+# Generated: $(date -Iseconds)
+# Mode: ${mode} (DEGRADED - Claude unavailable)
+# Project: ${project_dir}
+# Trace ID: ${TRACE_ID}
+
+export TRI_AGENT_MODE='${mode}'
+export TRI_AGENT_PROJECT='${project_dir}'
+export TRI_AGENT_SESSION='${session_name}'
+export TRI_AGENT_ORCHESTRATOR='codex'
+export TRACE_ID='${TRACE_ID}'
+export AUTONOMOUS_ROOT='${AUTONOMOUS_ROOT}'
+export PATH="${BIN_DIR}:\${PATH}"
+
+cd '${project_dir}'
+
+# Log session start
+source "${LIB_DIR}/common.sh"
+log_info "Starting tri-agent session (CODEX ORCHESTRATOR - degraded mode)"
+log_task_start "${TRACE_ID}" "codex"
+
+# Read system prompt for context
+SYSTEM_PROMPT=\$(cat '${system_prompt_file}')
+
+echo "=== TRI-AGENT DEGRADED MODE ==="
+echo "Claude is unavailable. Running with Codex as primary orchestrator."
+echo "Capabilities are limited. Consider:"
+echo "  - Using 'gemini' for large context analysis"
+echo "  - Waiting for Claude to become available"
+echo ""
+
+# Run Codex exec in interactive mode with system context
+# Note: Codex exec doesn't support system prompts directly,
+# so we include it in the initial prompt
+codex exec \\
+    -m "${codex_model}" \\
+    -c "model_reasoning_effort=\\"${codex_reasoning}\\"" \\
+    -s workspace-write \\
+    "You are an AI orchestrator running in degraded mode (Claude unavailable).
+
+\${SYSTEM_PROMPT}
+
+Start by asking the user what task they need help with."
+
+# Log session end
+log_info "Tri-agent session ended (CODEX ORCHESTRATOR)"
+EOF
+    else
+        # Claude as primary orchestrator (normal mode)
+        local claude_model claude_fallback claude_budget
+        claude_model=$(read_config ".models.claude.model" "opus" "${CONFIG_FILE}")
+        claude_fallback=$(read_config ".models.claude.fallback_model" "sonnet" "${CONFIG_FILE}")
+        claude_budget=$(read_config ".models.claude.max_budget_usd" "50" "${CONFIG_FILE}")
+
+        cat > "$session_script" <<EOF
+#!/bin/bash
+# Auto-generated session script for ${session_name}
+# Generated: $(date -Iseconds)
+# Mode: ${mode}
+# Project: ${project_dir}
+# Trace ID: ${TRACE_ID}
+
+export TRI_AGENT_MODE='${mode}'
+export TRI_AGENT_PROJECT='${project_dir}'
+export TRI_AGENT_SESSION='${session_name}'
+export TRI_AGENT_ORCHESTRATOR='claude'
+export TRACE_ID='${TRACE_ID}'
+export AUTONOMOUS_ROOT='${AUTONOMOUS_ROOT}'
+export PATH="${BIN_DIR}:\${PATH}"
+
+cd '${project_dir}'
+
+# Log session start
+source "${LIB_DIR}/common.sh"
+log_info "Starting tri-agent session"
+log_task_start "${TRACE_ID}" "claude"
+
+# Run Claude with proper flags
+# - model: Use configured model (default: opus)
+# - max-budget-usd: Cost control (default: 50)
+# - fallback-model: Resilience (default: sonnet)
+# - system-prompt: Tri-agent orchestration instructions
+# - dangerously-skip-permissions: Required for autonomous operation
+claude \\
+    --model "${claude_model}" \\
+    --max-budget-usd "${claude_budget}" \\
+    --fallback-model "${claude_fallback}" \\
+    --system-prompt "\$(cat '${system_prompt_file}')" \\
+    --dangerously-skip-permissions
+
+# Log session end
+log_info "Tri-agent session ended"
+EOF
+    fi
+
+    chmod +x "$session_script"
+
+    # Create tmux session
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" -c "$project_dir" "bash '$session_script'"
+
+    # Add status bar customization
+    tmux -L "$TMUX_SOCKET" set-option -t "$session_name" status-left "[${mode}] "
+    tmux -L "$TMUX_SOCKET" set-option -t "$session_name" status-right "#(date +%H:%M) | ${session_name}"
+
+    log_info "Session created successfully"
+    log_info "To attach: tri-agent --attach"
+    log_info "To kill: tri-agent --kill"
+
+    # Attach to session
+    exec tmux -L "$TMUX_SOCKET" attach-session -t "$session_name"
+}
+
+# =============================================================================
+# Orchestrator Failover
+# =============================================================================
+
+# Check if Claude is available, failover to Codex if not
+check_degraded_mode() {
+    if ! check_claude_cli; then
+        log_warn "Claude unavailable - checking for failover"
+
+        if check_codex_cli; then
+            log_warn "Entering degraded mode: Codex as primary orchestrator"
+            echo "codex"
+            return 0
+        fi
+
+        log_error "No orchestrator available (neither Claude nor Codex)"
+        return 1
+    fi
+
+    echo "claude"
+    return 0
+}
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+main() {
+    local mode="${TRI_AGENT_MODE:-$DEFAULT_MODE}"
+    local project_dir=""
+    local action=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mode)
+                mode="$2"
+                shift 2
+                ;;
+            --validate)
+                action="validate"
+                shift
+                ;;
+            --resume|--attach)
+                action="attach"
+                shift
+                ;;
+            --kill)
+                action="kill"
+                shift
+                ;;
+            --status)
+                action="status"
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                project_dir="$1"
+                shift
+                ;;
+        esac
+    done
+
+    # Default project directory
+    if [[ -z "$project_dir" ]]; then
+        project_dir="$(pwd)"
+    fi
+
+    # Resolve to absolute path
+    project_dir="$(cd "$project_dir" 2>/dev/null && pwd)" || {
+        log_error "Invalid project directory: $project_dir"
+        exit 1
+    }
+
+    # Validate mode
+    case "$mode" in
+        autonomous|tri-agent|consensus|veto) ;;
+        *)
+            log_error "Invalid mode: $mode (use: autonomous, tri-agent, consensus, veto)"
+            exit 1
+            ;;
+    esac
+
+    # Get session name
+    local session_name
+    session_name=$(get_session_name "$project_dir")
+
+    # Handle actions
+    case "$action" in
+        validate)
+            log_info "Running pre-flight validation..."
+            if [[ -x "${BIN_DIR}/tri-agent-preflight" ]]; then
+                exec "${BIN_DIR}/tri-agent-preflight"
+            else
+                validate_all_clis
+                local val_out
+                if val_out=$(validate_config 2>&1); then
+                    log_info "Config validation passed"
+                else
+                    log_warn "Config validation issues:"
+                    echo "$val_out" | head -5 | while IFS= read -r l; do [[ -n "$l" ]] && log_warn "  $l"; done
+                fi
+                log_info "Basic validation passed"
+            fi
+            exit 0
+            ;;
+
+        attach)
+            attach_session "$session_name"
+            exit $?
+            ;;
+
+        kill)
+            kill_session "$session_name"
+            exit $?
+            ;;
+
+        status)
+            echo "Session: $session_name"
+            echo "Status: $(get_session_status "$session_name")"
+            echo "Mode: $mode"
+            echo "Project: $project_dir"
+
+            # Show circuit breaker status if available
+            if [[ -f "${LIB_DIR}/circuit-breaker.sh" ]]; then
+                echo ""
+                echo "Circuit Breakers:"
+                for model in claude gemini codex; do
+                    local state
+                    state=$(_read_breaker_state "$model" 2>/dev/null || echo "UNKNOWN")
+                    echo "  $model: $state"
+                done
+            fi
+            exit 0
+            ;;
+    esac
+
+    # Run pre-flight validation
+    log_info "Running pre-flight checks..."
+    if ! validate_all_clis; then
+        exit 1
+    fi
+
+    # Check for degraded mode
+    local orchestrator
+    orchestrator=$(check_degraded_mode) || exit 1
+
+    if [[ "$orchestrator" != "claude" ]]; then
+        log_warn "Running in degraded mode with $orchestrator as orchestrator"
+        mode="autonomous"  # Force autonomous in degraded mode
+    fi
+
+    # Validate config (capture errors instead of suppressing #113)
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local validation_output
+        if validation_output=$(validate_config "$CONFIG_FILE" 2>&1); then
+            log_debug "Config validation passed"
+        else
+            log_warn "Config validation failed:"
+            echo "$validation_output" | while IFS= read -r line; do
+                [[ -n "$line" ]] && log_warn "  $line"
+            done
+            log_warn "Using defaults where validation failed"
+        fi
+
+        # Schema validation (#83 fix)
+        local schema_file="${CONFIG_DIR}/schema.yaml"
+        if [[ -f "$schema_file" ]]; then
+            log_debug "Validating config against schema"
+            local schema_output
+            if schema_output=$(validate_config_schema "$CONFIG_FILE" "$schema_file" 2>&1); then
+                log_debug "Schema validation passed"
+            else
+                log_warn "Schema validation failed:"
+                echo "$schema_output" | while IFS= read -r line; do
+                    [[ -n "$line" ]] && log_warn "  $line"
+                done
+            fi
+        fi
+    else
+        log_warn "No config file found, using defaults"
+    fi
+
+    # Load error handling config
+    load_error_config 2>/dev/null || true
+    load_breaker_config 2>/dev/null || true
+
+    # Log startup
+    log_info "Starting tri-agent v${VERSION}"
+    log_info "Mode: $mode"
+    log_info "Project: $project_dir"
+    log_info "Session: $session_name"
+
+    # Create and attach to session (pass orchestrator for #111 fix)
+    create_session "$session_name" "$mode" "$project_dir" "$orchestrator"
+}
+
+# Run main
+main "$@"

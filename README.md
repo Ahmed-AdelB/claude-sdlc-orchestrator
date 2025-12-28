@@ -1,10 +1,13 @@
 # Claude Code SDLC Orchestrator
 
-A comprehensive production-ready configuration for Claude Code with 85+ specialized agents, 20+ slash commands, and tri-agent quality enforcement.
+[![CI](https://github.com/Ahmed-AdelB/claude-sdlc-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Ahmed-AdelB/claude-sdlc-orchestrator/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A comprehensive production-ready configuration for Claude Code with 96 specialized agents, 20+ slash commands, and tri-agent quality enforcement.
 
 ## Features
 
-- **85+ Specialized Agents** across 14 categories
+- **96 Specialized Agents** across 14 categories + special integration agents
 - **20+ Slash Commands** for SDLC phases, AB Method, Git workflows
 - **Tri-Agent Hooks** for quality enforcement (Claude + Codex + Gemini)
 - **Multi-Model Routing** for optimal task assignment
@@ -32,7 +35,7 @@ cp -r claude-sdlc-orchestrator/.claude/* ~/.claude/
 chmod +x ~/.claude/hooks/*.sh
 ```
 
-## Agent Categories (85+ Agents)
+## Agent Categories (96 Agents)
 
 | Category | Count | Description |
 |----------|-------|-------------|
@@ -40,7 +43,7 @@ chmod +x ~/.claude/hooks/*.sh
 | 02-planning | 8 | Requirements, architecture, tech specs |
 | 03-backend | 10 | API development, frameworks, microservices |
 | 04-frontend | 10 | React, Vue, Next.js, accessibility |
-| 05-database | 6 | PostgreSQL, MongoDB, Redis, migrations |
+| 05-database | 6 | PostgreSQL, MongoDB, Redis, ORM, migrations |
 | 06-testing | 8 | Unit, integration, E2E, coverage |
 | 07-quality | 8 | Code review, QA, refactoring, documentation |
 | 08-security | 6 | OWASP, penetration testing, compliance |
@@ -50,6 +53,11 @@ chmod +x ~/.claude/hooks/*.sh
 | 12-ai-ml | 4 | ML engineering, prompt engineering, LangChain |
 | 13-integration | 4 | Webhooks, APIs, MCP integration |
 | 14-business | 4 | Business analysis, cost optimization |
+| **Special (root)** | 2 | **codex-sdlc-developer**, **gemini-reviewer** |
+
+### Special Integration Agents
+- **codex-sdlc-developer**: SDLC-compliant code implementation using Codex CLI (GPT-5.1). Handles feature development, bug fixes, and code generation with tri-agent approval workflow.
+- **gemini-reviewer**: Security and code quality review using Gemini CLI. Performs OWASP audits, best practice validation, and compliance checks.
 
 ## Slash Commands
 
@@ -82,7 +90,7 @@ chmod +x ~/.claude/hooks/*.sh
 ### Multi-Model Commands
 ```
 /codex [task]          - Execute via Codex CLI (GPT-5.1)
-/gemini [task]         - Execute via Gemini CLI (2.5 Pro)
+/gemini [task]         - Execute via Gemini CLI (3 Pro)
 /consensus [task]      - Tri-agent consensus review
 ```
 
@@ -213,7 +221,7 @@ Body explaining what and why
 Tri-Agent Approval:
 - Claude Code (Sonnet): APPROVE
 - Codex (GPT-5.1): APPROVE
-- Gemini (2.5 Pro): APPROVE
+- Gemini (3 Pro): APPROVE
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ```
@@ -222,7 +230,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 - **Claude Max** ($200/mo) - Primary orchestrator, 900 msg/5hr
 - **ChatGPT Pro** ($200/mo) - Codex CLI for prototyping
-- **Google AI Pro** ($20/mo) - Gemini 2.5/3 Pro, 1M context
+- **Google AI Pro** ($20/mo) - Gemini 3 Pro, 1M context
 
 ## Directory Structure
 

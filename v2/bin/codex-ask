@@ -1,0 +1,101 @@
+#!/bin/bash
+#===============================================================================
+# codex-ask - Delegate tasks to Codex GPT-5.2 with xhigh reasoning
+#===============================================================================
+# Usage:
+#   codex-ask "Implement a binary search tree in TypeScript"
+#   codex-ask "Debug this function and fix the issue" -f buggy-code.ts
+#   codex-ask "Generate unit tests for this module"
+#
+# Features:
+#   - Uses GPT-5.2-Codex model
+#   - xhigh reasoning effort
+#   - 400K context window
+#   - Auto-approve (never ask for permission)
+#   - Detailed reasoning summaries
+#===============================================================================
+
+set -e
+
+# Configuration
+MODEL="gpt-5.2-codex"
+REASONING="xhigh"
+TIMEOUT=300  # 5 minutes max
+
+# Parse arguments
+FILE_INPUT=""
+PROFILE="max-reasoning"
+
+while getopts "f:p:" opt; do
+    case $opt in
+        f) FILE_INPUT="$OPTARG" ;;
+        p) PROFILE="$OPTARG" ;;
+        *) ;;
+    esac
+done
+shift $((OPTIND-1))
+
+PROMPT="$*"
+
+if [[ -z "$PROMPT" ]]; then
+    echo "Usage: codex-ask [-f file] [-p profile] \"your prompt\""
+    echo ""
+    echo "Options:"
+    echo "  -f FILE      Include file content in the prompt"
+    echo "  -p PROFILE   Use specific profile (max-reasoning, balanced, fast)"
+    echo ""
+    echo "Profiles:"
+    echo "  max-reasoning  - xhigh effort, detailed summaries (default)"
+    echo "  balanced       - high effort, standard summaries"
+    echo "  fast           - medium effort, minimal overhead"
+    echo ""
+    echo "Examples:"
+    echo "  codex-ask \"Implement a REST API for user management\""
+    echo "  codex-ask -f src/utils.ts \"Add error handling to all functions\""
+    echo "  codex-ask -p fast \"Quick fix for this null pointer\""
+    exit 1
+fi
+
+# Build the full prompt
+FULL_PROMPT="$PROMPT"
+
+# Add file content if specified
+if [[ -n "$FILE_INPUT" && -f "$FILE_INPUT" ]]; then
+    FILE_CONTENT=$(cat "$FILE_INPUT")
+    FULL_PROMPT="$PROMPT
+
+--- FILE: $FILE_INPUT ---
+$FILE_CONTENT
+--- END FILE ---"
+fi
+
+# Check for stdin (piped content)
+if [[ ! -t 0 ]]; then
+    STDIN_CONTENT=$(cat)
+    FULL_PROMPT="$PROMPT
+
+--- CONTENT ---
+$STDIN_CONTENT
+--- END CONTENT ---"
+fi
+
+# Log the request
+echo "[CODEX] Model: $MODEL (reasoning: $REASONING)" >&2
+echo "[CODEX] Profile: $PROFILE" >&2
+echo "[CODEX] Prompt length: ${#FULL_PROMPT} chars" >&2
+
+# Execute Codex with maximum settings
+# Using exec mode for non-interactive execution
+timeout $TIMEOUT codex exec \
+    --skip-git-repo-check \
+    --profile "$PROFILE" \
+    "$FULL_PROMPT" \
+    2>&1
+
+EXIT_CODE=$?
+
+if [[ $EXIT_CODE -eq 124 ]]; then
+    echo "[CODEX] Request timed out after ${TIMEOUT}s" >&2
+fi
+
+exit $EXIT_CODE

@@ -1,0 +1,1070 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-consensus - Multi-model consensus voting for critical decisions
+#===============================================================================
+# Query all three models in parallel for consensus decisions
+#
+# Usage:
+#   tri-agent-consensus "Should we proceed with this migration?"
+#   tri-agent-consensus --mode weighted "Approve this architecture change?"
+#   tri-agent-consensus --mode veto --category security "Deploy to production?"
+#   tri-agent-consensus --timeout 120 "Complex review question"
+#
+# Voting Modes:
+#   majority  - 2/3 models must agree (default)
+#   weighted  - Weighted voting based on config (Claude: 0.4, Gemini: 0.3, Codex: 0.3)
+#   veto      - Single model (Claude) can veto security/architecture decisions
+#
+# Features:
+#   - Query Claude, Gemini, Codex in parallel (using background jobs)
+#   - Parse APPROVE/REJECT/ABSTAIN verdicts from each
+#   - Timeout handling per model (configurable, default 60s)
+#   - Partial failure handling (2-model quorum if one times out)
+#   - Structured result synthesis as JSON
+#   - Full audit logging with trace IDs
+#
+# Exit Codes:
+#   0 - Consensus reached (APPROVE or REJECT)
+#   1 - No consensus reached
+#   2 - Configuration/validation error
+#   3 - All models failed
+#===============================================================================
+
+# Handle --help and --version early, before sourcing libraries
+_show_early_help() {
+    cat << 'EOF'
+Usage: tri-agent-consensus [OPTIONS] "question or decision to vote on"
+
+Options:
+  --mode MODE        Voting mode: majority (default), weighted, or veto
+  --timeout SECS     Timeout per model in seconds (default: 60)
+  --category CAT     Decision category for veto mode (security, architecture)
+  --min-approvals N  Minimum approvals needed (default: 2)
+  --json-only        Output only the final JSON result (no progress logs)
+  --help             Show this help message
+
+Voting Modes:
+  majority   Requires 2/3 models to agree on APPROVE or REJECT
+  weighted   Uses weighted voting (Claude: 0.4, Gemini: 0.3, Codex: 0.3)
+             Decision passes if weighted score > 0.5
+  veto       Claude can veto security/architecture decisions
+             Requires unanimous approval if veto is exercised
+
+Examples:
+  tri-agent-consensus "Should we merge this PR?"
+  tri-agent-consensus --mode weighted "Approve this API design?"
+  tri-agent-consensus --mode veto --category security "Deploy to production?"
+  tri-agent-consensus --timeout 120 --json-only "Complex architecture decision"
+
+Output:
+  Returns JSON with decision, votes, confidence, and reasoning.
+  Exit code 0 on consensus, 1 on no consensus, 2+ on errors.
+
+EOF
+}
+
+# Check for early exit commands
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            _show_early_help
+            exit 0
+            ;;
+        --version)
+            echo "tri-agent-consensus version 1.0.0"
+            exit 0
+            ;;
+    esac
+done
+
+# Enable strict mode early
+set -eo pipefail
+IFS=$'\n\t'
+
+# Determine script location
+# Resolve symlinks to find actual script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+LIB_DIR="$(dirname "$SCRIPT_DIR")/lib"
+AUTONOMOUS_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Directory paths
+CONFIG_DIR="${AUTONOMOUS_ROOT}/config"
+LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+AUDIT_LOG_DIR="${LOG_DIR}/audit"
+BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+CONFIG_FILE="${CONFIG_DIR}/tri-agent.yaml"
+
+# Ensure directories exist
+mkdir -p "$AUDIT_LOG_DIR"
+
+#===============================================================================
+# Trace ID Generation
+#===============================================================================
+generate_trace_id() {
+    local prefix="${1:-consensus}"
+    local timestamp
+    local random_suffix
+
+    timestamp="$(date +%Y%m%d%H%M%S)"
+
+    if command -v uuidgen &>/dev/null; then
+        random_suffix="$(uuidgen | cut -d'-' -f1)"
+    elif [[ -r /dev/urandom ]]; then
+        random_suffix="$(head -c 4 /dev/urandom | xxd -p)"
+    else
+        random_suffix="${RANDOM}${RANDOM}"
+    fi
+
+    echo "${prefix}-${timestamp}-${random_suffix}"
+}
+
+# Set trace ID if not already set
+TRACE_ID="${TRACE_ID:-$(generate_trace_id)}"
+export TRACE_ID
+
+#===============================================================================
+# Local Logging Functions
+#===============================================================================
+_consensus_log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    local color=""
+    local reset=""
+
+    timestamp="$(date +%H:%M:%S)"
+
+    if [[ -t 2 ]]; then
+        reset='\033[0m'
+        case "$level" in
+            DEBUG) color='\033[0;90m' ;;
+            INFO)  color='\033[0;32m' ;;
+            WARN)  color='\033[0;33m' ;;
+            ERROR) color='\033[0;31m' ;;
+        esac
+    fi
+
+    printf "${color}[%s][%s][CONSENSUS]${reset} %s\n" "$timestamp" "$level" "$message" >&2
+}
+
+log_debug() { [[ "${DEBUG:-0}" == "1" ]] && _consensus_log "DEBUG" "$*" || true; }
+log_info()  { _consensus_log "INFO" "$*"; }
+log_warn()  { _consensus_log "WARN" "$*"; }
+log_error() { _consensus_log "ERROR" "$*"; }
+
+#===============================================================================
+# YAML Config Reader (simplified, no external dependencies)
+#===============================================================================
+read_config() {
+    local key="$1"
+    local default="${2:-}"
+    local config="${3:-$CONFIG_FILE}"
+
+    if [[ ! -f "$config" ]]; then
+        echo "$default"
+        return
+    fi
+
+    local value=""
+
+    # Try yq first
+    if command -v yq &>/dev/null; then
+        value=$(yq -r "$key // \"\"" "$config" 2>/dev/null || echo "")
+    # Fall back to python3
+    elif command -v python3 &>/dev/null; then
+        value=$(python3 -c "
+import yaml, sys
+try:
+    with open('$config') as f:
+        cfg = yaml.safe_load(f)
+    keys = '$key'.strip('.').split('.')
+    v = cfg
+    for k in keys:
+        v = v.get(k, {}) if isinstance(v, dict) else {}
+    print(v if v and v != {} else '')
+except:
+    print('')
+" 2>/dev/null || echo "")
+    fi
+
+    echo "${value:-$default}"
+}
+
+#===============================================================================
+# Configuration
+#===============================================================================
+VERSION="1.0.0"
+
+# Default values (can be overridden by tri-agent.yaml)
+DEFAULT_VOTING_MODE="majority"
+DEFAULT_TIMEOUT=60
+DEFAULT_MIN_APPROVALS=2
+DEFAULT_PARTIAL_FAILURE_POLICY="continue"
+
+# Weights for weighted voting
+WEIGHT_CLAUDE=0.4
+WEIGHT_GEMINI=0.3
+WEIGHT_CODEX=0.3
+
+# Veto configuration
+VETO_HOLDER="claude"
+declare -a VETO_CATEGORIES=("security" "architecture")
+
+#===============================================================================
+# Load Configuration from YAML
+#===============================================================================
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # Read consensus configuration using read_config helper
+        VOTING_MODE=$(read_config ".consensus.voting_mode" "$DEFAULT_VOTING_MODE")
+        MODEL_TIMEOUT=$(read_config ".consensus.timeout_per_model" "$DEFAULT_TIMEOUT")
+        MIN_APPROVALS=$(read_config ".consensus.min_approvals" "$DEFAULT_MIN_APPROVALS")
+        PARTIAL_FAILURE_POLICY=$(read_config ".consensus.partial_failure_policy" "$DEFAULT_PARTIAL_FAILURE_POLICY")
+
+        # Read weights if available
+        local w_claude w_gemini w_codex
+        w_claude=$(read_config ".consensus.weights.claude" "$WEIGHT_CLAUDE")
+        w_gemini=$(read_config ".consensus.weights.gemini" "$WEIGHT_GEMINI")
+        w_codex=$(read_config ".consensus.weights.codex" "$WEIGHT_CODEX")
+
+        # Only use if valid numbers
+        [[ "$w_claude" =~ ^[0-9.]+$ ]] && WEIGHT_CLAUDE="$w_claude"
+        [[ "$w_gemini" =~ ^[0-9.]+$ ]] && WEIGHT_GEMINI="$w_gemini"
+        [[ "$w_codex" =~ ^[0-9.]+$ ]] && WEIGHT_CODEX="$w_codex"
+
+        # Read veto configuration (#80 fix)
+        VETO_HOLDER=$(read_config ".consensus.veto.veto_holder" "$VETO_HOLDER")
+
+        # Load veto categories as array (#80 fix)
+        local veto_cats
+        veto_cats=$(read_config ".consensus.veto.enabled_for" "")
+        if [[ -n "$veto_cats" && "$veto_cats" != "null" ]]; then
+            # Parse YAML array
+            if command -v yq &>/dev/null; then
+                local cats_csv
+                cats_csv=$(yq eval '.consensus.veto.enabled_for | join(",")' "$CONFIG_FILE" 2>/dev/null || echo "")
+                if [[ -n "$cats_csv" && "$cats_csv" != "null" ]]; then
+                    IFS=',' read -ra VETO_CATEGORIES <<< "$cats_csv"
+                fi
+            fi
+        fi
+
+        log_debug "Loaded config: mode=$VOTING_MODE, timeout=$MODEL_TIMEOUT, min_approvals=$MIN_APPROVALS, veto_holder=$VETO_HOLDER, veto_categories=${VETO_CATEGORIES[*]}"
+    else
+        log_warn "Config file not found, using defaults: $CONFIG_FILE"
+        VOTING_MODE="$DEFAULT_VOTING_MODE"
+        MODEL_TIMEOUT="$DEFAULT_TIMEOUT"
+        MIN_APPROVALS="$DEFAULT_MIN_APPROVALS"
+        PARTIAL_FAILURE_POLICY="$DEFAULT_PARTIAL_FAILURE_POLICY"
+    fi
+}
+
+#===============================================================================
+# Usage and Help (alias to early help for consistency)
+#===============================================================================
+show_usage() {
+    _show_early_help
+}
+
+#===============================================================================
+# Parse Arguments
+#===============================================================================
+parse_args() {
+    QUESTION=""
+    CATEGORY=""
+    JSON_ONLY=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mode)
+                VOTING_MODE="$2"
+                shift 2
+                ;;
+            --timeout)
+                MODEL_TIMEOUT="$2"
+                shift 2
+                ;;
+            --category)
+                CATEGORY="$2"
+                shift 2
+                ;;
+            --min-approvals)
+                MIN_APPROVALS="$2"
+                shift 2
+                ;;
+            --json-only)
+                JSON_ONLY=true
+                shift
+                ;;
+            --help|-h)
+                show_usage
+                exit 0
+                ;;
+            --version)
+                echo "tri-agent-consensus version $VERSION"
+                exit 0
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_usage
+                exit 2
+                ;;
+            *)
+                QUESTION="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$QUESTION" ]]; then
+        log_error "No question provided"
+        show_usage
+        exit 2
+    fi
+
+    # Validate voting mode
+    case "$VOTING_MODE" in
+        majority|weighted|veto)
+            ;;
+        *)
+            log_error "Invalid voting mode: $VOTING_MODE (use: majority, weighted, veto)"
+            exit 2
+            ;;
+    esac
+}
+
+#===============================================================================
+# Consensus Prompt Template
+#===============================================================================
+# Each model receives this template to ensure consistent response format
+build_consensus_prompt() {
+    local question="$1"
+    local category="${2:-general}"
+
+    cat << EOF
+You are participating in a tri-agent consensus vote. Please analyze the following question/decision and provide your verdict.
+
+## Decision Category: ${category}
+
+## Question/Decision:
+${question}
+
+## Instructions:
+1. Analyze the question carefully
+2. Consider risks, benefits, and alternatives
+3. Provide your verdict as one of: APPROVE, REJECT, or ABSTAIN
+4. Explain your reasoning concisely
+
+## Response Format (REQUIRED - use this exact JSON structure):
+\`\`\`json
+{
+  "verdict": "APPROVE|REJECT|ABSTAIN",
+  "confidence": 0.0-1.0,
+  "reasoning": "Your explanation here (2-3 sentences max)",
+  "concerns": ["list", "of", "concerns", "if any"],
+  "conditions": ["conditions for approval if applicable"]
+}
+\`\`\`
+
+Respond ONLY with the JSON block above, no additional text before or after.
+EOF
+}
+
+#===============================================================================
+# Query Individual Model
+#===============================================================================
+query_model() {
+    local model="$1"
+    local prompt="$2"
+    local output_file="$3"
+    local timeout="$4"
+
+    local start_time
+    start_time=$(date +%s)
+
+    case "$model" in
+        claude)
+            # Use claude-delegate for JSON envelope output
+            if [[ -x "${BIN_DIR}/claude-delegate" ]]; then
+                "${BIN_DIR}/claude-delegate" --timeout "$timeout" "$prompt" > "$output_file"
+            else
+                # Fallback to direct CLI
+                timeout "$timeout" claude --dangerously-skip-permissions -p "$prompt" 2>&1 > "$output_file"
+            fi
+            ;;
+        gemini)
+            # Use gemini-delegate for JSON envelope output
+            if [[ -x "${BIN_DIR}/gemini-delegate" ]]; then
+                "${BIN_DIR}/gemini-delegate" --timeout "$timeout" "$prompt" > "$output_file"
+            elif [[ -x "${BIN_DIR:-$SCRIPT_DIR}/gemini-ask" ]]; then
+                timeout "$timeout" "${BIN_DIR:-$SCRIPT_DIR}/gemini-ask" "$prompt" 2>&1 > "$output_file"
+            else
+                timeout "$timeout" gemini -m gemini-3-pro-preview --approval-mode yolo "$prompt" 2>&1 > "$output_file"
+            fi
+            ;;
+        codex)
+            # Use codex-delegate for JSON envelope output
+            if [[ -x "${BIN_DIR}/codex-delegate" ]]; then
+                "${BIN_DIR}/codex-delegate" --timeout "$timeout" "$prompt" > "$output_file"
+            elif [[ -x "${BIN_DIR:-$SCRIPT_DIR}/codex-ask" ]]; then
+                timeout "$timeout" "${BIN_DIR:-$SCRIPT_DIR}/codex-ask" "$prompt" 2>&1 > "$output_file"
+            else
+                timeout "$timeout" codex exec --skip-git-repo-check "$prompt" 2>&1 > "$output_file"
+            fi
+            ;;
+    esac
+
+    local exit_code=$?
+    local end_time
+    end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+
+    # Write metadata to companion file
+    cat > "${output_file}.meta" << EOF
+{
+  "model": "$model",
+  "exit_code": $exit_code,
+  "duration_seconds": $duration,
+  "timeout_used": $timeout,
+  "timed_out": $([ $exit_code -eq 124 ] && echo "true" || echo "false")
+}
+EOF
+
+    return $exit_code
+}
+
+#===============================================================================
+# Parse Verdict from Model Response
+#===============================================================================
+parse_verdict() {
+    local response_file="$1"
+    local model="$2"
+
+    if [[ ! -f "$response_file" ]]; then
+        echo '{"verdict": "ERROR", "confidence": 0, "reasoning": "No response file", "error": true}'
+        return 1
+    fi
+
+    local content
+    content=$(cat "$response_file")
+    
+    # Try parsing as delegate envelope first (#84 fix)
+    # Check if content looks like our JSON envelope
+    if echo "$content" | jq -e '.decision and .confidence and .status' >/dev/null 2>&1; then
+        # It's likely a delegate envelope
+        local decision confidence reasoning status
+        
+        status=$(echo "$content" | jq -r '.status // "error"')
+        
+        if [[ "$status" == "success" ]]; then
+            decision=$(echo "$content" | jq -r '.decision // "ABSTAIN"')
+            confidence=$(echo "$content" | jq -r '.confidence // 0')
+            reasoning=$(echo "$content" | jq -r '.reasoning // "No reasoning provided"')
+            
+            # Return normalized JSON
+            jq -nc \
+                --arg verdict "$decision" \
+                --argjson confidence "$confidence" \
+                --arg reasoning "$reasoning" \
+                --arg model "$model" \
+                '{
+                    verdict: $verdict,
+                    confidence: $confidence,
+                    reasoning: $reasoning,
+                    model: $model,
+                    error: false
+                }'
+            return 0
+        fi
+    fi
+
+    # Try to extract JSON block from response (legacy fallback)
+    local json_content=""
+
+    # Method 1: Look for ```json ... ``` block
+    if echo "$content" | grep -q '```json'; then
+        json_content=$(echo "$content" | sed -n '/```json/,/```/p' | sed '1d;$d')
+    # Method 2: Look for raw JSON object
+    elif echo "$content" | grep -qE '^\s*\{.*"verdict"'; then
+        json_content=$(echo "$content" | grep -oE '\{[^}]*"verdict"[^}]*\}' | head -1)
+    # Method 3: Look for verdict keyword and construct JSON
+    elif echo "$content" | grep -qiE '\b(APPROVE|REJECT|ABSTAIN)\b'; then
+        local verdict
+        verdict=$(echo "$content" | grep -oiE '\b(APPROVE|REJECT|ABSTAIN)\b' | head -1 | tr '[:lower:]' '[:upper:]')
+        json_content="{\"verdict\": \"$verdict\", \"confidence\": 0.7, \"reasoning\": \"Extracted from unstructured response\"}"
+    fi
+
+    # Validate and normalize the JSON
+    if [[ -n "$json_content" ]] && echo "$json_content" | jq . &>/dev/null; then
+        # Ensure required fields exist
+        local verdict confidence reasoning
+        verdict=$(echo "$json_content" | jq -r '.verdict // "ABSTAIN"' | tr '[:lower:]' '[:upper:]')
+        confidence=$(echo "$json_content" | jq -r '.confidence // 0.5')
+        reasoning=$(echo "$json_content" | jq -r '.reasoning // "No reasoning provided"')
+
+        # Normalize verdict
+        case "$verdict" in
+            APPROVE|REJECT|ABSTAIN)
+                ;;
+            YES|APPROVED|ACCEPT|PASS)
+                verdict="APPROVE"
+                ;;
+            NO|REJECTED|DENY|FAIL)
+                verdict="REJECT"
+                ;;
+            *)
+                verdict="ABSTAIN"
+                ;;
+        esac
+
+        # Return normalized JSON
+        jq -nc \
+            --arg verdict "$verdict" \
+            --argjson confidence "$confidence" \
+            --arg reasoning "$reasoning" \
+            --arg model "$model" \
+            '{
+                verdict: $verdict,
+                confidence: $confidence,
+                reasoning: $reasoning,
+                model: $model,
+                error: false
+            }'
+    else
+        # Could not parse, return error response
+        echo '{"verdict": "ABSTAIN", "confidence": 0, "reasoning": "Failed to parse model response", "model": "'"$model"'", "error": true}'
+        return 1
+    fi
+}
+
+#===============================================================================
+# Apply Voting Rules
+#===============================================================================
+apply_majority_voting() {
+    local claude_verdict="$1"
+    local gemini_verdict="$2"
+    local codex_verdict="$3"
+
+    local approve_count=0
+    local reject_count=0
+    local abstain_count=0
+    local valid_votes=0
+
+    for verdict in "$claude_verdict" "$gemini_verdict" "$codex_verdict"; do
+        case "$verdict" in
+            APPROVE) ((approve_count++)); ((valid_votes++)) ;;
+            REJECT)  ((reject_count++)); ((valid_votes++)) ;;
+            ABSTAIN) ((abstain_count++)) ;;
+        esac
+    done
+
+    local decision="NO_CONSENSUS"
+    local confidence=0
+
+    if [[ $approve_count -ge $MIN_APPROVALS ]]; then
+        decision="APPROVE"
+        confidence=$(awk "BEGIN {printf \"%.2f\", $approve_count / 3}")
+    elif [[ $reject_count -ge $MIN_APPROVALS ]]; then
+        decision="REJECT"
+        confidence=$(awk "BEGIN {printf \"%.2f\", $reject_count / 3}")
+    fi
+
+    echo "${decision}|${confidence}|${approve_count}|${reject_count}|${abstain_count}|${valid_votes}"
+}
+
+apply_weighted_voting() {
+    local claude_verdict="$1"
+    local gemini_verdict="$2"
+    local codex_verdict="$3"
+    local claude_conf="$4"
+    local gemini_conf="$5"
+    local codex_conf="$6"
+
+    # Calculate weighted scores using awk for portability (#116)
+    local approve_score=0
+    local reject_score=0
+
+    # Claude weight
+    case "$claude_verdict" in
+        APPROVE) approve_score=$(awk "BEGIN {printf \"%.4f\", $approve_score + ($WEIGHT_CLAUDE * $claude_conf)}") ;;
+        REJECT)  reject_score=$(awk "BEGIN {printf \"%.4f\", $reject_score + ($WEIGHT_CLAUDE * $claude_conf)}") ;;
+    esac
+
+    # Gemini weight
+    case "$gemini_verdict" in
+        APPROVE) approve_score=$(awk "BEGIN {printf \"%.4f\", $approve_score + ($WEIGHT_GEMINI * $gemini_conf)}") ;;
+        REJECT)  reject_score=$(awk "BEGIN {printf \"%.4f\", $reject_score + ($WEIGHT_GEMINI * $gemini_conf)}") ;;
+    esac
+
+    # Codex weight
+    case "$codex_verdict" in
+        APPROVE) approve_score=$(awk "BEGIN {printf \"%.4f\", $approve_score + ($WEIGHT_CODEX * $codex_conf)}") ;;
+        REJECT)  reject_score=$(awk "BEGIN {printf \"%.4f\", $reject_score + ($WEIGHT_CODEX * $codex_conf)}") ;;
+    esac
+
+    local decision="NO_CONSENSUS"
+    local confidence=0
+
+    # Decision threshold is 0.5 (50% of maximum weighted score)
+    # Use awk for comparison (#116)
+    if [[ $(awk "BEGIN {print ($approve_score > 0.5) ? 1 : 0}") -eq 1 ]]; then
+        decision="APPROVE"
+        confidence="$approve_score"
+    elif [[ $(awk "BEGIN {print ($reject_score > 0.5) ? 1 : 0}") -eq 1 ]]; then
+        decision="REJECT"
+        confidence="$reject_score"
+    fi
+
+    echo "${decision}|${confidence}|${approve_score}|${reject_score}"
+}
+
+apply_veto_voting() {
+    local claude_verdict="$1"
+    local gemini_verdict="$2"
+    local codex_verdict="$3"
+    local category="$4"
+
+    # Check if category requires veto protection (#80 fix)
+    local veto_applies=false
+    for cat in "${VETO_CATEGORIES[@]}"; do
+        if [[ "$category" == "$cat" ]]; then
+            veto_applies=true
+            break
+        fi
+    done
+
+    # Get veto holder's verdict
+    local veto_verdict=""
+    case "$VETO_HOLDER" in
+        claude) veto_verdict="$claude_verdict" ;;
+        gemini) veto_verdict="$gemini_verdict" ;;
+        codex)  veto_verdict="$codex_verdict" ;;
+    esac
+
+    local decision="NO_CONSENSUS"
+    local confidence=0
+    local veto_exercised=false
+
+    if [[ "$veto_applies" == "true" && "$veto_verdict" == "REJECT" ]]; then
+        # Veto exercised
+        decision="REJECT"
+        confidence=1.0
+        veto_exercised=true
+    else
+        # Fall back to majority voting
+        local majority_result
+        majority_result=$(apply_majority_voting "$claude_verdict" "$gemini_verdict" "$codex_verdict")
+        decision=$(echo "$majority_result" | cut -d'|' -f1)
+        confidence=$(echo "$majority_result" | cut -d'|' -f2)
+    fi
+
+    echo "${decision}|${confidence}|${veto_exercised}"
+}
+
+#===============================================================================
+# Generate Final Consensus JSON
+#===============================================================================
+generate_result_json() {
+    local decision="$1"
+    local votes_json="$2"
+    local confidence="$3"
+    local reasoning="$4"
+    local details_json="$5"
+
+    jq -nc \
+        --arg decision "$decision" \
+        --argjson votes "$votes_json" \
+        --argjson confidence "$confidence" \
+        --arg reasoning "$reasoning" \
+        --arg trace_id "$TRACE_ID" \
+        --arg voting_mode "$VOTING_MODE" \
+        --arg timestamp "$(date -Iseconds)" \
+        --argjson details "$details_json" \
+        '{
+            decision: $decision,
+            votes: $votes,
+            confidence: $confidence,
+            reasoning: $reasoning,
+            trace_id: $trace_id,
+            voting_mode: $voting_mode,
+            timestamp: $timestamp,
+            details: $details
+        }'
+}
+
+#===============================================================================
+# Audit Logging
+#===============================================================================
+log_consensus_event() {
+    local result_json="$1"
+    local question="$2"
+
+    # Ensure audit directory exists
+    mkdir -p "$AUDIT_LOG_DIR"
+
+    local audit_file="${AUDIT_LOG_DIR}/consensus-$(date +%Y%m%d).jsonl"
+
+    # Create audit entry
+    local audit_entry
+    audit_entry=$(jq -nc \
+        --arg trace_id "$TRACE_ID" \
+        --arg timestamp "$(date -Iseconds)" \
+        --arg question "$question" \
+        --argjson result "$result_json" \
+        '{
+            trace_id: $trace_id,
+            timestamp: $timestamp,
+            event: "consensus_vote",
+            question: $question,
+            result: $result
+        }'
+    )
+
+    echo "$audit_entry" >> "$audit_file"
+    log_debug "Audit logged to $audit_file"
+}
+
+#===============================================================================
+# Main Execution
+#===============================================================================
+main() {
+    # Load configuration
+    load_config
+
+    # Parse command line arguments
+    parse_args "$@"
+
+    # Generate trace ID for this consensus session
+    TRACE_ID="${TRACE_ID:-$(generate_trace_id consensus)}"
+
+    if [[ "$JSON_ONLY" != "true" ]]; then
+        log_info "Starting tri-agent consensus vote"
+        log_info "Trace ID: $TRACE_ID"
+        log_info "Voting mode: $VOTING_MODE"
+        log_info "Timeout per model: ${MODEL_TIMEOUT}s"
+    fi
+
+    # Create temporary directory for responses (#89 fix - secure temp dir)
+    local temp_dir
+    if command -v mktemp &>/dev/null; then
+        # Use mktemp with more entropy
+        temp_dir=$(mktemp -d -t "consensus.${TRACE_ID}.XXXXXXXXXX")
+    else
+        # Fallback for systems without mktemp
+        temp_dir="/tmp/consensus.${TRACE_ID}.$$"
+        mkdir -p "$temp_dir"
+        chmod 700 "$temp_dir"
+    fi
+
+    # Cleanup function to kill hung processes (#86 fix)
+    cleanup_processes() {
+        local pids=("$@")
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                log_debug "Killing hung process $pid"
+                kill -TERM "$pid" 2>/dev/null || true
+                sleep 1
+                # Force kill if still running
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
+            fi
+        done
+        rm -rf "$temp_dir"
+    }
+
+    trap "cleanup_processes \$claude_pid \$gemini_pid \$codex_pid" EXIT INT TERM
+
+    # Build the consensus prompt
+    local prompt
+    prompt=$(build_consensus_prompt "$QUESTION" "${CATEGORY:-general}")
+
+    # Query all three models in parallel
+    if [[ "$JSON_ONLY" != "true" ]]; then
+        log_info "Querying Claude, Gemini, and Codex in parallel..."
+    fi
+
+    local claude_pid gemini_pid codex_pid
+
+    # Start all queries in background
+    query_model "claude" "$prompt" "$temp_dir/claude.txt" "$MODEL_TIMEOUT" &
+    claude_pid=$!
+
+    query_model "gemini" "$prompt" "$temp_dir/gemini.txt" "$MODEL_TIMEOUT" &
+    gemini_pid=$!
+
+    query_model "codex" "$prompt" "$temp_dir/codex.txt" "$MODEL_TIMEOUT" &
+    codex_pid=$!
+
+    # Wait for all to complete with global timeout (#86 fix)
+    local global_timeout=$((MODEL_TIMEOUT * 3 + 30))
+    local wait_start=$(date +%s)
+    local claude_exit=0 gemini_exit=0 codex_exit=0
+
+    # Wait for each process with timeout check
+    while [[ $(date +%s) -lt $((wait_start + global_timeout)) ]]; do
+        local all_done=true
+
+        # Check Claude
+        if [[ $claude_exit -eq 0 ]] && kill -0 "$claude_pid" 2>/dev/null; then
+            all_done=false
+        elif [[ $claude_exit -eq 0 ]]; then
+            wait "$claude_pid" 2>/dev/null || claude_exit=$?
+        fi
+
+        # Check Gemini
+        if [[ $gemini_exit -eq 0 ]] && kill -0 "$gemini_pid" 2>/dev/null; then
+            all_done=false
+        elif [[ $gemini_exit -eq 0 ]]; then
+            wait "$gemini_pid" 2>/dev/null || gemini_exit=$?
+        fi
+
+        # Check Codex
+        if [[ $codex_exit -eq 0 ]] && kill -0 "$codex_pid" 2>/dev/null; then
+            all_done=false
+        elif [[ $codex_exit -eq 0 ]]; then
+            wait "$codex_pid" 2>/dev/null || codex_exit=$?
+        fi
+
+        if [[ "$all_done" == "true" ]]; then
+            break
+        fi
+
+        sleep 1
+    done
+
+    # Force kill any remaining processes
+    for pid in "$claude_pid" "$gemini_pid" "$codex_pid"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            log_warn "Process $pid exceeded global timeout, force killing"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Count successful responses
+    local success_count=0
+    [[ $claude_exit -eq 0 ]] && ((success_count++))
+    [[ $gemini_exit -eq 0 ]] && ((success_count++))
+    [[ $codex_exit -eq 0 ]] && ((success_count++))
+
+    if [[ "$JSON_ONLY" != "true" ]]; then
+        log_info "Responses received: $success_count/3"
+    fi
+
+    # Handle total failure
+    if [[ $success_count -eq 0 ]]; then
+        log_error "All models failed to respond"
+        local error_result
+        error_result=$(jq -nc \
+            --arg trace_id "$TRACE_ID" \
+            '{
+                decision: "ERROR",
+                votes: {},
+                confidence: 0,
+                reasoning: "All models failed to respond",
+                trace_id: $trace_id,
+                error: true
+            }'
+        )
+        echo "$error_result"
+        log_consensus_event "$error_result" "$QUESTION"
+        exit 3
+    fi
+
+    # Handle partial failure based on policy
+    if [[ $success_count -lt 3 && "$PARTIAL_FAILURE_POLICY" == "abort" ]]; then
+        log_error "Partial failure detected, aborting (policy: abort)"
+        local abort_result
+        abort_result=$(jq -nc \
+            --arg trace_id "$TRACE_ID" \
+            --argjson count "$success_count" \
+            '{
+                decision: "ABORT",
+                votes: {},
+                confidence: 0,
+                reasoning: ("Only " + ($count | tostring) + "/3 models responded, policy requires all"),
+                trace_id: $trace_id,
+                error: true
+            }'
+        )
+        echo "$abort_result"
+        log_consensus_event "$abort_result" "$QUESTION"
+        exit 1
+    fi
+
+    # Parse verdicts from each model
+    local claude_parsed gemini_parsed codex_parsed
+
+    if [[ $claude_exit -eq 0 ]]; then
+        claude_parsed=$(parse_verdict "$temp_dir/claude.txt" "claude")
+    else
+        claude_parsed='{"verdict": "ABSTAIN", "confidence": 0, "reasoning": "Model failed or timed out", "model": "claude", "error": true}'
+    fi
+
+    if [[ $gemini_exit -eq 0 ]]; then
+        gemini_parsed=$(parse_verdict "$temp_dir/gemini.txt" "gemini")
+    else
+        gemini_parsed='{"verdict": "ABSTAIN", "confidence": 0, "reasoning": "Model failed or timed out", "model": "gemini", "error": true}'
+    fi
+
+    if [[ $codex_exit -eq 0 ]]; then
+        codex_parsed=$(parse_verdict "$temp_dir/codex.txt" "codex")
+    else
+        codex_parsed='{"verdict": "ABSTAIN", "confidence": 0, "reasoning": "Model failed or timed out", "model": "codex", "error": true}'
+    fi
+
+    # Extract verdicts and confidences
+    local claude_verdict gemini_verdict codex_verdict
+    local claude_conf gemini_conf codex_conf
+
+    claude_verdict=$(echo "$claude_parsed" | jq -r '.verdict')
+    gemini_verdict=$(echo "$gemini_parsed" | jq -r '.verdict')
+    codex_verdict=$(echo "$codex_parsed" | jq -r '.verdict')
+
+    claude_conf=$(echo "$claude_parsed" | jq -r '.confidence')
+    gemini_conf=$(echo "$gemini_parsed" | jq -r '.confidence')
+    codex_conf=$(echo "$codex_parsed" | jq -r '.confidence')
+
+    if [[ "$JSON_ONLY" != "true" ]]; then
+        log_info "Claude: $claude_verdict (confidence: $claude_conf)"
+        log_info "Gemini: $gemini_verdict (confidence: $gemini_conf)"
+        log_info "Codex: $codex_verdict (confidence: $codex_conf)"
+    fi
+
+    # Apply voting rules based on mode
+    local decision confidence reasoning
+    local details_json='{}'
+
+    case "$VOTING_MODE" in
+        majority)
+            local majority_result
+            majority_result=$(apply_majority_voting "$claude_verdict" "$gemini_verdict" "$codex_verdict")
+            decision=$(echo "$majority_result" | cut -d'|' -f1)
+            confidence=$(echo "$majority_result" | cut -d'|' -f2)
+            local approve_count=$(echo "$majority_result" | cut -d'|' -f3)
+            local reject_count=$(echo "$majority_result" | cut -d'|' -f4)
+            local abstain_count=$(echo "$majority_result" | cut -d'|' -f5)
+
+            if [[ "$decision" == "APPROVE" ]]; then
+                reasoning="${approve_count}/3 models approved the decision"
+            elif [[ "$decision" == "REJECT" ]]; then
+                reasoning="${reject_count}/3 models rejected the decision"
+            else
+                reasoning="No consensus reached (approve: $approve_count, reject: $reject_count, abstain: $abstain_count)"
+            fi
+
+            details_json=$(jq -nc \
+                --argjson approve "$approve_count" \
+                --argjson reject "$reject_count" \
+                --argjson abstain "$abstain_count" \
+                '{approve_count: $approve, reject_count: $reject, abstain_count: $abstain}'
+            )
+            ;;
+
+        weighted)
+            local weighted_result
+            weighted_result=$(apply_weighted_voting "$claude_verdict" "$gemini_verdict" "$codex_verdict" \
+                "$claude_conf" "$gemini_conf" "$codex_conf")
+            decision=$(echo "$weighted_result" | cut -d'|' -f1)
+            confidence=$(echo "$weighted_result" | cut -d'|' -f2)
+            local approve_score=$(echo "$weighted_result" | cut -d'|' -f3)
+            local reject_score=$(echo "$weighted_result" | cut -d'|' -f4)
+
+            if [[ "$decision" == "APPROVE" ]]; then
+                reasoning="Weighted approval score ($approve_score) exceeds threshold"
+            elif [[ "$decision" == "REJECT" ]]; then
+                reasoning="Weighted rejection score ($reject_score) exceeds threshold"
+            else
+                reasoning="No consensus (approve: $approve_score, reject: $reject_score)"
+            fi
+
+            details_json=$(jq -nc \
+                --arg approve "$approve_score" \
+                --arg reject "$reject_score" \
+                --argjson w_claude "$WEIGHT_CLAUDE" \
+                --argjson w_gemini "$WEIGHT_GEMINI" \
+                --argjson w_codex "$WEIGHT_CODEX" \
+                '{
+                    approve_score: ($approve | tonumber),
+                    reject_score: ($reject | tonumber),
+                    weights: {claude: $w_claude, gemini: $w_gemini, codex: $w_codex}
+                }'
+            )
+            ;;
+
+        veto)
+            local veto_result
+            veto_result=$(apply_veto_voting "$claude_verdict" "$gemini_verdict" "$codex_verdict" "${CATEGORY:-general}")
+            decision=$(echo "$veto_result" | cut -d'|' -f1)
+            confidence=$(echo "$veto_result" | cut -d'|' -f2)
+            local veto_exercised=$(echo "$veto_result" | cut -d'|' -f3)
+
+            if [[ "$veto_exercised" == "true" ]]; then
+                reasoning="${VETO_HOLDER^} exercised veto power for ${CATEGORY:-general} decision"
+            elif [[ "$decision" == "APPROVE" ]]; then
+                reasoning="Decision approved (no veto exercised)"
+            elif [[ "$decision" == "REJECT" ]]; then
+                reasoning="Majority rejected the decision"
+            else
+                reasoning="No consensus reached"
+            fi
+
+            details_json=$(jq -nc \
+                --arg holder "$VETO_HOLDER" \
+                --arg category "${CATEGORY:-general}" \
+                --arg exercised "$veto_exercised" \
+                '{veto_holder: $holder, category: $category, veto_exercised: ($exercised == "true")}'
+            )
+            ;;
+    esac
+
+    # Build votes JSON object
+    local votes_json
+    votes_json=$(jq -nc \
+        --arg claude "$claude_verdict" \
+        --arg gemini "$gemini_verdict" \
+        --arg codex "$codex_verdict" \
+        '{claude: $claude, gemini: $gemini, codex: $codex}'
+    )
+
+    # Generate final result
+    local result_json
+    result_json=$(generate_result_json "$decision" "$votes_json" "$confidence" "$reasoning" "$details_json")
+
+    # Add individual model responses to details
+    result_json=$(echo "$result_json" | jq \
+        --argjson claude "$claude_parsed" \
+        --argjson gemini "$gemini_parsed" \
+        --argjson codex "$codex_parsed" \
+        '.model_responses = {claude: $claude, gemini: $gemini, codex: $codex}'
+    )
+
+    # Output the result
+    echo "$result_json" | jq .
+
+    # Log to audit
+    log_consensus_event "$result_json" "$QUESTION"
+
+    if [[ "$JSON_ONLY" != "true" ]]; then
+        log_info "Consensus decision: $decision (confidence: $confidence)"
+    fi
+
+    # Exit code based on decision
+    case "$decision" in
+        APPROVE|REJECT)
+            exit 0
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+}
+
+# Run main function with all arguments
+main "$@"

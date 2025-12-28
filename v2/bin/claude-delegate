@@ -1,0 +1,378 @@
+#!/bin/bash
+#===============================================================================
+# claude-delegate - Wrapper for Claude CLI with JSON envelope output
+#===============================================================================
+# Wraps Claude CLI execution and outputs structured JSON response envelope.
+# Used by tri-agent consensus system for coordinated decision making.
+#
+# Usage:
+#   claude-delegate "Review this code for security issues"
+#   claude-delegate "Should we approve this PR?" --timeout 120
+#   echo "code here" | claude-delegate "Analyze this for bugs"
+#
+# JSON envelope format:
+# {
+#   "model": "claude",
+#   "status": "success|error",
+#   "decision": "APPROVE|REJECT|ABSTAIN",
+#   "confidence": 0.0-1.0,
+#   "reasoning": "...",
+#   "output": "...",
+#   "trace_id": "...",
+#   "duration_ms": N
+# }
+#===============================================================================
+
+# Source common utilities (strict mode, trace ID, logging)
+# Resolve symlinks to find actual script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../lib"
+
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=../lib/common.sh
+    source "${LIB_DIR}/common.sh"
+else
+    echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"common.sh not found","output":"","trace_id":"unknown","duration_ms":0}' >&2
+    exit 1
+fi
+
+# Set component for logging
+COMPONENT="CLAUDE"
+export COMPONENT
+
+# Ensure TRACE_ID is set even if common.sh failed (#87 fix)
+TRACE_ID="${TRACE_ID:-claude-$(date +%Y%m%d%H%M%S)-$$}"
+export TRACE_ID
+
+#===============================================================================
+# Configuration
+#===============================================================================
+DEFAULT_TIMEOUT=300  # 5 minutes default
+MAX_TIMEOUT=600      # 10 minutes max
+CLAUDE_CMD="${CLAUDE_CMD:-claude}"
+DEFAULT_MODEL=$(read_config ".models.claude.model" "opus" "${CONFIG_FILE}")
+DEFAULT_MAX_BUDGET_USD=$(read_config ".models.claude.max_budget_usd" "50" "${CONFIG_FILE}")
+DEFAULT_FALLBACK_MODEL=$(read_config ".models.claude.fallback_model" "sonnet" "${CONFIG_FILE}")
+
+#===============================================================================
+# Usage
+#===============================================================================
+usage() {
+    cat <<EOF
+Usage: claude-delegate [OPTIONS] "prompt"
+
+Options:
+  --timeout N           Timeout in seconds (default: $DEFAULT_TIMEOUT, max: $MAX_TIMEOUT)
+  --model MODEL         Claude model to use (default: $DEFAULT_MODEL)
+  --max-budget-usd N    Maximum budget in USD (default: $DEFAULT_MAX_BUDGET_USD)
+  --fallback-model M    Fallback model when primary is overloaded (default: $DEFAULT_FALLBACK_MODEL)
+  --print               Also print to stderr
+  --help                Show this help message
+
+Examples:
+  claude-delegate "Review this code for security issues"
+  claude-delegate --timeout 120 "Analyze the architecture"
+  claude-delegate --model opus --max-budget-usd 25 --fallback-model sonnet "Complex task"
+  echo "code" | claude-delegate "Check for bugs"
+
+JSON Output:
+  {"model":"claude","status":"...","decision":"...","confidence":0.0-1.0,"reasoning":"...","output":"...","trace_id":"...","duration_ms":N}
+EOF
+}
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+TIMEOUT=$DEFAULT_TIMEOUT
+MODEL="$DEFAULT_MODEL"
+MAX_BUDGET_USD="$DEFAULT_MAX_BUDGET_USD"
+FALLBACK_MODEL="$DEFAULT_FALLBACK_MODEL"
+PRINT_STDERR=false
+PROMPT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --timeout)
+            TIMEOUT="$2"
+            # Validate timeout is a positive number
+            if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [[ $TIMEOUT -lt 1 ]]; then
+                log_warn "Invalid timeout value: $TIMEOUT, using default $DEFAULT_TIMEOUT"
+                TIMEOUT=$DEFAULT_TIMEOUT
+            elif [[ $TIMEOUT -gt $MAX_TIMEOUT ]]; then
+                TIMEOUT=$MAX_TIMEOUT
+            fi
+            shift 2
+            ;;
+        --model)
+            MODEL="$2"
+            if [[ -z "$MODEL" || "$MODEL" == -* ]]; then
+                log_warn "Invalid model value: $MODEL, using default $DEFAULT_MODEL"
+                MODEL="$DEFAULT_MODEL"
+            fi
+            shift 2
+            ;;
+        --max-budget-usd)
+            MAX_BUDGET_USD="$2"
+            if ! [[ "$MAX_BUDGET_USD" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+                log_warn "Invalid max budget value: $MAX_BUDGET_USD, using default $DEFAULT_MAX_BUDGET_USD"
+                MAX_BUDGET_USD="$DEFAULT_MAX_BUDGET_USD"
+            fi
+            shift 2
+            ;;
+        --fallback-model)
+            FALLBACK_MODEL="$2"
+            if [[ -z "$FALLBACK_MODEL" || "$FALLBACK_MODEL" == -* ]]; then
+                log_warn "Invalid fallback model value: $FALLBACK_MODEL, using default $DEFAULT_FALLBACK_MODEL"
+                FALLBACK_MODEL="$DEFAULT_FALLBACK_MODEL"
+            fi
+            shift 2
+            ;;
+        --print)
+            PRINT_STDERR=true
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        -*)
+            log_warn "Unknown option: $1"
+            shift
+            ;;
+        *)
+            PROMPT="$1"
+            shift
+            ;;
+    esac
+done
+
+#===============================================================================
+# Helper Functions
+#===============================================================================
+
+# Output JSON error and exit
+json_error() {
+    local msg="$1"
+    echo "$msg"
+    exit 1
+}
+
+#===============================================================================
+# Validate Input
+#===============================================================================
+if [[ -z "$PROMPT" ]]; then
+    echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"No prompt provided","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    exit 1
+fi
+
+# Check if Claude CLI exists
+if ! command_exists "$CLAUDE_CMD"; then
+    echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"Claude CLI not found","output":"","trace_id":"'"${TRACE_ID}"'","duration_ms":0}'
+    exit 1
+fi
+
+# Escape string for JSON (using jq for reliable escaping)
+json_escape() {
+    local str="$1"
+    # Use jq for reliable JSON escaping (handles all control characters)
+    # Falls back to python, then sed if neither available
+    printf '%s' "$str" | jq -Rs '.[:-1]' 2>/dev/null | sed 's/^"//; s/"$//' || \
+    printf '%s' "$str" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null || \
+    printf '%s' "$str" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g' | tr '\n' ' ' | head -c 10000
+}
+
+# Extract decision from output (APPROVE, REJECT, ABSTAIN)
+extract_decision() {
+    local output="$1"
+    local decision="ABSTAIN"
+
+    # Look for explicit decision keywords (case insensitive)
+    if echo "$output" | grep -qiE '\b(APPROVE|APPROVED|LGTM|ACCEPT|YES)\b'; then
+        decision="APPROVE"
+    elif echo "$output" | grep -qiE '\b(REJECT|REJECTED|DENY|DENIED|NO|BLOCK)\b'; then
+        decision="REJECT"
+    elif echo "$output" | grep -qiE '\b(ABSTAIN|UNSURE|UNCLEAR|CANNOT DETERMINE|NEED MORE)\b'; then
+        decision="ABSTAIN"
+    fi
+
+    echo "$decision"
+}
+
+# Calculate confidence from output patterns (0.0 - 1.0)
+calculate_confidence() {
+    local output="$1"
+    local decision="$2"
+    local confidence=0.5  # Default moderate confidence
+
+    # Strong affirmatives increase confidence
+    if echo "$output" | grep -qiE '\b(definitely|certainly|absolutely|clearly|strongly)\b'; then
+        confidence=0.9
+    # Moderate affirmatives
+    elif echo "$output" | grep -qiE '\b(likely|probably|appears|seems|looks)\b'; then
+        confidence=0.7
+    # Weak/uncertain language
+    elif echo "$output" | grep -qiE '\b(maybe|might|could|possibly|perhaps|unsure)\b'; then
+        confidence=0.4
+    # Very uncertain
+    elif echo "$output" | grep -qiE '\b(difficult to say|hard to tell|cannot determine|need more)\b'; then
+        confidence=0.2
+    fi
+
+    # If decision is ABSTAIN, cap confidence
+    if [[ "$decision" == "ABSTAIN" ]]; then
+        confidence=$(echo "$confidence" | awk '{if($1 > 0.3) print 0.3; else print $1}')
+    fi
+
+    printf "%.2f" "$confidence"
+}
+
+# Extract reasoning summary (first few sentences or key points)
+extract_reasoning() {
+    local output="$1"
+    local max_len=500
+
+    # Try to extract reasoning after keywords
+    local reasoning
+    reasoning=$(echo "$output" | grep -iE '(because|reason|rationale|due to|since|therefore):?' | head -3 | tr '\n' ' ')
+
+    if [[ -z "$reasoning" ]]; then
+        # Take first 500 chars as summary
+        reasoning="${output:0:$max_len}"
+    fi
+
+    # Truncate if too long
+    if [[ ${#reasoning} -gt $max_len ]]; then
+        reasoning="${reasoning:0:$max_len}..."
+    fi
+
+    echo "$reasoning"
+}
+
+#===============================================================================
+# Main Execution
+#===============================================================================
+
+# Read stdin if available (for piped content) with size limit
+MAX_STDIN_SIZE=500000  # 500KB limit to prevent memory issues
+STDIN_CONTENT=""
+if [[ ! -t 0 ]]; then
+    STDIN_CONTENT=$(head -c $MAX_STDIN_SIZE)
+    # Check if there was more content (stdin still has data)
+    if read -n 1 -t 0 2>/dev/null; then
+        log_warn "Stdin truncated to ${MAX_STDIN_SIZE} bytes (500KB limit)"
+    fi
+fi
+
+# Build full prompt
+FULL_PROMPT="$PROMPT"
+if [[ -n "$STDIN_CONTENT" ]]; then
+    FULL_PROMPT="$PROMPT
+
+--- INPUT ---
+$STDIN_CONTENT
+--- END INPUT ---"
+fi
+
+# System prompt for tri-agent decision format (used via --system-prompt flag)
+TRI_AGENT_SYSTEM_PROMPT="You are a code review agent in the tri-agent orchestration system.
+
+When providing your analysis, if a decision is required, please clearly state one of:
+- APPROVE: if the change/code is acceptable
+- REJECT: if the change/code should not proceed
+- ABSTAIN: if you cannot make a determination
+
+Include your reasoning for the decision."
+
+# Log start
+log_claude "INFO" "DELEGATE_START" "Starting Claude delegate" \
+    "{\"trace_id\":\"${TRACE_ID}\",\"prompt_length\":${#FULL_PROMPT},\"timeout\":${TIMEOUT},\"model\":\"${MODEL}\",\"max_budget_usd\":\"${MAX_BUDGET_USD}\",\"fallback_model\":\"${FALLBACK_MODEL}\"}"
+
+# Record start time
+START_MS=$(epoch_ms)
+
+# Execute Claude CLI
+# Using --print flag for non-interactive output, -p for prompt
+OUTPUT=""
+EXIT_CODE=0
+STDERR_OUTPUT=""
+
+# Create temp file for stderr
+STDERR_TMP=$(mktemp)
+trap 'rm -f "$STDERR_TMP"' EXIT
+
+CLAUDE_ARGS=()
+if [[ -n "$MODEL" ]]; then
+    CLAUDE_ARGS+=(--model "$MODEL")
+fi
+if [[ -n "$MAX_BUDGET_USD" ]]; then
+    CLAUDE_ARGS+=(--max-budget-usd "$MAX_BUDGET_USD")
+fi
+if [[ -n "$FALLBACK_MODEL" ]]; then
+    CLAUDE_ARGS+=(--fallback-model "$FALLBACK_MODEL")
+fi
+CLAUDE_ARGS+=(--system-prompt "$TRI_AGENT_SYSTEM_PROMPT" --print -p "$FULL_PROMPT")
+
+OUTPUT=$(timeout "$TIMEOUT" "$CLAUDE_CMD" "${CLAUDE_ARGS[@]}" 2>"$STDERR_TMP") || EXIT_CODE=$?
+STDERR_OUTPUT=$(cat "$STDERR_TMP" 2>/dev/null || echo "")
+
+# Calculate duration
+END_MS=$(epoch_ms)
+DURATION_MS=$((END_MS - START_MS))
+
+# Handle results
+if [[ $EXIT_CODE -eq 124 ]]; then
+    # Timeout
+    log_claude "ERROR" "DELEGATE_TIMEOUT" "Claude delegate timed out" \
+        "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
+
+    ESCAPED_MSG=$(json_escape "Request timed out after ${TIMEOUT}s")
+    echo "{\"model\":\"claude\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    exit 1
+
+elif [[ $EXIT_CODE -ne 0 ]]; then
+    # Error
+    log_claude "ERROR" "DELEGATE_ERROR" "Claude delegate failed" \
+        "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
+
+    ERROR_MSG="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
+    ERROR_MSG=$(mask_secrets "$ERROR_MSG")
+    ESCAPED_MSG=$(json_escape "$ERROR_MSG")
+    echo "{\"model\":\"claude\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"${ESCAPED_MSG}\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    exit 1
+fi
+
+# Success - parse output
+DECISION=$(extract_decision "$OUTPUT")
+CONFIDENCE=$(calculate_confidence "$OUTPUT" "$DECISION")
+REASONING=$(extract_reasoning "$OUTPUT")
+
+# Escape for JSON
+ESCAPED_OUTPUT=$(json_escape "$OUTPUT")
+ESCAPED_REASONING=$(json_escape "$REASONING")
+
+# Build JSON envelope
+JSON_ENVELOPE=$(cat <<EOF
+{"model":"claude","status":"success","decision":"${DECISION}","confidence":${CONFIDENCE},"reasoning":"${ESCAPED_REASONING}","output":"${ESCAPED_OUTPUT}","trace_id":"${TRACE_ID}","duration_ms":${DURATION_MS}}
+EOF
+)
+
+# Log completion
+log_claude "INFO" "DELEGATE_COMPLETE" "Claude delegate completed" \
+    "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"${DECISION}\",\"confidence\":${CONFIDENCE},\"duration_ms\":${DURATION_MS}}"
+
+# Output JSON to stdout
+echo "$JSON_ENVELOPE"
+
+# Also print to stderr if requested
+if [[ "$PRINT_STDERR" == "true" ]]; then
+    echo "[CLAUDE] Decision: $DECISION (confidence: $CONFIDENCE)" >&2
+    echo "[CLAUDE] Duration: ${DURATION_MS}ms" >&2
+fi
+
+exit 0

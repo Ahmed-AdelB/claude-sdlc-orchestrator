@@ -1,0 +1,319 @@
+# =============================================================================
+# Tri-Agent System Configuration v2.0.0
+# =============================================================================
+# Single source of truth for all tri-agent orchestration settings
+#
+# Subscription Context:
+# - Claude Max: $200/month (Double limits until Dec 31, 2025!)
+#   - 900 msgs/5hr Opus, Sonnet unlimited
+# - ChatGPT Pro: $200/month (Codex GPT-5.2 with xhigh reasoning)
+#   - Unlimited access, reasoning summaries
+# - Google AI Ultra: $20/month (Gemini 3 Pro Preview, 1M context)
+#   - High thinking level
+#
+# Note: Subscription-based = unlimited usage, track metrics only
+# =============================================================================
+
+system:
+  version: "2.0.0"
+  default_mode: "tri-agent"  # autonomous | tri-agent | consensus
+  trace_id_prefix: "tri"
+  project_dir: ""  # Set at runtime
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+models:
+  claude:
+    enabled: true
+    role: "orchestrator"
+    model: "opus"
+    fallback_model: "sonnet"
+    max_budget_usd: 50
+    cli_command: "claude"
+    context_window: 200000
+    max_thinking_tokens: 32000
+    timeout_seconds: 300
+    failover_to: "codex"
+    flags:
+      - "--dangerously-skip-permissions"
+      - "--model"
+      - "opus"
+      - "--max-budget-usd"
+      - "50"
+      - "--fallback-model"
+      - "sonnet"
+
+  gemini:
+    enabled: true
+    role: "analyst"
+    model: "gemini-3-pro-preview"
+    cli_command: "gemini"
+    context_window: 1000000
+    thinking_level: "high"
+    auth_type: "oauth-personal"
+    timeout_seconds: 180
+    flags:
+      - "-m"
+      - "gemini-3-pro-preview"
+      - "--approval-mode"
+      - "yolo"
+
+  codex:
+    enabled: true
+    role: "implementer"
+    model: "gpt-5.2-codex"
+    cli_command: "codex"
+    context_window: 400000
+    reasoning_effort: "xhigh"
+    sandbox_mode: "workspace-write"  # workspace-write | danger-full-access
+    timeout_seconds: 240
+    skip_git_check: true
+    flags:
+      - "exec"
+      - "-m"
+      - "gpt-5.2-codex"
+      - "-c"
+      - "model_reasoning_effort=\"xhigh\""
+      - "-s"
+      - "workspace-write"
+      - "--skip-git-repo-check"
+
+# =============================================================================
+# Routing Configuration
+# =============================================================================
+routing:
+  auto_detect: true
+  file_size_threshold: 51200      # 50KB - route to Gemini
+  context_threshold: 100000       # 100K tokens - route to Gemini
+  confidence_threshold: 0.7       # Below this, prompt user
+  policy_file: "config/routing-policy.yaml"
+
+  # Keyword-based routing weights
+  keywords:
+    gemini:
+      patterns:
+        - "entire codebase"
+        - "all files"
+        - "full project"
+        - "analyze everything"
+      weight: 0.9
+
+    codex:
+      patterns:
+        - "implement"
+        - "build"
+        - "fix"
+        - "create"
+        - "write"
+        - "prototype"
+      weight: 0.8
+
+    claude:
+      patterns:
+        - "design"
+        - "architect"
+        - "security"
+        - "review"
+        - "plan"
+        - "think"
+      weight: 0.85
+
+# =============================================================================
+# Error Handling
+# =============================================================================
+error_handling:
+  max_retries: 3
+  backoff_base: 5               # seconds
+  backoff_max: 300              # 5 min max
+  backoff_multiplier: 2
+  jitter: true                  # Add randomness to prevent thundering herd
+  fallback_order:
+    - "claude"
+    - "codex"
+    - "gemini"
+  retry_budget_per_task: 5      # Total retries across all fallbacks
+
+  # Error type classification patterns
+  error_patterns:
+    rate_limit:
+      - "rate limit"
+      - "429"
+      - "quota exceeded"
+      - "too many requests"
+    auth_error:
+      - "authentication"
+      - "unauthorized"
+      - "401"
+      - "403"
+      - "invalid token"
+    timeout:
+      - "timeout"
+      - "timed out"
+      - "deadline exceeded"
+    model_unavailable:
+      - "model not found"
+      - "404"
+      - "model unavailable"
+    # Codex-specific error patterns (#109)
+    codex_reasoning:
+      - "reasoning_budget_exceeded"
+      - "reasoning budget"
+      - "reasoning timeout"
+      - "model_reasoning_timeout"
+    codex_context:
+      - "context_compaction_failed"
+      - "context compaction"
+      - "context_too_large"
+    codex_output:
+      - "output_token_limit"
+      - "max output tokens"
+    codex_sandbox:
+      - "sandbox_permission_denied"
+      - "sandbox permission"
+
+# =============================================================================
+# Circuit Breaker
+# =============================================================================
+circuit_breaker:
+  failure_threshold: 3          # Consecutive failures to open
+  cooldown_seconds: 60          # Time before half-open
+  half_open_max_calls: 1        # Test calls in half-open state
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  format: "jsonl"
+  level: "INFO"                 # DEBUG, INFO, WARN, ERROR
+  rotation: "daily"
+  retention_days: 7
+  audit_mode: false             # Record prompt/response hashes
+
+  # Log directories (relative to autonomous root)
+  directories:
+    sessions: "logs/sessions"
+    errors: "logs/errors"
+    costs: "logs/costs"
+    audit: "logs/audit"
+
+# =============================================================================
+# Monitoring Configuration
+# =============================================================================
+monitoring:
+  health_check_interval: 300    # 5 minutes
+  desktop_notifications: true
+  status_file: "state/health.json"
+  metrics_retention_days: 30
+
+  # Health check thresholds
+  thresholds:
+    error_rate_warning: 0.1     # 10% error rate
+    error_rate_critical: 0.25   # 25% error rate
+    response_time_warning: 30   # seconds
+    response_time_critical: 120 # seconds
+
+# =============================================================================
+# Consensus Mode
+# =============================================================================
+consensus:
+  enabled: true
+  voting_mode: "majority"       # majority | weighted | veto
+  min_approvals: 2              # Minimum approvals needed
+  timeout_per_model: 60         # seconds
+  partial_failure_policy: "continue"  # continue | abort
+
+  # Weighted voting (if voting_mode: weighted)
+  weights:
+    claude: 0.4
+    gemini: 0.3
+    codex: 0.3
+
+  # Veto rules (if voting_mode: veto)
+  veto:
+    enabled_for:
+      - "security"
+      - "architecture"
+    veto_holder: "claude"
+
+# =============================================================================
+# Session Management
+# =============================================================================
+sessions:
+  checkpoint_interval: 300      # 5 minutes
+  max_session_age: 86400        # 24 hours
+  auto_resume: true
+  tmux:
+    socket_name: "tri-agent"
+    session_prefix: "tri-agent"
+    # Session naming: tri-agent-$USER-$PROJECT
+
+# =============================================================================
+# Security
+# =============================================================================
+security:
+  mask_secrets: true
+  mask_patterns:
+    - 'sk-[a-zA-Z0-9]{20,}'
+    - 'ANTHROPIC_API_KEY=[^\s]+'
+    - 'OPENAI_API_KEY=[^\s]+'
+    - 'GOOGLE_API_KEY=[^\s]+'
+    - 'Bearer [a-zA-Z0-9._-]+'
+    - 'ghp_[a-zA-Z0-9]{36}'
+    - 'gho_[a-zA-Z0-9]{36}'
+
+  # Files to never include in prompts
+  excluded_files:
+    - ".env"
+    - ".env.*"
+    - "credentials.json"
+    - "*.pem"
+    - "*.key"
+    - "id_rsa*"
+
+# =============================================================================
+# Cost Tracking (Metrics Only - Subscription Based)
+# =============================================================================
+cost_tracking:
+  enabled: true
+  track_tokens: true
+  track_requests: true
+  daily_report: true
+  report_time: "09:00"
+
+  # Subscription info (for reference only)
+  subscriptions:
+    claude_max:
+      cost_per_month: 200
+      limits: "900 msgs/5hr Opus, unlimited Sonnet"
+      promo: "Double limits until Dec 31, 2025"
+    chatgpt_pro:
+      cost_per_month: 200
+      limits: "Unlimited Codex GPT-5.2 xhigh"
+    google_ai_ultra:
+      cost_per_month: 20
+      limits: "Gemini 3 Pro 1M context"
+
+# =============================================================================
+# Auto-Delegation System Prompt
+# =============================================================================
+delegation:
+  system_prompt: |
+    ## AUTO-DELEGATION SYSTEM
+
+    You can delegate tasks to specialized models:
+    1. **Gemini 3 Pro** (1M context): `tri-agent-router --gemini "task"`
+    2. **Codex GPT-5.2** (xhigh): `tri-agent-router --codex "task"`
+
+    ### When to Delegate:
+    - Files >50KB or >100K tokens → Gemini
+    - "implement", "build", "fix" → Codex
+    - Keep architecture/security decisions in Claude
+    - Use consensus for critical decisions: `tri-agent-consensus "decision"`
+
+    ### Delegation Format:
+    When delegating, always include:
+    1. Clear task description
+    2. Relevant context/files
+    3. Expected output format
+    4. Success criteria

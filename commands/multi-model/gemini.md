@@ -45,7 +45,7 @@ Detailed analysis with code references.
 gemini "Analyze this codebase for security issues"
 
 # With model selection
-gemini -m gemini-2.5-pro "Analyze the authentication flow"
+gemini -m gemini-3-pro "Analyze the authentication flow"
 
 # With auto-approve (YOLO mode)
 gemini -y "Review this code"
@@ -144,12 +144,12 @@ export GOOGLE_AI_API_KEY="your-api-key"
 ### Model Selection
 | Model | Context | Speed | Use Case |
 |-------|---------|-------|----------|
-| gemini-2.5-pro | 1M | Medium | Analysis, Review |
+| gemini-3-pro | 1M | Medium | Analysis, Review |
 | gemini-2.0-flash | 1M | Fast | Quick tasks |
 
 ### CLI Flags Reference
 ```bash
--m MODEL      # Select model (e.g., -m gemini-2.5-pro)
+-m MODEL      # Select model (e.g., -m gemini-3-pro)
 -y            # Auto-approve (YOLO mode)
 -i            # Interactive mode
 --resume ID   # Resume session by ID

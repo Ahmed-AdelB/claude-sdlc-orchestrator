@@ -71,13 +71,50 @@ WARNINGS=0
 # 1. Check for secrets/sensitive data
 log_info "Checking for sensitive data..."
 SENSITIVE_PATTERNS=(
-    "password\s*=\s*['\"][^'\"]+['\"]"
-    "api[_-]?key\s*=\s*['\"][^'\"]+['\"]"
-    "secret\s*=\s*['\"][^'\"]+['\"]"
-    "token\s*=\s*['\"][^'\"]+['\"]"
-    "AWS_ACCESS_KEY"
-    "AWS_SECRET"
-    "PRIVATE_KEY"
+    # AWS Credentials (actual format)
+    "AKIA[A-Z0-9]{16}"
+    "ASIA[A-Z0-9]{16}"
+    "(aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[:=]\s*['\"]?[A-Za-z0-9/+=]{40}['\"]?"
+
+    # GitHub Tokens
+    "ghp_[A-Za-z0-9]{36,}"
+    "gho_[A-Za-z0-9]{36,}"
+    "ghu_[A-Za-z0-9]{36,}"
+    "ghs_[A-Za-z0-9]{36,}"
+    "ghr_[A-Za-z0-9]{36,}"
+
+    # Private Keys
+    "-----BEGIN (RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----"
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----"
+
+    # Generic API Keys and Secrets
+    "(api[_-]?key|apikey)\s*[:=]\s*['\"][a-zA-Z0-9_\-]{20,}['\"]"
+    "(secret|SECRET)\s*[:=]\s*['\"][a-zA-Z0-9_\-]{16,}['\"]"
+    "(password|PASSWORD)\s*[:=]\s*['\"][^'\"]{8,}['\"]"
+    "(token|TOKEN)\s*[:=]\s*['\"][a-zA-Z0-9_\-\.]{20,}['\"]"
+
+    # Database Connection Strings
+    "(mysql|postgresql|mongodb)://[^:]+:[^@]+@"
+    "postgres://[a-zA-Z0-9]+:[^@]+@"
+
+    # OAuth and JWT
+    "oauth[_-]?(token|secret)\s*[:=]\s*['\"][^'\"]{20,}['\"]"
+    "Bearer [A-Za-z0-9\-\._~\+\/]+=*"
+
+    # Google Cloud / Firebase
+    "AIza[0-9A-Za-z\-_]{35}"
+
+    # Slack Tokens
+    "xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,32}"
+
+    # Generic Base64 Secrets (high entropy)
+    "(secret|password|key|token)[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9+/]{40,}={0,2}[\"']?"
+
+    # Environment Variable Exports with Secrets
+    "export\s+(AWS_ACCESS_KEY|AWS_SECRET|API_KEY|PASSWORD|SECRET|TOKEN)="
+
+    # URL-embedded credentials
+    "https?://[a-zA-Z0-9]+:[^@\s]+@[a-zA-Z0-9\.]+"
 )
 
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
@@ -177,8 +214,20 @@ if [ "$TRI_AGENT_ENABLED" = "true" ]; then
     # Call Codex CLI if available (GPT-5.1 Pro)
     if command -v codex &> /dev/null; then
         echo -n "Codex (GPT-5.1): "
-        CODEX_RESULT=$(timeout 30 codex -q "$REVIEW_PROMPT" 2>/dev/null || echo "APPROVE (timeout)")
-        if echo "$CODEX_RESULT" | grep -qi "reject"; then
+        CODEX_RESULT=$(timeout 30 codex -q "$REVIEW_PROMPT" 2>/dev/null)
+        CODEX_EXIT=$?
+
+        if [ $CODEX_EXIT -eq 124 ]; then
+            # Exit code 124 = timeout
+            CODEX_VOTE="TIMEOUT"
+            echo "TIMEOUT ⏱️"
+            log_warning "Codex review timed out after 30 seconds"
+        elif [ $CODEX_EXIT -ne 0 ]; then
+            # Non-zero exit (error)
+            CODEX_VOTE="ERROR"
+            echo "ERROR ❌"
+            log_warning "Codex review failed with exit code $CODEX_EXIT"
+        elif echo "$CODEX_RESULT" | grep -qi "reject"; then
             CODEX_VOTE="REJECT"
             echo "REJECT ❌"
             log_warning "Codex flagged issues: $CODEX_RESULT"
@@ -194,8 +243,20 @@ if [ "$TRI_AGENT_ENABLED" = "true" ]; then
     # Call Gemini CLI if available (Gemini 3 Pro)
     if command -v gemini &> /dev/null; then
         echo -n "Gemini (3 Pro): "
-        GEMINI_RESULT=$(timeout 30 gemini -y "$REVIEW_PROMPT" 2>/dev/null || echo "APPROVE (timeout)")
-        if echo "$GEMINI_RESULT" | grep -qi "reject"; then
+        GEMINI_RESULT=$(timeout 30 gemini -y "$REVIEW_PROMPT" 2>/dev/null)
+        GEMINI_EXIT=$?
+
+        if [ $GEMINI_EXIT -eq 124 ]; then
+            # Exit code 124 = timeout
+            GEMINI_VOTE="TIMEOUT"
+            echo "TIMEOUT ⏱️"
+            log_warning "Gemini review timed out after 30 seconds"
+        elif [ $GEMINI_EXIT -ne 0 ]; then
+            # Non-zero exit (error)
+            GEMINI_VOTE="ERROR"
+            echo "ERROR ❌"
+            log_warning "Gemini review failed with exit code $GEMINI_EXIT"
+        elif echo "$GEMINI_RESULT" | grep -qi "reject"; then
             GEMINI_VOTE="REJECT"
             echo "REJECT ❌"
             log_warning "Gemini flagged issues: $GEMINI_RESULT"
@@ -209,22 +270,34 @@ if [ "$TRI_AGENT_ENABLED" = "true" ]; then
     fi
 
     # Calculate consensus (need 2/3 or 2/2 approvals)
+    # SECURITY: Only count explicit APPROVE votes - timeouts/errors don't count as approval
     APPROVE_COUNT=0
     TOTAL_VOTES=0
+    BLOCKING_ISSUES=0
 
     [[ "$CLAUDE_VOTE" == "APPROVE" ]] && ((APPROVE_COUNT++))
     [[ "$CLAUDE_VOTE" != "SKIP" ]] && ((TOTAL_VOTES++))
+    [[ "$CLAUDE_VOTE" =~ ^(TIMEOUT|ERROR|REJECT)$ ]] && ((BLOCKING_ISSUES++))
+
     [[ "$CODEX_VOTE" == "APPROVE" ]] && ((APPROVE_COUNT++))
     [[ "$CODEX_VOTE" != "SKIP" ]] && ((TOTAL_VOTES++))
+    [[ "$CODEX_VOTE" =~ ^(TIMEOUT|ERROR|REJECT)$ ]] && ((BLOCKING_ISSUES++))
+
     [[ "$GEMINI_VOTE" == "APPROVE" ]] && ((APPROVE_COUNT++))
     [[ "$GEMINI_VOTE" != "SKIP" ]] && ((TOTAL_VOTES++))
+    [[ "$GEMINI_VOTE" =~ ^(TIMEOUT|ERROR|REJECT)$ ]] && ((BLOCKING_ISSUES++))
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # Require majority approval
+    # SECURITY: Fail closed - require majority explicit approval AND no timeouts/errors
     REQUIRED=$((TOTAL_VOTES / 2 + 1))
-    if [ $APPROVE_COUNT -ge $REQUIRED ]; then
+    if [ $BLOCKING_ISSUES -gt 0 ]; then
+        echo "Consensus: BLOCKED (timeout/error detected) ⛔"
+        log_error "Tri-agent review failed - timeouts or errors are blocking (fail closed)"
+        log_error "Timeouts/errors prevent approval for security - retry when services are available"
+        ((ERRORS++))
+    elif [ $APPROVE_COUNT -ge $REQUIRED ]; then
         echo "Consensus: APPROVED ($APPROVE_COUNT/$TOTAL_VOTES) ✅"
         log_success "Tri-agent review passed"
     else

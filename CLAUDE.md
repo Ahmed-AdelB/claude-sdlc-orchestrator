@@ -3,16 +3,16 @@
 ## AI Stack ($420/month)
 - **Claude Max** ($200): Primary orchestrator, 900 msg/5hr, Opus + Sonnet
 - **ChatGPT Pro** ($200): Codex CLI for prototyping, o3-pro for debugging
-- **Google AI Pro** ($20): Gemini 2.5/3 Pro, 1M token context
+- **Google AI Pro** ($20): Gemini 3 Pro, 1M token context
 
-## 85+ Specialized Agents (14 Categories)
+## 96 Specialized Agents (14 Categories + Special)
 1. **General Purpose** (6): orchestrator, task-router, context-manager, session-manager, memory-coordinator, parallel-coordinator
 2. **Planning** (8): requirements-analyst, architect, tech-spec-writer, risk-assessor, exponential-planner, product-manager, ux-researcher, tech-lead
 3. **Backend** (10): backend-developer, api-architect, django-expert, fastapi-expert, nodejs-expert, rails-expert, go-expert, graphql-specialist, microservices-architect, authentication-specialist
-4. **Frontend** (10): frontend-developer, react-expert, nextjs-expert, vue-expert, angular-expert, typescript-expert, ui-component-builder, shadcn-ui-adapter, accessibility-specialist, state-management-expert
-5. **Database** (6): database-specialist, postgresql-expert, mongodb-expert, redis-expert, sql-optimizer, migration-specialist
+4. **Frontend** (10): frontend-developer, react-expert, nextjs-expert, vue-expert, typescript-expert, css-expert, mobile-web-expert, testing-frontend, accessibility-expert, state-management-expert
+5. **Database** (6): database-architect, postgresql-expert, mongodb-expert, redis-expert, orm-expert, migration-expert
 6. **Testing** (8): test-generator, unit-test-specialist, integration-test-specialist, e2e-test-specialist, playwright-tester, vitest-tester, pytest-tester, test-coverage-analyst
-7. **Quality** (8): code-reviewer, qa-validator, refactoring-specialist, code-archaeologist, rubber-duck-debugger, linter-specialist, documentation-writer, api-documentation-specialist
+7. **Quality** (8): code-reviewer, qa-validator, refactoring-expert, code-archaeologist, rubber-duck-debugger, linting-expert, documentation-expert, technical-debt-analyst
 8. **Security** (6): security-auditor, owasp-specialist, penetration-tester, dependency-scanner, secrets-detector, compliance-checker
 9. **Performance** (5): performance-optimizer, profiling-specialist, caching-specialist, load-testing-specialist, bundle-optimizer
 10. **DevOps** (8): ci-cd-specialist, deployment-manager, docker-specialist, kubernetes-specialist, terraform-specialist, github-actions-specialist, monitoring-specialist, infrastructure-architect
@@ -20,6 +20,10 @@
 12. **AI/ML** (4): ml-engineer, prompt-engineer, langchain-specialist, ai-agent-builder
 13. **Integration** (4): integration-specialist, webhook-specialist, third-party-api-specialist, mcp-integration-specialist
 14. **Business** (4): business-analyst, cost-optimizer, stakeholder-communicator, project-tracker
+
+## Special Integration Agents (Root-Level)
+- **codex-sdlc-developer**: Implements code changes using Codex CLI (GPT-5.1-Codex-Max) following SDLC best practices. Part of tri-agent architecture where Claude handles requirements, Codex handles implementation, and Gemini handles review. Use for feature implementation, bug fixes, and code development tasks.
+- **gemini-reviewer**: Coordinates with Gemini CLI for code review and security analysis as part of tri-agent workflow. Expert in security vulnerabilities (OWASP Top 10), code quality validation, and design review. Use for security audits, compliance validation, and code quality scoring.
 
 ## 5-Phase Development Discipline (CCPM)
 1. **Brainstorm**: `/sdlc:brainstorm` - Gather requirements, ask clarifying questions
@@ -92,7 +96,7 @@ Body explaining what and why
 Tri-Agent Approval:
 - Claude Code (Sonnet): APPROVE
 - Codex (GPT-5.1): APPROVE
-- Gemini (2.5 Pro): APPROVE
+- Gemini (3 Pro): APPROVE
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ```
@@ -112,7 +116,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 # CORRECT - Use positional arguments
 gemini "your prompt here"
 gemini -y "prompt"                    # Auto-approve (YOLO mode)
-gemini -m gemini-2.5-pro "prompt"     # Specify model
+gemini -m gemini-3-pro "prompt"       # Specify model
 gemini --approval-mode yolo "prompt"  # Auto-approve all tools
 
 # WRONG - Deprecated flag

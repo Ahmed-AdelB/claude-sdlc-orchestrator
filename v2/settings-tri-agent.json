@@ -1,0 +1,54 @@
+{
+  "env": {
+    "MAX_THINKING_TOKENS": "32000",
+    "ANTHROPIC_MODEL": "opus",
+    "MCP_TIMEOUT": "30000",
+    "MAX_MCP_OUTPUT_TOKENS": "50000",
+    "CLAUDE_TRI_AGENT": "true",
+    "CLAUDE_AUTONOMOUS_MODE": "true"
+  },
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "mcp__*",
+      "Task",
+      "TodoWrite"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf /*)",
+      "Bash(sudo rm -rf:*)",
+      "Bash(shutdown:*)",
+      "Bash(reboot:*)",
+      "Bash(mkfs:*)",
+      "Write(/etc/*)",
+      "Write(/usr/*)",
+      "Write(/var/*)",
+      "Write(/root/*)",
+      "Write(~/.ssh/id_*)",
+      "Write(~/.gnupg/*)"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/autonomous/checkpoint.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "alwaysThinkingEnabled": true
+}

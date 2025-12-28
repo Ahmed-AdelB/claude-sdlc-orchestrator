@@ -1,0 +1,351 @@
+# =============================================================================
+# Tri-Agent Configuration Schema
+# =============================================================================
+# JSON Schema for validating tri-agent.yaml configuration
+# Can be used with Python jsonschema or yq for validation
+# =============================================================================
+
+$schema: "http://json-schema.org/draft-07/schema#"
+title: "Tri-Agent Configuration Schema"
+description: "Schema for validating tri-agent system configuration"
+type: object
+
+required:
+  - system
+  - models
+  - routing
+  - error_handling
+  - circuit_breaker
+  - logging
+
+properties:
+  system:
+    type: object
+    required:
+      - version
+      - default_mode
+    properties:
+      version:
+        type: string
+        pattern: "^\\d+\\.\\d+\\.\\d+$"
+        description: "Semantic version string"
+      default_mode:
+        type: string
+        enum: ["autonomous", "tri-agent", "consensus"]
+        description: "Default operation mode"
+      trace_id_prefix:
+        type: string
+        default: "tri"
+        description: "Prefix for trace IDs"
+      project_dir:
+        type: string
+        description: "Project directory (set at runtime)"
+
+  models:
+    type: object
+    required:
+      - claude
+      - gemini
+      - codex
+    properties:
+      claude:
+        $ref: "#/definitions/model_config"
+      gemini:
+        $ref: "#/definitions/model_config"
+      codex:
+        $ref: "#/definitions/model_config"
+
+  routing:
+    type: object
+    required:
+      - auto_detect
+      - file_size_threshold
+      - context_threshold
+    properties:
+      auto_detect:
+        type: boolean
+        default: true
+      file_size_threshold:
+        type: integer
+        minimum: 1024
+        maximum: 10485760
+        description: "File size threshold in bytes"
+      context_threshold:
+        type: integer
+        minimum: 1000
+        maximum: 10000000
+        description: "Token context threshold"
+      confidence_threshold:
+        type: number
+        minimum: 0
+        maximum: 1
+        default: 0.7
+      policy_file:
+        type: string
+        description: "Path to routing policy file"
+      keywords:
+        type: object
+        additionalProperties:
+          type: object
+          properties:
+            patterns:
+              type: array
+              items:
+                type: string
+            weight:
+              type: number
+              minimum: 0
+              maximum: 1
+
+  error_handling:
+    type: object
+    required:
+      - max_retries
+      - fallback_order
+    properties:
+      max_retries:
+        type: integer
+        minimum: 0
+        maximum: 10
+        default: 3
+      backoff_base:
+        type: integer
+        minimum: 1
+        maximum: 60
+        default: 5
+      backoff_max:
+        type: integer
+        minimum: 60
+        maximum: 3600
+        default: 300
+      backoff_multiplier:
+        type: number
+        minimum: 1
+        maximum: 5
+        default: 2
+      jitter:
+        type: boolean
+        default: true
+      fallback_order:
+        type: array
+        items:
+          type: string
+          enum: ["claude", "gemini", "codex"]
+        minItems: 1
+        maxItems: 3
+      retry_budget_per_task:
+        type: integer
+        minimum: 1
+        maximum: 20
+        default: 5
+
+  circuit_breaker:
+    type: object
+    required:
+      - failure_threshold
+      - cooldown_seconds
+    properties:
+      failure_threshold:
+        type: integer
+        minimum: 1
+        maximum: 10
+        default: 3
+        description: "Consecutive failures to open circuit"
+      cooldown_seconds:
+        type: integer
+        minimum: 10
+        maximum: 600
+        default: 60
+        description: "Seconds before half-open test"
+      half_open_max_calls:
+        type: integer
+        minimum: 1
+        maximum: 5
+        default: 1
+
+  logging:
+    type: object
+    required:
+      - format
+      - level
+    properties:
+      format:
+        type: string
+        enum: ["jsonl", "json", "text"]
+        default: "jsonl"
+      level:
+        type: string
+        enum: ["DEBUG", "INFO", "WARN", "ERROR"]
+        default: "INFO"
+      rotation:
+        type: string
+        enum: ["daily", "weekly", "size"]
+        default: "daily"
+      retention_days:
+        type: integer
+        minimum: 1
+        maximum: 365
+        default: 7
+      audit_mode:
+        type: boolean
+        default: false
+
+  monitoring:
+    type: object
+    properties:
+      health_check_interval:
+        type: integer
+        minimum: 60
+        maximum: 3600
+        default: 300
+      desktop_notifications:
+        type: boolean
+        default: true
+      status_file:
+        type: string
+        default: "state/health.json"
+      metrics_retention_days:
+        type: integer
+        minimum: 1
+        maximum: 365
+        default: 30
+
+  consensus:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      voting_mode:
+        type: string
+        enum: ["majority", "weighted", "veto"]
+        default: "majority"
+      min_approvals:
+        type: integer
+        minimum: 1
+        maximum: 3
+        default: 2
+      timeout_per_model:
+        type: integer
+        minimum: 10
+        maximum: 300
+        default: 60
+      partial_failure_policy:
+        type: string
+        enum: ["continue", "abort"]
+        default: "continue"
+
+  sessions:
+    type: object
+    properties:
+      checkpoint_interval:
+        type: integer
+        minimum: 60
+        maximum: 3600
+        default: 300
+      max_session_age:
+        type: integer
+        minimum: 3600
+        maximum: 604800
+        default: 86400
+      auto_resume:
+        type: boolean
+        default: true
+
+  security:
+    type: object
+    properties:
+      mask_secrets:
+        type: boolean
+        default: true
+      mask_patterns:
+        type: array
+        items:
+          type: string
+      excluded_files:
+        type: array
+        items:
+          type: string
+
+  cost_tracking:
+    type: object
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      track_tokens:
+        type: boolean
+        default: true
+      track_requests:
+        type: boolean
+        default: true
+      daily_report:
+        type: boolean
+        default: true
+
+  delegation:
+    type: object
+    properties:
+      system_prompt:
+        type: string
+        description: "System prompt for auto-delegation"
+
+# =============================================================================
+# Definitions (Reusable Schemas)
+# =============================================================================
+definitions:
+  model_config:
+    type: object
+    required:
+      - enabled
+      - role
+      - model
+      - cli_command
+    properties:
+      enabled:
+        type: boolean
+        description: "Whether this model is enabled"
+      role:
+        type: string
+        enum: ["orchestrator", "analyst", "implementer"]
+        description: "Role of this model in the system"
+      model:
+        type: string
+        description: "Model identifier"
+      cli_command:
+        type: string
+        description: "CLI command to invoke this model"
+      context_window:
+        type: integer
+        minimum: 1000
+        maximum: 10000000
+        description: "Maximum context window in tokens"
+      timeout_seconds:
+        type: integer
+        minimum: 30
+        maximum: 600
+        default: 300
+      failover_to:
+        type: string
+        enum: ["claude", "gemini", "codex"]
+        description: "Model to failover to if this one fails"
+      flags:
+        type: array
+        items:
+          type: string
+        description: "CLI flags to pass to the model"
+      max_thinking_tokens:
+        type: integer
+        minimum: 1000
+        maximum: 100000
+      thinking_level:
+        type: string
+        enum: ["low", "medium", "high"]
+      reasoning_effort:
+        type: string
+        enum: ["none", "minimal", "low", "medium", "high", "xhigh"]
+      auth_type:
+        type: string
+      skip_git_check:
+        type: boolean
+        default: false

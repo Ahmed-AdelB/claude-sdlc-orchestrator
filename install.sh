@@ -81,10 +81,13 @@ if [ -d "$CLAUDE_DIR" ]; then
     log_success "Backup created"
 fi
 
-# Create temp directory
-log_info "Creating temporary directory..."
-mkdir -p "$TEMP_DIR"
-cd "$TEMP_DIR"
+# Change to temp directory (mktemp already created it)
+log_info "Changing to temporary directory..."
+if ! cd "$TEMP_DIR"; then
+    log_error "Failed to change to temporary directory: $TEMP_DIR"
+    rm -rf "$TEMP_DIR"
+    exit 1
+fi
 
 # Clone repository
 log_info "Cloning repository from GitHub..."
@@ -92,7 +95,6 @@ if git clone --depth 1 "https://github.com/$REPO.git" . 2>/dev/null; then
     log_success "Repository cloned"
 else
     log_error "Failed to clone repository"
-    rm -rf "$TEMP_DIR"
     exit 1
 fi
 

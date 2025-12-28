@@ -1,0 +1,183 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-route - Intelligently route tasks to the best model
+#===============================================================================
+# Usage:
+#   tri-agent-route "Analyze this codebase"           # Auto-routes to best model
+#   tri-agent-route --claude "Complex architecture"   # Force Claude
+#   tri-agent-route --gemini "Large file analysis"    # Force Gemini
+#   tri-agent-route --codex "Implement feature"       # Force Codex
+#   tri-agent-route --consensus "Critical decision"   # Query all three
+#
+# Auto-routing logic:
+#   - Keywords "analyze", "review", "large", "codebase" → Gemini
+#   - Keywords "implement", "build", "create", "fix" → Codex
+#   - Keywords "architect", "design", "plan", "complex" → Claude
+#   - Default: Claude (as orchestrator)
+#===============================================================================
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+
+# Parse arguments
+FORCE_MODEL=""
+CONSENSUS=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --claude) FORCE_MODEL="claude"; shift ;;
+        --gemini) FORCE_MODEL="gemini"; shift ;;
+        --codex) FORCE_MODEL="codex"; shift ;;
+        --consensus) CONSENSUS=true; shift ;;
+        --help)
+            echo "Usage: tri-agent-route [options] \"prompt\""
+            echo ""
+            echo "Options:"
+            echo "  --claude     Force route to Claude Opus"
+            echo "  --gemini     Force route to Gemini 3 Pro"
+            echo "  --codex      Force route to Codex GPT-5.2"
+            echo "  --consensus  Query all three models and synthesize"
+            echo ""
+            exit 0
+            ;;
+        *) break ;;
+    esac
+done
+
+PROMPT="$*"
+
+if [[ -z "$PROMPT" ]]; then
+    echo "Error: No prompt provided"
+    echo "Usage: tri-agent-route [options] \"prompt\""
+    exit 1
+fi
+
+# Auto-detect best model based on keywords
+detect_best_model() {
+    local prompt_lower=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+
+    # Gemini patterns (large context, analysis)
+    if echo "$prompt_lower" | grep -qE "(analyze|review|audit|scan|entire|codebase|large|100k|document|multimodal|image|pdf|video)"; then
+        echo "gemini"
+        return
+    fi
+
+    # Codex patterns (implementation, rapid coding)
+    if echo "$prompt_lower" | grep -qE "(implement|build|create|generate|write code|fix bug|debug|refactor|prototype|scaffold)"; then
+        echo "codex"
+        return
+    fi
+
+    # Claude patterns (architecture, complex reasoning)
+    if echo "$prompt_lower" | grep -qE "(architect|design|plan|strategy|complex|decision|evaluate|compare|tradeoff|security)"; then
+        echo "claude"
+        return
+    fi
+
+    # Default to Claude
+    echo "claude"
+}
+
+# Execute with selected model
+execute_model() {
+    local model="$1"
+    local prompt="$2"
+
+    case "$model" in
+        claude)
+            echo -e "${BLUE}[ROUTE]${NC} Using Claude Opus 4.5" >&2
+            claude --dangerously-skip-permissions -p "$prompt" 2>&1
+            ;;
+        gemini)
+            echo -e "${GREEN}[ROUTE]${NC} Using Gemini 3 Pro (high thinking)" >&2
+            gemini-ask "$prompt" 2>&1
+            ;;
+        codex)
+            echo -e "${YELLOW}[ROUTE]${NC} Using Codex GPT-5.2 (xhigh reasoning)" >&2
+            codex-ask "$prompt" 2>&1
+            ;;
+    esac
+}
+
+# Consensus mode - query all three models
+run_consensus() {
+    local prompt="$1"
+    local temp_dir=$(mktemp -d)
+
+    echo -e "${MAGENTA}[CONSENSUS]${NC} Querying all three models..." >&2
+    echo ""
+
+    # Run all three in parallel
+    (
+        echo -e "${BLUE}=== CLAUDE OPUS ===${NC}"
+        claude --dangerously-skip-permissions -p "$prompt" 2>&1
+    ) > "$temp_dir/claude.txt" &
+    local claude_pid=$!
+
+    (
+        echo -e "${GREEN}=== GEMINI 3 PRO ===${NC}"
+        gemini-ask "$prompt" 2>&1
+    ) > "$temp_dir/gemini.txt" &
+    local gemini_pid=$!
+
+    (
+        echo -e "${YELLOW}=== CODEX GPT-5.2 ===${NC}"
+        codex-ask "$prompt" 2>&1
+    ) > "$temp_dir/codex.txt" &
+    local codex_pid=$!
+
+    # Wait for all to complete (with timeout)
+    wait $claude_pid 2>/dev/null || true
+    wait $gemini_pid 2>/dev/null || true
+    wait $codex_pid 2>/dev/null || true
+
+    # Output results
+    echo -e "\n${MAGENTA}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${MAGENTA}                    TRI-AGENT CONSENSUS RESULTS                  ${NC}"
+    echo -e "${MAGENTA}════════════════════════════════════════════════════════════════${NC}\n"
+
+    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│                      CLAUDE OPUS 4.5                            │${NC}"
+    echo -e "${BLUE}└─────────────────────────────────────────────────────────────────┘${NC}"
+    cat "$temp_dir/claude.txt"
+    echo ""
+
+    echo -e "${GREEN}┌─────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${GREEN}│                    GEMINI 3 PRO PREVIEW                         │${NC}"
+    echo -e "${GREEN}└─────────────────────────────────────────────────────────────────┘${NC}"
+    cat "$temp_dir/gemini.txt"
+    echo ""
+
+    echo -e "${YELLOW}┌─────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│                     CODEX GPT-5.2                               │${NC}"
+    echo -e "${YELLOW}└─────────────────────────────────────────────────────────────────┘${NC}"
+    cat "$temp_dir/codex.txt"
+    echo ""
+
+    # Cleanup
+    rm -rf "$temp_dir"
+
+    echo -e "${MAGENTA}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${MAGENTA}                    END CONSENSUS RESULTS                        ${NC}"
+    echo -e "${MAGENTA}════════════════════════════════════════════════════════════════${NC}"
+}
+
+# Main execution
+if [[ "$CONSENSUS" == "true" ]]; then
+    run_consensus "$PROMPT"
+elif [[ -n "$FORCE_MODEL" ]]; then
+    execute_model "$FORCE_MODEL" "$PROMPT"
+else
+    # Auto-detect best model
+    BEST_MODEL=$(detect_best_model "$PROMPT")
+    echo -e "${CYAN}[AUTO-ROUTE]${NC} Detected task type → $BEST_MODEL" >&2
+    execute_model "$BEST_MODEL" "$PROMPT"
+fi

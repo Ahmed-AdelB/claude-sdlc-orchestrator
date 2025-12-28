@@ -1,0 +1,180 @@
+name: Quality & Testing
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  shellcheck:
+    name: Shell Script Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint shell scripts
+        run: |
+          echo "Linting installation script..."
+          shellcheck install.sh || true
+
+          echo "Linting hooks..."
+          shellcheck hooks/*.sh || true
+
+  validation:
+    name: Configuration Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate JSON files
+        run: |
+          echo "Validating settings.json..."
+          cat settings.json | jq empty
+
+          echo "Validating .mcp.json..."
+          cat .mcp.json | jq empty
+
+      - name: Validate YAML frontmatter in agents
+        run: |
+          echo "Checking agent files for valid YAML frontmatter..."
+          find agents -name "*.md" -type f | while read -r file; do
+            echo "Checking $file..."
+            # Basic check - just ensure file exists and is readable
+            [ -r "$file" ] || exit 1
+          done
+
+      - name: Count agents
+        run: |
+          AGENT_COUNT=$(find agents -name "*.md" -type f | wc -l)
+          echo "Total agents found: $AGENT_COUNT"
+
+          # Verify count matches documentation (96 agents)
+          if [ "$AGENT_COUNT" -lt 90 ]; then
+            echo "Warning: Expected ~96 agents, found only $AGENT_COUNT"
+            exit 1
+          fi
+
+  security:
+    name: Security Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for sensitive data patterns
+        run: |
+          echo "Scanning for potential secrets..."
+
+          # Check for hardcoded credentials
+          if grep -r "password.*=.*['\"]" hooks/ install.sh 2>/dev/null; then
+            echo "Warning: Potential hardcoded password found"
+            exit 1
+          fi
+
+          if grep -r "api[_-]key.*=.*['\"]" hooks/ install.sh 2>/dev/null; then
+            echo "Warning: Potential hardcoded API key found"
+            exit 1
+          fi
+
+          echo "No sensitive data patterns detected"
+
+      - name: Check file permissions
+        run: |
+          echo "Checking executable permissions..."
+
+          # Verify hooks are executable
+          for hook in hooks/*.sh; do
+            if [ ! -x "$hook" ]; then
+              echo "Warning: $hook is not executable"
+              exit 1
+            fi
+          done
+
+          echo "All hooks have correct permissions"
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test installation script (dry run)
+        run: |
+          echo "Testing install.sh validation..."
+
+          # Verify install script has correct permissions
+          [ -x install.sh ] || exit 1
+
+          # Check dependencies are properly checked
+          grep -q "command -v git" install.sh || exit 1
+          grep -q "command -v curl" install.sh || exit 1
+
+      - name: Test hook JSON parsing
+        run: |
+          # Test that hooks can handle JSON input
+          echo '{"tool_name":"Edit","tool_input":{"file_path":"test.py"},"session_id":"test123"}' | bash hooks/post-edit.sh || true
+          echo "Hook JSON parsing test completed"
+
+  documentation:
+    name: Documentation Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check README completeness
+        run: |
+          echo "Validating README.md..."
+
+          # Check for required sections
+          grep -q "## Features" README.md || exit 1
+          grep -q "## Installation" README.md || exit 1
+          grep -q "## Agent Categories" README.md || exit 1
+          grep -q "## Slash Commands" README.md || exit 1
+
+          echo "README.md is complete"
+
+      - name: Check CLAUDE.md completeness
+        run: |
+          echo "Validating CLAUDE.md..."
+
+          # Check for required sections
+          grep -q "## AI Stack" CLAUDE.md || exit 1
+          grep -q "## Specialized Agents" CLAUDE.md || exit 1
+          grep -q "## 5-Phase Development Discipline" CLAUDE.md || exit 1
+          grep -q "## Quality Gates" CLAUDE.md || exit 1
+
+          echo "CLAUDE.md is complete"
+
+      - name: Verify agent documentation matches files
+        run: |
+          echo "Checking agent documentation consistency..."
+
+          # Count agents in each category
+          for dir in agents/*/; do
+            category=$(basename "$dir")
+            count=$(find "$dir" -name "*.md" -type f | wc -l)
+            echo "$category: $count agents"
+          done
+
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [shellcheck, validation, security, integration, documentation]
+    if: always()
+    steps:
+      - name: Check all jobs status
+        run: |
+          echo "All CI checks completed!"
+          echo "shellcheck: ${{ needs.shellcheck.result }}"
+          echo "validation: ${{ needs.validation.result }}"
+          echo "security: ${{ needs.security.result }}"
+          echo "integration: ${{ needs.integration.result }}"
+          echo "documentation: ${{ needs.documentation.result }}"

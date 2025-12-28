@@ -1,0 +1,177 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # ==========================================
+  # Python Tests
+  # ==========================================
+  python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov
+
+      - name: Run Python tests
+        run: |
+          pytest tests/test_gemini_session.py -v --cov=utils --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.11'
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  # ==========================================
+  # Shell Script Tests
+  # ==========================================
+  shell-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Run bats tests
+        run: |
+          bats tests/test_hooks.bats --tap
+
+  # ==========================================
+  # Linting & Security
+  # ==========================================
+  lint-and-security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on shell scripts
+        run: |
+          shellcheck install.sh || true
+          shellcheck hooks/*.sh || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python linters
+        run: |
+          pip install ruff bandit
+
+      - name: Run ruff (Python linting)
+        run: |
+          ruff check utils/ --ignore E501 || true
+
+      - name: Run bandit (Python security)
+        run: |
+          bandit -r utils/ -ll || true
+
+  # ==========================================
+  # Platform Compatibility
+  # ==========================================
+  platform-tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test install script syntax
+        run: |
+          bash -n install.sh
+          bash -n hooks/pre-commit.sh
+          bash -n hooks/post-edit.sh
+          bash -n hooks/quality-gate.sh
+
+      - name: Test hook file permissions
+        run: |
+          chmod +x hooks/*.sh
+          ls -la hooks/
+
+      - name: Verify Python syntax
+        run: |
+          python3 -m py_compile utils/gemini_session.py
+
+  # ==========================================
+  # Agent & Command Validation
+  # ==========================================
+  validate-agents:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Count agents
+        run: |
+          AGENT_COUNT=$(find agents -name "*.md" -type f | wc -l)
+          echo "Found $AGENT_COUNT agents"
+          if [ "$AGENT_COUNT" -lt 85 ]; then
+            echo "ERROR: Expected 85+ agents, found $AGENT_COUNT"
+            exit 1
+          fi
+
+      - name: Count commands
+        run: |
+          COMMAND_COUNT=$(find commands -name "*.md" -type f | wc -l)
+          echo "Found $COMMAND_COUNT commands"
+          if [ "$COMMAND_COUNT" -lt 20 ]; then
+            echo "ERROR: Expected 20+ commands, found $COMMAND_COUNT"
+            exit 1
+          fi
+
+      - name: Validate agent YAML frontmatter
+        run: |
+          pip install pyyaml
+          python3 -c "
+          import yaml
+          import sys
+          from pathlib import Path
+
+          errors = []
+          for agent_file in Path('agents').rglob('*.md'):
+              content = agent_file.read_text()
+              if content.startswith('---'):
+                  try:
+                      parts = content.split('---', 2)
+                      if len(parts) >= 3:
+                          yaml.safe_load(parts[1])
+                  except yaml.YAMLError as e:
+                      errors.append(f'{agent_file}: {e}')
+
+          if errors:
+              print('YAML validation errors:')
+              for e in errors:
+                  print(f'  - {e}')
+              sys.exit(1)
+          else:
+              print('All agent files have valid YAML frontmatter')
+          "

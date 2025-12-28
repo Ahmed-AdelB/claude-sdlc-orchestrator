@@ -1,0 +1,470 @@
+#!/bin/bash
+#===============================================================================
+# cost-tracker - CLI for usage metrics and cost statistics
+#===============================================================================
+# Usage:
+#   cost-tracker summary         Show overall usage summary
+#   cost-tracker daily [DATE]    Show daily statistics (default: today)
+#   cost-tracker model MODEL     Show statistics for specific model
+#   cost-tracker models          Show all model statistics
+#   cost-tracker range START END Show statistics for date range
+#   cost-tracker reset [TYPE]    Reset statistics (daily/model/all)
+#   cost-tracker record MODEL    Record a request (for testing)
+#   cost-tracker --help          Show this help
+#
+# Note: This tracks usage metrics only. All subscriptions are unlimited.
+#===============================================================================
+
+# Strict mode
+set -eo pipefail
+
+# Script location
+# Resolve symlinks to find actual script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../lib"
+
+# Set required environment variables
+export STATE_DIR="${STATE_DIR:-$HOME/.claude/autonomous/state}"
+export COST_LOG_DIR="${COST_LOG_DIR:-$HOME/.claude/autonomous/logs/costs}"
+export TRACE_ID="${TRACE_ID:-cost-$(date +%Y%m%d%H%M%S)-$$}"
+
+# Ensure directories exist
+mkdir -p "${STATE_DIR}/costs" "$COST_LOG_DIR" 2>/dev/null || true
+
+# Source cost-tracker.sh library directly (avoids common.sh issues)
+if [[ -f "${LIB_DIR}/cost-tracker.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/cost-tracker.sh"
+else
+    echo "Error: cost-tracker.sh library not found at ${LIB_DIR}/cost-tracker.sh" >&2
+    exit 1
+fi
+
+# Colors
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    MAGENTA='\033[0;35m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' MAGENTA='' BOLD='' RESET=''
+fi
+
+#===============================================================================
+# Display Functions
+#===============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}cost-tracker${RESET} - Usage metrics and statistics for tri-agent system
+
+${BOLD}USAGE:${RESET}
+    cost-tracker <COMMAND> [OPTIONS]
+
+${BOLD}COMMANDS:${RESET}
+    summary              Show overall usage summary
+    daily [DATE]         Show daily statistics (default: today)
+    model <NAME>         Show statistics for specific model (claude/gemini/codex)
+    models               Show statistics for all models
+    range <START> <END>  Show statistics for date range (YYYY-MM-DD)
+    reset [TYPE]         Reset statistics:
+                           daily [DATE]  - Reset specific day
+                           model NAME    - Reset specific model
+                           all           - Reset everything
+    record <MODEL>       Record a test request for MODEL
+    --help, -h           Show this help message
+
+${BOLD}EXAMPLES:${RESET}
+    cost-tracker summary
+    cost-tracker daily 2025-12-27
+    cost-tracker model claude
+    cost-tracker range 2025-12-01 2025-12-27
+    cost-tracker reset daily 2025-12-25
+    cost-tracker reset all
+
+${BOLD}NOTE:${RESET}
+    This tracks usage metrics only. All subscriptions ($420/month) are unlimited.
+    Metrics help monitor system health and usage patterns.
+EOF
+}
+
+# Format large numbers with commas
+format_number() {
+    local num="$1"
+    if command -v numfmt &>/dev/null; then
+        echo "$num" | numfmt --grouping
+    elif command -v printf &>/dev/null; then
+        printf "%'d" "$num" 2>/dev/null || echo "$num"
+    else
+        echo "$num"
+    fi
+}
+
+# Format duration in human readable form
+format_duration() {
+    local ms="$1"
+    # Handle empty or non-numeric input
+    if [[ -z "$ms" ]] || ! [[ "$ms" =~ ^[0-9]+$ ]]; then
+        echo "0ms"
+        return
+    fi
+    if [[ $ms -lt 1000 ]]; then
+        echo "${ms}ms"
+    elif [[ $ms -lt 60000 ]]; then
+        # Use awk instead of bc for portability
+        echo "$(awk "BEGIN {printf \"%.2f\", $ms/1000}")s"
+    else
+        local mins=$((ms / 60000))
+        local secs=$(((ms % 60000) / 1000))
+        echo "${mins}m ${secs}s"
+    fi
+}
+
+# Print summary in nice format
+print_summary() {
+    local json="$1"
+
+    echo ""
+    echo -e "${BOLD}${MAGENTA}============================================================${RESET}"
+    echo -e "${BOLD}${MAGENTA}              TRI-AGENT USAGE SUMMARY                       ${RESET}"
+    echo -e "${BOLD}${MAGENTA}============================================================${RESET}"
+    echo ""
+
+    if command -v jq &>/dev/null; then
+        local total_requests total_input total_output
+        total_requests=$(echo "$json" | jq -r '.total_requests // 0')
+        total_input=$(echo "$json" | jq -r '.total_input_tokens // 0')
+        total_output=$(echo "$json" | jq -r '.total_output_tokens // 0')
+        local last_updated
+        last_updated=$(echo "$json" | jq -r '.last_updated // "N/A"')
+
+        echo -e "${BOLD}Overall Statistics:${RESET}"
+        echo -e "  Total Requests:     ${GREEN}$(format_number "$total_requests")${RESET}"
+        echo -e "  Total Input Tokens: ${CYAN}$(format_number "$total_input")${RESET}"
+        echo -e "  Total Output Tokens: ${CYAN}$(format_number "$total_output")${RESET}"
+        echo -e "  Last Updated:       ${last_updated}"
+        echo ""
+
+        echo -e "${BOLD}By Model:${RESET}"
+        echo ""
+
+        # Claude
+        local claude_req claude_in claude_out
+        claude_req=$(echo "$json" | jq -r '.by_model.claude.requests // 0')
+        claude_in=$(echo "$json" | jq -r '.by_model.claude.input_tokens // 0')
+        claude_out=$(echo "$json" | jq -r '.by_model.claude.output_tokens // 0')
+        echo -e "  ${BLUE}Claude Opus 4.5${RESET}"
+        echo -e "    Requests: $(format_number "$claude_req"), Tokens: $(format_number "$claude_in") in / $(format_number "$claude_out") out"
+
+        # Gemini
+        local gemini_req gemini_in gemini_out
+        gemini_req=$(echo "$json" | jq -r '.by_model.gemini.requests // 0')
+        gemini_in=$(echo "$json" | jq -r '.by_model.gemini.input_tokens // 0')
+        gemini_out=$(echo "$json" | jq -r '.by_model.gemini.output_tokens // 0')
+        echo -e "  ${GREEN}Gemini 3 Pro${RESET}"
+        echo -e "    Requests: $(format_number "$gemini_req"), Tokens: $(format_number "$gemini_in") in / $(format_number "$gemini_out") out"
+
+        # Codex
+        local codex_req codex_in codex_out
+        codex_req=$(echo "$json" | jq -r '.by_model.codex.requests // 0')
+        codex_in=$(echo "$json" | jq -r '.by_model.codex.input_tokens // 0')
+        codex_out=$(echo "$json" | jq -r '.by_model.codex.output_tokens // 0')
+        echo -e "  ${YELLOW}Codex GPT-5.2${RESET}"
+        echo -e "    Requests: $(format_number "$codex_req"), Tokens: $(format_number "$codex_in") in / $(format_number "$codex_out") out"
+    else
+        echo "$json"
+    fi
+
+    echo ""
+    echo -e "${BOLD}${MAGENTA}============================================================${RESET}"
+    echo -e "  Note: Subscription-based unlimited usage ($420/month)"
+    echo -e "${BOLD}${MAGENTA}============================================================${RESET}"
+    echo ""
+}
+
+# Print daily stats in nice format
+print_daily() {
+    local json="$1"
+    local date_str="$2"
+
+    echo ""
+    echo -e "${BOLD}${CYAN}============================================================${RESET}"
+    echo -e "${BOLD}${CYAN}           DAILY USAGE: ${date_str}                         ${RESET}"
+    echo -e "${BOLD}${CYAN}============================================================${RESET}"
+    echo ""
+
+    if command -v jq &>/dev/null; then
+        local total_requests
+        total_requests=$(echo "$json" | jq -r '.total_requests // 0')
+
+        if [[ "$total_requests" == "0" ]]; then
+            echo -e "  ${YELLOW}No usage recorded for this date${RESET}"
+        else
+            echo -e "${BOLD}Summary:${RESET}"
+            echo -e "  Total Requests:     ${GREEN}$(format_number "$total_requests")${RESET}"
+            echo -e "  Input Tokens:       $(format_number "$(echo "$json" | jq -r '.total_input_tokens // 0')")"
+            echo -e "  Output Tokens:      $(format_number "$(echo "$json" | jq -r '.total_output_tokens // 0')")"
+            echo ""
+
+            echo -e "${BOLD}By Model:${RESET}"
+            echo "$json" | jq -r '.models | to_entries[] | "  \(.key): \(.value.requests) requests, \(.value.input_tokens) in / \(.value.output_tokens) out"' 2>/dev/null || true
+        fi
+    else
+        echo "$json"
+    fi
+
+    echo ""
+    echo -e "${CYAN}============================================================${RESET}"
+    echo ""
+}
+
+# Print model stats in nice format
+print_model() {
+    local json="$1"
+    local model="$2"
+
+    local display_name
+    case "$model" in
+        claude) display_name="Claude Opus 4.5" ; color="$BLUE" ;;
+        gemini) display_name="Gemini 3 Pro" ; color="$GREEN" ;;
+        codex)  display_name="Codex GPT-5.2" ; color="$YELLOW" ;;
+        *)      display_name="$model" ; color="$CYAN" ;;
+    esac
+
+    echo ""
+    echo -e "${BOLD}${color}============================================================${RESET}"
+    echo -e "${BOLD}${color}           MODEL STATS: ${display_name}                      ${RESET}"
+    echo -e "${BOLD}${color}============================================================${RESET}"
+    echo ""
+
+    if command -v jq &>/dev/null; then
+        echo -e "${BOLD}Lifetime Statistics:${RESET}"
+        echo -e "  Total Requests:     ${GREEN}$(format_number "$(echo "$json" | jq -r '.total_requests // 0')")${RESET}"
+        echo -e "  Input Tokens:       $(format_number "$(echo "$json" | jq -r '.total_input_tokens // 0')")"
+        echo -e "  Output Tokens:      $(format_number "$(echo "$json" | jq -r '.total_output_tokens // 0')")"
+
+        local total_duration avg_duration
+        total_duration=$(echo "$json" | jq -r '.total_duration_ms // 0')
+        avg_duration=$(echo "$json" | jq -r '.avg_duration_ms // 0' | cut -d'.' -f1)
+        echo -e "  Total Duration:     $(format_duration "$total_duration")"
+        echo -e "  Avg Duration:       $(format_duration "$avg_duration")"
+
+        local last_used
+        last_used=$(echo "$json" | jq -r '.last_used // "Never"')
+        echo -e "  Last Used:          ${last_used}"
+    else
+        echo "$json"
+    fi
+
+    echo ""
+    echo -e "${color}============================================================${RESET}"
+    echo ""
+}
+
+#===============================================================================
+# Command Handlers
+#===============================================================================
+
+cmd_summary() {
+    local json
+    json=$(get_usage_summary)
+    print_summary "$json"
+}
+
+cmd_daily() {
+    local date_str="${1:-$(date +%Y-%m-%d)}"
+    local json
+    json=$(get_daily_stats "$date_str")
+    print_daily "$json" "$date_str"
+}
+
+cmd_model() {
+    local model="$1"
+    if [[ -z "$model" ]]; then
+        echo -e "${RED}Error: Model name required${RESET}" >&2
+        echo "Usage: cost-tracker model <claude|gemini|codex>" >&2
+        exit 1
+    fi
+
+    # Normalize
+    case "$model" in
+        claude|opus)   model="claude" ;;
+        gemini|pro)    model="gemini" ;;
+        codex|gpt)     model="codex" ;;
+    esac
+
+    local json
+    json=$(get_model_stats "$model")
+    print_model "$json" "$model"
+}
+
+cmd_models() {
+    local models=("claude" "gemini" "codex")
+    for model in "${models[@]}"; do
+        local json
+        json=$(get_model_stats "$model")
+        print_model "$json" "$model"
+    done
+}
+
+cmd_range() {
+    local start_date="$1"
+    local end_date="${2:-$(date +%Y-%m-%d)}"
+
+    if [[ -z "$start_date" ]]; then
+        echo -e "${RED}Error: Start date required${RESET}" >&2
+        echo "Usage: cost-tracker range <START_DATE> [END_DATE]" >&2
+        exit 1
+    fi
+
+    local json
+    json=$(get_range_stats "$start_date" "$end_date")
+
+    echo ""
+    echo -e "${BOLD}${MAGENTA}============================================================${RESET}"
+    echo -e "${BOLD}${MAGENTA}      USAGE RANGE: ${start_date} to ${end_date}             ${RESET}"
+    echo -e "${BOLD}${MAGENTA}============================================================${RESET}"
+    echo ""
+
+    if command -v jq &>/dev/null; then
+        echo -e "${BOLD}Summary:${RESET}"
+        echo -e "  Total Requests:     ${GREEN}$(format_number "$(echo "$json" | jq -r '.total_requests // 0')")${RESET}"
+        echo -e "  Input Tokens:       $(format_number "$(echo "$json" | jq -r '.total_input_tokens // 0')")"
+        echo -e "  Output Tokens:      $(format_number "$(echo "$json" | jq -r '.total_output_tokens // 0')")"
+    else
+        echo "$json"
+    fi
+
+    echo ""
+    echo -e "${MAGENTA}============================================================${RESET}"
+    echo ""
+}
+
+cmd_reset() {
+    local reset_type="$1"
+    local target="$2"
+
+    case "$reset_type" in
+        daily)
+            reset_daily_stats "${target:-$(date +%Y-%m-%d)}"
+            echo -e "${GREEN}Daily stats reset${RESET}"
+            ;;
+        model)
+            if [[ -z "$target" ]]; then
+                echo -e "${RED}Error: Model name required${RESET}" >&2
+                echo "Usage: cost-tracker reset model <claude|gemini|codex>" >&2
+                exit 1
+            fi
+            reset_model_stats "$target"
+            echo -e "${GREEN}Model stats reset: ${target}${RESET}"
+            ;;
+        all)
+            echo -e "${YELLOW}Warning: This will reset ALL usage statistics!${RESET}"
+            read -p "Are you sure? [y/N] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                reset_all_stats
+                echo -e "${GREEN}All stats reset${RESET}"
+            else
+                echo "Cancelled"
+            fi
+            ;;
+        *)
+            echo -e "${RED}Error: Invalid reset type${RESET}" >&2
+            echo "Usage: cost-tracker reset <daily|model|all> [target]" >&2
+            exit 1
+            ;;
+    esac
+}
+
+cmd_record() {
+    local model="$1"
+    local input_tokens="${2:-100}"
+    local output_tokens="${3:-50}"
+    local duration="${4:-500}"
+
+    if [[ -z "$model" ]]; then
+        echo -e "${RED}Error: Model name required${RESET}" >&2
+        echo "Usage: cost-tracker record <model> [input_tokens] [output_tokens] [duration_ms]" >&2
+        exit 1
+    fi
+
+    record_request "$model" "$input_tokens" "$output_tokens" "$duration" "test"
+    echo -e "${GREEN}Recorded test request for ${model}${RESET}"
+    echo "  Input tokens: ${input_tokens}"
+    echo "  Output tokens: ${output_tokens}"
+    echo "  Duration: ${duration}ms"
+}
+
+cmd_json() {
+    local subcommand="$1"
+    shift || true
+
+    case "$subcommand" in
+        summary)  get_usage_summary ;;
+        daily)    get_daily_stats "${1:-}" ;;
+        model)    get_model_stats "${1:-claude}" ;;
+        models)   get_all_model_stats ;;
+        range)    get_range_stats "${1:-}" "${2:-}" ;;
+        *)
+            echo '{"error": "Unknown subcommand"}' >&2
+            exit 1
+            ;;
+    esac
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+
+main() {
+    local command="${1:-summary}"
+    shift || true
+
+    case "$command" in
+        summary)
+            cmd_summary
+            ;;
+        daily)
+            cmd_daily "$@"
+            ;;
+        model)
+            cmd_model "$@"
+            ;;
+        models)
+            cmd_models
+            ;;
+        range)
+            cmd_range "$@"
+            ;;
+        reset)
+            cmd_reset "$@"
+            ;;
+        record)
+            cmd_record "$@"
+            ;;
+        json)
+            cmd_json "$@"
+            ;;
+        --help|-h|help)
+            show_help
+            ;;
+        *)
+            echo -e "${RED}Error: Unknown command '${command}'${RESET}" >&2
+            echo "Run 'cost-tracker --help' for usage" >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,56 @@
+#===============================================================================
+# claude-autonomous.service - Systemd service for 24/7 Claude Code operation
+#===============================================================================
+# Installation:
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/.claude/autonomous/claude-autonomous.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable claude-autonomous
+#   systemctl --user start claude-autonomous
+#
+# Management:
+#   systemctl --user status claude-autonomous
+#   systemctl --user stop claude-autonomous
+#   systemctl --user restart claude-autonomous
+#   journalctl --user -u claude-autonomous -f
+#
+# Note: For 24/7 operation across logouts, enable lingering:
+#   sudo loginctl enable-linger $USER
+#===============================================================================
+
+[Unit]
+Description=Claude Code Autonomous Session
+Documentation=https://claude.ai/code
+After=network.target
+
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=CLAUDE_AUTONOMOUS_MODE=true
+Environment=ANTHROPIC_MODEL=opus
+
+# Working directory (change to your project)
+WorkingDirectory=%h/projects
+
+# Start tmux session with Claude
+ExecStart=/usr/bin/tmux new-session -d -s claude-autonomous -c %h/projects "claude --dangerously-skip-permissions --settings %h/.claude/autonomous/settings-autonomous.json"
+
+# Alternative: Use the launcher script
+# ExecStart=%h/.claude/autonomous/claude-24h.sh %h/projects
+
+# Restart policy
+Restart=on-failure
+RestartSec=30
+
+# Keep the session alive
+RemainAfterExit=yes
+
+# Stop gracefully
+ExecStop=/usr/bin/tmux kill-session -t claude-autonomous
+
+# Timeout settings
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
