@@ -559,5 +559,6 @@ export -f _validate_numeric
 # Performance: Mark Initialization Complete (#performance)
 # =============================================================================
 # This prevents redundant initialization when common.sh is sourced multiple times
+# in the SAME shell. NOT exported to preserve child process initialization.
 _COMMON_SH_INITIALIZED=1
-export _COMMON_SH_INITIALIZED
+# Note: Intentionally NOT exported - child processes need their own initialization
