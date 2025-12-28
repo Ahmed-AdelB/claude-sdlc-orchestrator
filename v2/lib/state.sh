@@ -95,8 +95,9 @@ with_lock() {
     # Try to acquire exclusive lock (blocks until available)
     if ! flock -x "$fd"; then
         log_error "[${TRACE_ID:-unknown}] Failed to acquire lock: ${lock_name}" 2>/dev/null || true
-        exec {fd}>&-
-        _unregister_lock_fd "$fd"
+        local fd_num="$fd"
+        _unregister_lock_fd "$fd_num"
+        exec {fd_num}>&- 2>/dev/null || true
         return 1
     fi
 
@@ -104,8 +105,9 @@ with_lock() {
     "$@" || result=$?
 
     # Lock is automatically released when fd is closed
-    exec {fd}>&-
-    _unregister_lock_fd "$fd"
+    local fd_num="$fd"
+    _unregister_lock_fd "$fd_num"
+    exec {fd_num}>&- 2>/dev/null || true
 
     return $result
 }
@@ -139,9 +141,10 @@ release_lock() {
     if [[ -z "$fd" ]]; then
         return 0
     fi
-    exec {fd}>&- 2>/dev/null || true
-    _unregister_lock_fd "$fd"
-    if [[ "${LAST_LOCK_FD:-}" == "$fd" ]]; then
+    local fd_num="$fd"
+    _unregister_lock_fd "$fd_num"
+    exec {fd_num}>&- 2>/dev/null || true
+    if [[ "${LAST_LOCK_FD:-}" == "$fd_num" ]]; then
         LAST_LOCK_FD=""
     fi
 }
@@ -165,16 +168,18 @@ with_lock_timeout() {
     # Try to acquire lock with timeout
     if ! flock -x -w "${timeout}" "$fd"; then
         log_error "Lock timeout after ${timeout}s: ${lock_name}"
-        exec {fd}>&-
-        _unregister_lock_fd "$fd"
+        local fd_num="$fd"
+        _unregister_lock_fd "$fd_num"
+        exec {fd_num}>&- 2>/dev/null || true
         return 1
     fi
 
     local result=0
     "$@" || result=$?
 
-    exec {fd}>&-
-    _unregister_lock_fd "$fd"
+    local fd_num="$fd"
+    _unregister_lock_fd "$fd_num"
+    exec {fd_num}>&- 2>/dev/null || true
     return $result
 }
 
@@ -295,18 +300,28 @@ safe_read() {
 atomic_increment() {
     local file="$1"
     local lock_name
-    local result
+    local result_file
+    local dest_dir
 
     # Use hash of full path to avoid collisions (#85 fix)
     lock_name="$(_lock_name_for_path "counter" "$file")"
 
-    # Use a wrapper to ensure output is properly captured (#85)
-    result=$(with_lock "$lock_name" _do_increment "$file")
-    echo "$result"
+    dest_dir="$(dirname "$file")"
+    mkdir -p "$dest_dir"
+
+    result_file="$(mktemp -p "$dest_dir" ".counter.tmp.XXXXXXXXXX")" || return 1
+    trap "rm -f '$result_file' 2>/dev/null || true" RETURN
+
+    if ! with_lock "$lock_name" _do_increment "$file" "$result_file"; then
+        return 1
+    fi
+
+    cat "$result_file"
 }
 
 _do_increment() {
     local file="$1"
+    local result_file="$2"
     local current=0
 
     mkdir -p "$(dirname "$file")"
@@ -324,8 +339,8 @@ _do_increment() {
     local new=$((current + 1))
     atomic_write "$file" "$new"
 
-    # Return new value
-    echo "$new"
+    # Return new value via file to avoid subshell timing issues
+    printf '%s\n' "$new" > "$result_file"
 }
 
 # =============================================================================
@@ -366,11 +381,13 @@ _do_state_set() {
     local key="$2"
     local value="$3"
     local tmp
+    local dest_dir
 
-    mkdir -p "$(dirname "$file")"
+    dest_dir="$(dirname "$file")"
+    mkdir -p "$dest_dir"
 
     # Create new content with updated key
-    tmp="$(mktemp)" || return 1
+    tmp="$(mktemp -p "$dest_dir" ".$(basename "$file").tmp.XXXXXXXXXX")" || return 1
 
     # Ensure cleanup on error
     trap "rm -f '$tmp' 2>/dev/null || true" RETURN
@@ -407,8 +424,10 @@ _do_state_delete() {
     local file="$1"
     local key="$2"
     local tmp
+    local dest_dir
 
-    tmp="$(mktemp)" || return 1
+    dest_dir="$(dirname "$file")"
+    tmp="$(mktemp -p "$dest_dir" ".$(basename "$file").tmp.XXXXXXXXXX")" || return 1
     trap "rm -f '$tmp' 2>/dev/null || true" RETURN
 
     grep -v -E "^${key}=" "$file" > "$tmp" 2>/dev/null || true

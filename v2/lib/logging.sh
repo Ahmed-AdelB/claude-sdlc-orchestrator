@@ -80,12 +80,13 @@ EOF
 )
 
     # Write to session log (append)
-    echo "$log_entry" >> "$SESSION_LOG"
+    (flock -x 200; echo "$log_entry" >> "$SESSION_LOG") 200>"${SESSION_LOG}.lock"
 
     # Also write errors to error log
     if [[ "$level" == "ERROR" || "$level" == "FATAL" ]]; then
         mkdir -p "$ERROR_LOG_DIR"
-        echo "$log_entry" >> "${ERROR_LOG_DIR}/$(date +%Y-%m-%d).jsonl"
+        local error_log_file="${ERROR_LOG_DIR}/$(date +%Y-%m-%d).jsonl"
+        (flock -x 200; echo "$log_entry" >> "$error_log_file") 200>"${error_log_file}.lock"
     fi
 
     # Terminal output (human-readable) if not in quiet mode
@@ -257,7 +258,8 @@ log_audit() {
     local audit_entry
     audit_entry="{\"timestamp\":\"${timestamp}\",\"trace_id\":\"${TRACE_ID}\",\"model\":\"${model}\",\"prompt_hash\":\"${prompt_hash}\",\"response_hash\":\"${response_hash}\",\"token_estimate\":${token_estimate}}"
 
-    echo "$audit_entry" >> "${AUDIT_LOG_DIR}/$(date +%Y-%m-%d).jsonl"
+    local audit_log_file="${AUDIT_LOG_DIR}/$(date +%Y-%m-%d).jsonl"
+    (flock -x 200; echo "$audit_entry" >> "$audit_log_file") 200>"${audit_log_file}.lock"
 }
 
 # Generate SHA256 hash of content (for audit)

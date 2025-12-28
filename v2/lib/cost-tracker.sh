@@ -85,6 +85,29 @@ _get_totals_file() {
 # Recording Functions
 # =============================================================================
 
+# Validate numeric fields (non-negative integers only)
+_validate_numeric() {
+    local value="$1"
+    local field="$2"
+
+    if [[ -z "$value" ]]; then
+        echo "0"
+        return 1
+    fi
+
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "$value"
+        return 0
+    fi
+
+    if declare -f log_warn &>/dev/null; then
+        log_warn "[${TRACE_ID:-unknown}] Invalid numeric value for ${field}: ${value}. Defaulting to 0." 2>/dev/null || true
+    fi
+
+    echo "0"
+    return 1
+}
+
 # Record a request for a model
 # Usage: record_request MODEL [INPUT_TOKENS] [OUTPUT_TOKENS] [DURATION_MS] [TASK_TYPE]
 record_request() {
@@ -98,6 +121,10 @@ record_request() {
 
     timestamp="$(date -Iseconds)"
     date_str="$(date +%Y-%m-%d)"
+
+    input_tokens="$(_validate_numeric "$input_tokens" "input_tokens")"
+    output_tokens="$(_validate_numeric "$output_tokens" "output_tokens")"
+    duration_ms="$(_validate_numeric "$duration_ms" "duration_ms")"
 
     # Normalize model name
     case "$model" in
@@ -341,6 +368,38 @@ _perform_totals_update() {
             .by_model[$model].output_tokens = (((.by_model[$model].output_tokens) // 0) + $output) |\
             .last_updated = (now | todate)
             ' > "${stats_file}.tmp" && mv "${stats_file}.tmp" "$stats_file"
+    elif command -v python3 &>/dev/null; then
+        python3 - "$existing" "$model" "$input_tokens" "$output_tokens" "$duration_ms" "$stats_file" <<'PYEOF'
+import json
+import sys
+from datetime import datetime
+
+existing = json.loads(sys.argv[1]) if sys.argv[1] != '{}' else {}
+model = sys.argv[2]
+input_t = int(sys.argv[3])
+output_t = int(sys.argv[4])
+duration = int(sys.argv[5])
+out_file = sys.argv[6]
+
+existing['total_requests'] = existing.get('total_requests', 0) + 1
+existing['total_input_tokens'] = existing.get('total_input_tokens', 0) + input_t
+existing['total_output_tokens'] = existing.get('total_output_tokens', 0) + output_t
+existing['total_duration_ms'] = existing.get('total_duration_ms', 0) + duration
+
+by_model = existing.get('by_model', {})
+if model not in by_model:
+    by_model[model] = {'requests': 0, 'input_tokens': 0, 'output_tokens': 0}
+
+by_model[model]['requests'] += 1
+by_model[model]['input_tokens'] += input_t
+by_model[model]['output_tokens'] += output_t
+
+existing['by_model'] = by_model
+existing['last_updated'] = datetime.utcnow().isoformat() + 'Z'
+
+with open(out_file, 'w') as f:
+    json.dump(existing, f, indent=2)
+PYEOF
     fi
 }
 

@@ -432,6 +432,7 @@ execute_with_fallback_chain() {
     local i
     local model
     local errexit_set=0
+    local round_started=false
 
     # Get current retry count for this task (#78 fix)
     task_retries=$(get_task_retry_count "$task_id")
@@ -454,13 +455,18 @@ execute_with_fallback_chain() {
             continue
         fi
 
-        # Check retry budget per task (#78 fix)
-        if [[ $task_retries -ge $EH_RETRY_BUDGET ]]; then
-            log_error "[${TRACE_ID:-unknown}] Task retry budget exhausted ($task_retries/$EH_RETRY_BUDGET)" 2>/dev/null || true
-            return 1
+        if [[ "$round_started" == "false" ]]; then
+            # Check retry budget once per fallback round (#78 fix)
+            if [[ $task_retries -ge $EH_RETRY_BUDGET ]]; then
+                log_error "[${TRACE_ID:-unknown}] Task retry budget exhausted ($task_retries/$EH_RETRY_BUDGET)" 2>/dev/null || true
+                return 1
+            fi
+
+            task_retries=$(increment_task_retry_count "$task_id")
+            round_started=true
         fi
 
-        log_info "[${TRACE_ID:-unknown}] Trying model: $model (attempt $((task_retries + 1))/$EH_RETRY_BUDGET)" 2>/dev/null || true
+        log_info "[${TRACE_ID:-unknown}] Trying model: $model (attempt ${task_retries}/$EH_RETRY_BUDGET)" 2>/dev/null || true
 
         # Execute with the model (disable set -e for error capture)
         if [[ $errexit_set -eq 1 ]]; then
@@ -488,9 +494,6 @@ execute_with_fallback_chain() {
         if [[ "$error_type" == "RATE_LIMIT" ]]; then
             record_rate_limit "$model" 60
         fi
-
-        # Increment task retry count (#78 fix)
-        task_retries=$(increment_task_retry_count "$task_id")
 
         # Log fallback
         next_model="${models[$((${#models[@]} - 1))]}"
@@ -531,17 +534,30 @@ detect_auth_expiry() {
 # Trigger auth refresh (placeholder - implement per model)
 trigger_auth_refresh() {
     local model="$1"
+    local auth_dir="${STATE_DIR}/auth_needed"
+    local marker_file="${auth_dir}/${model}"
 
     log_warn "[${TRACE_ID:-unknown}] Auth refresh needed for $model" 2>/dev/null || true
+    mkdir -p "$auth_dir" 2>/dev/null || true
+    : > "$marker_file" 2>/dev/null || true
 
     case "$model" in
         gemini)
-            log_info "[${TRACE_ID:-unknown}] Run 'gemini' interactively to re-authenticate" 2>/dev/null || true
+            if command -v gemini >/dev/null 2>&1; then
+                gemini --refresh-auth 2>/dev/null || true
+            else
+                log_info "[${TRACE_ID:-unknown}] Run 'gemini' interactively to re-authenticate" 2>/dev/null || true
+            fi
             ;;
         codex)
-            log_info "[${TRACE_ID:-unknown}] Run 'codex auth' to re-authenticate" 2>/dev/null || true
+            if command -v codex >/dev/null 2>&1; then
+                codex auth --refresh 2>/dev/null || true
+            else
+                log_info "[${TRACE_ID:-unknown}] Run 'codex auth' to re-authenticate" 2>/dev/null || true
+            fi
             ;;
         claude)
+            rm -f "$marker_file" 2>/dev/null || true
             log_info "[${TRACE_ID:-unknown}] Claude Code should auto-authenticate" 2>/dev/null || true
             ;;
     esac

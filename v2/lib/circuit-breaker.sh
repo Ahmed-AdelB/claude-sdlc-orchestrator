@@ -51,7 +51,7 @@ EOF
     fi
 }
 
-# Read breaker state (with locking to prevent race conditions)
+# Read breaker state (atomic file read)
 _read_breaker_state() {
     local model="$1"
     local state_file
@@ -88,7 +88,7 @@ _get_failure_count() {
     fi
 }
 
-# Update breaker state atomically (#82 fix - use atomic_write for consistency)
+# Update breaker state atomically (caller must hold lock)
 _update_breaker_state() {
     local model="$1"
     local new_state="$2"
@@ -98,19 +98,29 @@ _update_breaker_state() {
     local half_open_calls="${6:-0}"
     local state_file
     local content
+    local tmp_file
 
     state_file="$(_get_breaker_file "$model")"
 
     mkdir -p "$BREAKERS_DIR"
 
-    # Use atomic_write from state.sh for unified locking mechanism (#82)
     content="state=${new_state}
 failure_count=${new_failure_count}
 last_failure=${last_failure}
 last_success=${last_success}
 half_open_calls=${half_open_calls}"
 
-    atomic_write "$state_file" "$content"
+    # Direct atomic write (caller holds lock)
+    # Use mktemp in the same directory to ensure atomic mv is possible
+    tmp_file=$(mktemp -p "$BREAKERS_DIR") || return 1
+    chmod 600 "$tmp_file"
+
+    if printf "%s\n" "$content" > "$tmp_file"; then
+        mv "$tmp_file" "$state_file" || rm -f "$tmp_file"
+    else
+        rm -f "$tmp_file"
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -383,6 +393,13 @@ record_result() {
 # Get circuit breaker status for a model
 get_breaker_status() {
     local model="$1"
+    local lock_name="breaker_${model}"
+
+    with_lock "$lock_name" _get_breaker_status_locked "$model"
+}
+
+_get_breaker_status_locked() {
+    local model="$1"
     local state_file
     local state
     local failure_count
@@ -412,9 +429,29 @@ get_breaker_status() {
         half_open_calls=0
     fi
 
+    if ! [[ "$failure_count" =~ ^[0-9]+$ ]]; then
+        failure_count=0
+    fi
+    if ! [[ "$last_failure" =~ ^[0-9]+$ ]]; then
+        last_failure=0
+    fi
+    if ! [[ "$last_success" =~ ^[0-9]+$ ]]; then
+        last_success=0
+    fi
+    if ! [[ "$half_open_calls" =~ ^[0-9]+$ ]]; then
+        half_open_calls=0
+    fi
+
     now=$(date +%s)
     since_failure=$((now - last_failure))
     since_success=$((now - last_success))
+
+    if [[ $since_failure -lt 0 ]]; then
+        since_failure=0
+    fi
+    if [[ $since_success -lt 0 ]]; then
+        since_success=0
+    fi
 
     cat <<EOF
 {
@@ -434,6 +471,7 @@ EOF
 get_all_breaker_status() {
     local models=("claude" "gemini" "codex")
     local first=true
+    local model
 
     echo "["
     for model in "${models[@]}"; do
@@ -450,6 +488,7 @@ get_all_breaker_status() {
 # Check if any breakers are open
 any_breakers_open() {
     local models=("claude" "gemini" "codex")
+    local model
 
     for model in "${models[@]}"; do
         local state
@@ -466,6 +505,7 @@ any_breakers_open() {
 get_available_models() {
     local models=("claude" "gemini" "codex")
     local available=()
+    local model
 
     for model in "${models[@]}"; do
         if should_call_model "$model"; then
@@ -474,7 +514,7 @@ get_available_models() {
     done
 
     # Return as comma-separated list
-    IFS=,
+    local IFS=,
     echo "${available[*]}"
 }
 
@@ -484,6 +524,13 @@ get_available_models() {
 
 # Force reset a circuit breaker to CLOSED
 reset_breaker() {
+    local model="$1"
+    local lock_name="breaker_${model}"
+
+    with_lock "$lock_name" _reset_breaker_locked "$model"
+}
+
+_reset_breaker_locked() {
     local model="$1"
     local now
 
@@ -496,6 +543,7 @@ reset_breaker() {
 # Reset all circuit breakers
 reset_all_breakers() {
     local models=("claude" "gemini" "codex")
+    local model
 
     for model in "${models[@]}"; do
         reset_breaker "$model"
@@ -535,13 +583,23 @@ load_breaker_config() {
 # Export Functions
 # =============================================================================
 export -f should_call_model
+export -f _should_call_model_locked
 export -f record_success
+export -f _record_success_locked
 export -f record_failure
+export -f _record_failure_locked
 export -f record_result
 export -f get_breaker_status
+export -f _get_breaker_status_locked
 export -f get_all_breaker_status
 export -f any_breakers_open
 export -f get_available_models
 export -f reset_breaker
+export -f _reset_breaker_locked
 export -f reset_all_breakers
 export -f load_breaker_config
+export -f _get_breaker_file
+export -f _init_breaker
+export -f _read_breaker_state
+export -f _get_failure_count
+export -f _update_breaker_state
