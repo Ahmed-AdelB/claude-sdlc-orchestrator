@@ -127,8 +127,11 @@ check_codex_auth() {
     # Check for config file
     local config_file="$HOME/.codex/config.toml"
     if [[ -f "$config_file" ]]; then
-        # Check for API key in environment
+        # Check for API key in environment OR CLI subscription auth
         if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            echo "ok"
+        elif codex --version &>/dev/null; then
+            # Codex CLI subscription - authenticated via OAuth/session
             echo "ok"
         else
             echo "no_api_key"

@@ -18,10 +18,19 @@ ALLOWED_CHARS_PATTERN='[a-zA-Z0-9_\-\.\s\/\:\,\"\{\}\[\]\=\+]'
 # SEC-009C: Resource limits to prevent DoS via unbounded JSON parsing
 # MAX_JSON_SIZE_BYTES: General JSON size limit (default 1MB)
 # MAX_TASK_SIZE_BYTES: Task-specific payload limit (default 100KB) - more restrictive
-readonly MAX_JSON_SIZE_BYTES="${MAX_JSON_SIZE_BYTES:-1048576}"   # 1MB = 1048576 bytes
-readonly MAX_TASK_SIZE_BYTES="${MAX_TASK_SIZE_BYTES:-102400}"    # 100KB task payload limit
-readonly MAX_JSON_DEPTH="${MAX_JSON_DEPTH:-10}"                  # Maximum nesting depth
-readonly MAX_ARRAY_ITEMS="${MAX_ARRAY_ITEMS:-1000}"              # Maximum array elements
+# Guard against re-sourcing: only set readonly if not already defined
+if [[ -z "${MAX_JSON_SIZE_BYTES:-}" ]]; then
+    readonly MAX_JSON_SIZE_BYTES="${MAX_JSON_SIZE_BYTES:-1048576}"   # 1MB = 1048576 bytes
+fi
+if [[ -z "${MAX_TASK_SIZE_BYTES:-}" ]]; then
+    readonly MAX_TASK_SIZE_BYTES="${MAX_TASK_SIZE_BYTES:-102400}"    # 100KB task payload limit
+fi
+if [[ -z "${MAX_JSON_DEPTH:-}" ]]; then
+    readonly MAX_JSON_DEPTH="${MAX_JSON_DEPTH:-10}"                  # Maximum nesting depth
+fi
+if [[ -z "${MAX_ARRAY_ITEMS:-}" ]]; then
+    readonly MAX_ARRAY_ITEMS="${MAX_ARRAY_ITEMS:-1000}"              # Maximum array elements
+fi
 
 # Dangerous patterns for detection (using grep -E compatible patterns)
 declare -a DANGEROUS_PATTERNS=(

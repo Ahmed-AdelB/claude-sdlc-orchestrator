@@ -76,8 +76,8 @@ test_constants_defined() {
     if [[ -z "${MAX_JSON_DEPTH:-}" ]]; then
         echo "  MAX_JSON_DEPTH not defined"
         passed=false
-    elif [[ "$MAX_JSON_DEPTH" != "20" ]]; then
-        echo "  MAX_JSON_DEPTH should be 20, got: $MAX_JSON_DEPTH"
+    elif [[ "$MAX_JSON_DEPTH" != "10" ]]; then
+        echo "  MAX_JSON_DEPTH should be 10, got: $MAX_JSON_DEPTH"
         passed=false
     fi
 
