@@ -1,24 +1,40 @@
 #!/bin/bash
 #===============================================================================
-# tri-agent-queue-watcher - Queue-to-SQLite Bridge Daemon (M1-002 v2.1)
+# tri-agent-queue-watcher - Queue-to-SQLite Bridge Daemon (M1-002)
 #===============================================================================
 # Features:
-# - Monitors file-based task queue (tasks/queue/)
-# - Bridges tasks into SQLite automatically
-# - inotifywait support with polling fallback
-# - Priority extraction from filename, frontmatter, or directory
-# - Idempotent task creation (no duplicates)
-# - Bidirectional sync verification
-# - Graceful shutdown with signal handling
-# - Comprehensive error handling and logging
+# - M1-002: Watches filesystem queue and syncs to SQLite
+# - Inotify-based monitoring (with polling fallback)
+# - Priority detection from filename and directory
+# - Task metadata extraction from file content
+# - Atomic registration via sqlite_state_init
+# - Daemon mode with PID management
+# - SIGTERM graceful shutdown
+#
+# Purpose:
+# This daemon bridges the gap between filesystem-based task creation
+# (e.g., dropping .md files into tasks/queue/) and SQLite-based task
+# management. It ensures all tasks are registered in SQLite for proper
+# claiming by workers.
+#
+# Supported Patterns:
+# - tasks/queue/*.md           -> MEDIUM priority
+# - tasks/queue/CRITICAL/*.md  -> CRITICAL priority
+# - tasks/queue/HIGH/*.md      -> HIGH priority
+# - tasks/queue/MEDIUM/*.md    -> MEDIUM priority
+# - tasks/queue/LOW/*.md       -> LOW priority
+# - CRITICAL_*.md prefix       -> CRITICAL priority (overrides dir)
+# - HIGH_*.md prefix           -> HIGH priority
+#
+# Usage:
+#   tri-agent-queue-watcher           # Start daemon
+#   tri-agent-queue-watcher --once    # Single sync and exit
+#   tri-agent-queue-watcher --status  # Show sync status
 #===============================================================================
 
 set -euo pipefail
-IFS=$'\n\t'
 
-# =============================================================================
-# Path Resolution
-# =============================================================================
+# Resolve paths
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT_PATH" ]]; do
     SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
@@ -28,771 +44,534 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
-# =============================================================================
-# Source Common Utilities
-# =============================================================================
-if [[ -f "${AUTONOMOUS_ROOT}/lib/common.sh" ]]; then
-    # shellcheck source=/dev/null
-    source "${AUTONOMOUS_ROOT}/lib/common.sh"
-else
-    echo "ERROR: lib/common.sh not found at ${AUTONOMOUS_ROOT}/lib/common.sh" >&2
-    exit 1
-fi
+# Source common utilities
+source "${AUTONOMOUS_ROOT}/lib/common.sh"
 
-# =============================================================================
-# Source SQLite State Library
-# =============================================================================
+# Source SQLite State
 if [[ -f "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" ]]; then
-    # shellcheck source=/dev/null
     source "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh"
 else
-    log_error "lib/sqlite-state.sh not found - required for queue bridging"
+    echo "ERROR: lib/sqlite-state.sh not found" >&2
     exit 1
 fi
 
-# =============================================================================
-# Configuration
-# =============================================================================
-QUEUE_ROOT="${QUEUE_ROOT:-${AUTONOMOUS_ROOT}/tasks/queue}"
-RUNNING_DIR="${RUNNING_DIR:-${AUTONOMOUS_ROOT}/tasks/running}"
-COMPLETED_DIR="${COMPLETED_DIR:-${AUTONOMOUS_ROOT}/tasks/completed}"
-FAILED_DIR="${FAILED_DIR:-${AUTONOMOUS_ROOT}/tasks/failed}"
-STATE_DIR="${STATE_DIR:-${AUTONOMOUS_ROOT}/state}"
-STATE_DB="${STATE_DB:-${STATE_DIR}/tri-agent.db}"
-PID_FILE="${PID_FILE:-${STATE_DIR}/queue-watcher.pid}"
-LOG_FILE="${LOG_FILE:-${AUTONOMOUS_ROOT}/logs/queue-watcher.log}"
+# Config
+VERSION="1.0.0"
+QUEUE_DIR="${AUTONOMOUS_ROOT}/tasks/queue"
+STATE_DIR="${AUTONOMOUS_ROOT}/state"
+PID_FILE="${STATE_DIR}/queue-watcher.pid"
+SYNC_INTERVAL="${SYNC_INTERVAL:-10}"  # Polling interval in seconds
+USE_INOTIFY="${USE_INOTIFY:-auto}"    # auto, yes, no
 
-# Timing configuration
-POLL_INTERVAL="${POLL_INTERVAL:-5}"
-INOTIFY_TIMEOUT="${INOTIFY_TIMEOUT:-30}"
-SYNC_CHECK_INTERVAL="${SYNC_CHECK_INTERVAL:-60}"
-
-# Use inotifywait if available (more efficient)
-USE_INOTIFY="${USE_INOTIFY:-auto}"
-
-# Running state
+# Track sync statistics
+SYNC_COUNT=0
+TASKS_REGISTERED=0
+LAST_SYNC_TIME=""
 RUNNING=true
-SCAN_COUNT=0
-BRIDGE_COUNT=0
-LAST_SYNC_CHECK=0
 
-# =============================================================================
-# Signal Handlers
-# =============================================================================
+#===============================================================================
+# Signal Handling
+#===============================================================================
+
 handle_shutdown() {
-    log_info "Received shutdown signal, cleaning up..."
+    log_info "Queue watcher received shutdown signal"
     RUNNING=false
-
-    # Remove PID file
-    if [[ -f "$PID_FILE" ]]; then
-        rm -f "$PID_FILE" 2>/dev/null || true
-    fi
-
-    log_info "Queue watcher stopped (bridged $BRIDGE_COUNT tasks in $SCAN_COUNT scans)"
-    exit 0
 }
 
 handle_reload() {
-    log_info "Received reload signal, re-reading configuration..."
-    # Could reload config from file here
-    log_info "Configuration reloaded"
+    log_info "Queue watcher: Reloading configuration"
+    # Re-source config if needed
 }
 
-# Set up signal handlers
-trap handle_shutdown SIGTERM SIGINT SIGHUP
-trap handle_reload SIGUSR1
+trap handle_shutdown SIGTERM SIGINT
+trap handle_reload SIGHUP
 
-# =============================================================================
-# Logging Helpers
-# =============================================================================
-_log_to_file() {
-    local level="$1"
-    local message="$2"
-    local timestamp
-    timestamp=$(date -Iseconds)
+#===============================================================================
+# Priority Detection
+#===============================================================================
 
-    # Ensure log directory exists
-    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-
-    echo "[$timestamp] [${TRACE_ID:-watcher}] [$level] $message" >> "$LOG_FILE" 2>/dev/null || true
-}
-
-watcher_log_info() {
-    log_info "$*"
-    _log_to_file "INFO" "$*"
-}
-
-watcher_log_warn() {
-    log_warn "$*"
-    _log_to_file "WARN" "$*"
-}
-
-watcher_log_error() {
-    log_error "$*"
-    _log_to_file "ERROR" "$*"
-}
-
-watcher_log_debug() {
-    if [[ "${DEBUG:-0}" == "1" ]]; then
-        log_debug "$*"
-        _log_to_file "DEBUG" "$*"
-    fi
-}
-
-# =============================================================================
-# Priority Parsing
-# =============================================================================
-
-# Extract priority from various sources
-# Order: filename prefix > YAML frontmatter > parent directory > default
-parse_priority() {
-    local path="$1"
+# Detect priority from filename and directory path
+detect_priority() {
+    local filepath="$1"
     local filename
-    filename=$(basename "$path")
-    local priority=""
+    filename=$(basename "$filepath")
+    local dirpath
+    dirpath=$(dirname "$filepath")
+    local dirname
+    dirname=$(basename "$dirpath")
 
-    # 1. Check filename prefix (e.g., CRITICAL_M1-001_task.md)
-    priority=$(echo "$filename" | grep -oE '^(CRITICAL|HIGH|MEDIUM|LOW)[_-]' | tr -d '_-' || true)
-    if [[ -n "$priority" ]]; then
-        echo "$priority"
-        return 0
+    # Check filename prefix first (highest precedence)
+    if [[ "$filename" =~ ^CRITICAL[_-] ]]; then
+        echo "CRITICAL"
+        return
+    elif [[ "$filename" =~ ^HIGH[_-] ]]; then
+        echo "HIGH"
+        return
+    elif [[ "$filename" =~ ^MEDIUM[_-] ]]; then
+        echo "MEDIUM"
+        return
+    elif [[ "$filename" =~ ^LOW[_-] ]]; then
+        echo "LOW"
+        return
     fi
 
-    # 2. Check YAML frontmatter in file
-    if [[ -f "$path" ]]; then
-        # Look for priority: in YAML frontmatter (between --- markers)
-        local frontmatter_priority
-        frontmatter_priority=$(awk '
-            /^---$/ { in_frontmatter = !in_frontmatter; next }
-            in_frontmatter && /^priority:/ {
-                gsub(/priority:[[:space:]]*/, "");
-                gsub(/[[:space:]]*$/, "");
-                print toupper($0);
-                exit
-            }
-        ' "$path" 2>/dev/null || true)
-
-        if [[ "$frontmatter_priority" =~ ^(CRITICAL|HIGH|MEDIUM|LOW)$ ]]; then
-            echo "$frontmatter_priority"
-            return 0
-        fi
-    fi
-
-    # 3. Check parent directory name
-    local parent
-    parent=$(basename "$(dirname "$path")")
-    case "${parent^^}" in
-        CRITICAL|HIGH|MEDIUM|LOW)
-            echo "${parent^^}"
-            return 0
+    # Check parent directory name
+    case "$dirname" in
+        CRITICAL|critical)
+            echo "CRITICAL"
+            ;;
+        HIGH|high)
+            echo "HIGH"
+            ;;
+        MEDIUM|medium)
+            echo "MEDIUM"
+            ;;
+        LOW|low)
+            echo "LOW"
+            ;;
+        *)
+            echo "MEDIUM"  # Default
             ;;
     esac
-
-    # 4. Default to MEDIUM
-    echo "MEDIUM"
 }
 
-# Extract task type from filename or content
-parse_task_type() {
-    local path="$1"
+#===============================================================================
+# Task Metadata Extraction
+#===============================================================================
+
+# Extract task type from file content
+extract_task_type() {
+    local filepath="$1"
+    local type="general"
+
+    if [[ -f "$filepath" ]]; then
+        # Look for type: field in YAML frontmatter or markdown
+        local extracted
+        extracted=$(grep -m1 -E "^type:\s*|^## Type:\s*" "$filepath" 2>/dev/null | sed 's/.*:\s*//' | tr -d '[:space:]' || echo "")
+        if [[ -n "$extracted" ]]; then
+            type="$extracted"
+        fi
+    fi
+
+    echo "$type"
+}
+
+# Extract task name from file content or filename
+extract_task_name() {
+    local filepath="$1"
     local filename
-    filename=$(basename "$path")
+    filename=$(basename "$filepath" .md)
+    local name="$filename"
 
-    # Check for type prefix after priority (e.g., CRITICAL_feature_M1-001.md)
-    local type_match
-    type_match=$(echo "$filename" | grep -oE '(feature|bugfix|refactor|test|docs|chore|security)' | head -1 || true)
-    if [[ -n "$type_match" ]]; then
-        echo "$type_match"
-        return 0
-    fi
-
-    # Check YAML frontmatter
-    if [[ -f "$path" ]]; then
-        local frontmatter_type
-        frontmatter_type=$(awk '
-            /^---$/ { in_frontmatter = !in_frontmatter; next }
-            in_frontmatter && /^type:/ {
-                gsub(/type:[[:space:]]*/, "");
-                gsub(/[[:space:]]*$/, "");
-                print $0;
-                exit
-            }
-        ' "$path" 2>/dev/null || true)
-
-        if [[ -n "$frontmatter_type" ]]; then
-            echo "$frontmatter_type"
-            return 0
+    if [[ -f "$filepath" ]]; then
+        # Look for title in first H1 heading
+        local extracted
+        extracted=$(grep -m1 "^# " "$filepath" 2>/dev/null | sed 's/^# //' || echo "")
+        if [[ -n "$extracted" ]]; then
+            name="$extracted"
         fi
     fi
 
-    # Default to general
-    echo "general"
+    echo "$name"
 }
 
-# Extract description from task file
-parse_description() {
-    local path="$1"
-    local description=""
+# Extract shard/lane from file content
+extract_shard() {
+    local filepath="$1"
+    local shard=""
 
-    if [[ -f "$path" ]]; then
-        # Try to find first markdown heading
-        description=$(head -20 "$path" 2>/dev/null | grep -E '^#+ ' | head -1 | sed 's/^#* *//' | sed 's/\[.*\] *//' || true)
-
-        # If no heading, use first non-empty, non-frontmatter line
-        if [[ -z "$description" ]]; then
-            description=$(awk '
-                /^---$/ { in_frontmatter = !in_frontmatter; next }
-                !in_frontmatter && /^[^#]/ && NF { print; exit }
-            ' "$path" 2>/dev/null | head -c 200 || true)
+    if [[ -f "$filepath" ]]; then
+        # Look for shard: or lane: field
+        local extracted
+        extracted=$(grep -m1 -E "^(shard|lane):\s*" "$filepath" 2>/dev/null | sed 's/.*:\s*//' | tr -d '[:space:]' || echo "")
+        if [[ -n "$extracted" ]]; then
+            shard="$extracted"
         fi
     fi
 
-    # Fallback to task ID
-    if [[ -z "$description" ]]; then
-        description=$(basename "$path" | sed 's/\.md$//')
+    echo "$shard"
+}
+
+# Extract assigned model from file content
+extract_model() {
+    local filepath="$1"
+    local model=""
+
+    if [[ -f "$filepath" ]]; then
+        # Look for model: or assigned_model: field
+        local extracted
+        extracted=$(grep -m1 -E "^(model|assigned_model):\s*" "$filepath" 2>/dev/null | sed 's/.*:\s*//' | tr -d '[:space:]' || echo "")
+        if [[ -n "$extracted" ]]; then
+            model="$extracted"
+        fi
     fi
 
-    # Limit length and remove problematic characters
-    description="${description:0:200}"
-    # Remove null bytes and control characters
-    description=$(printf '%s' "$description" | tr -d '\0' | tr -d '\001-\037')
-
-    echo "$description"
+    echo "$model"
 }
 
-# =============================================================================
-# SQLite Operations (with error handling)
-# =============================================================================
+#===============================================================================
+# Task Registration
+#===============================================================================
 
-# Check if task exists in SQLite
-task_exists_in_sqlite() {
-    local task_id="$1"
-    local escaped_id
-    escaped_id=$(_sql_escape "$task_id")
+# Register a single task file to SQLite
+register_task() {
+    local filepath="$1"
 
-    local result
-    result=$(_sqlite_exec "$STATE_DB" "SELECT COUNT(*) FROM tasks WHERE id='${escaped_id}';" 2>/dev/null || echo "0")
-
-    [[ "${result:-0}" -gt 0 ]]
-}
-
-# Escape string for safe SQLite insertion (comprehensive)
-# Handles single quotes, null bytes, and other special characters
-safe_sql_escape() {
-    local value="${1:-}"
-    # Remove null bytes first (SQLite cannot store them)
-    value=$(printf '%s' "$value" | tr -d '\0')
-    # Escape single quotes by doubling them (SQL standard)
-    value="${value//\'/\'\'}"
-    printf '%s' "$value"
-}
-
-# Create task in SQLite with comprehensive metadata
-create_task_from_file() {
-    local file="$1"
-    local task_id
-    task_id=$(basename "$file" | sed 's/\.md$//')
-
-    # Skip if already exists
-    if task_exists_in_sqlite "$task_id"; then
-        watcher_log_debug "Task already exists in SQLite: $task_id"
+    if [[ ! -f "$filepath" ]]; then
+        log_debug "File no longer exists: $filepath"
         return 1
     fi
 
-    # Parse task metadata
-    local priority type description
-    priority=$(parse_priority "$file")
-    type=$(parse_task_type "$file")
-    description=$(parse_description "$file")
+    local filename
+    filename=$(basename "$filepath")
+    local task_id="${filename%.md}"
 
-    # Generate checksum for change detection
-    local checksum=""
-    if command -v md5sum >/dev/null 2>&1; then
-        checksum=$(md5sum "$file" 2>/dev/null | cut -d' ' -f1 || true)
-    elif command -v md5 >/dev/null 2>&1; then
-        checksum=$(md5 -q "$file" 2>/dev/null || true)
+    # Check if task already exists in SQLite
+    local existing
+    existing=$(_sqlite_exec "$STATE_DB" "SELECT id FROM tasks WHERE id='${task_id//\'/\'\'}' LIMIT 1;" 2>/dev/null || echo "")
+
+    if [[ -n "$existing" ]]; then
+        log_debug "Task already registered: $task_id"
+        return 0
     fi
 
-    # Escape all values for SQL
-    local esc_id esc_name esc_type esc_desc esc_checksum
-    esc_id=$(safe_sql_escape "$task_id")
-    esc_name=$(safe_sql_escape "$description")
-    esc_type=$(safe_sql_escape "$type")
-    esc_desc=$(safe_sql_escape "$description")
-    esc_checksum=$(safe_sql_escape "$checksum")
+    # Extract metadata
+    local priority
+    priority=$(detect_priority "$filepath")
+    local priority_int
+    priority_int=$(priority_to_int "$priority")
+    local task_type
+    task_type=$(extract_task_type "$filepath")
+    local task_name
+    task_name=$(extract_task_name "$filepath")
+    local shard
+    shard=$(extract_shard "$filepath")
+    local model
+    model=$(extract_model "$filepath")
 
-    # Get priority integer
-    local p_int
-    p_int=$(priority_to_int "$priority")
+    # Escape for SQL
+    local esc_id="${task_id//\'/\'\'}"
+    local esc_name="${task_name//\'/\'\'}"
+    local esc_type="${task_type//\'/\'\'}"
+    local esc_shard="${shard//\'/\'\'}"
+    local esc_model="${model//\'/\'\'}"
 
-    # Store file path reference instead of full content (avoids escaping issues)
-    # The payload stores a reference that can be used to read the original file
-    local esc_payload
-    esc_payload=$(safe_sql_escape "file://${file}")
+    # Register in SQLite
+    _sqlite_exec "$STATE_DB" <<SQL
+INSERT OR IGNORE INTO tasks (
+    id, name, type, priority, state, shard, assigned_model,
+    created_at, updated_at, trace_id
+) VALUES (
+    '${esc_id}',
+    '${esc_name}',
+    '${esc_type}',
+    ${priority_int},
+    'QUEUED',
+    NULLIF('${esc_shard}', ''),
+    NULLIF('${esc_model}', ''),
+    datetime('now'),
+    datetime('now'),
+    '${TRACE_ID}'
+);
 
-    # Create task in SQLite using direct SQL (bypass create_task for full control)
-    local trace_id="${TRACE_ID:-watcher-$$}"
-    local esc_trace
-    esc_trace=$(safe_sql_escape "$trace_id")
+-- Log registration event
+INSERT INTO events (task_id, event_type, actor, payload, trace_id)
+SELECT '${esc_id}', 'TASK_REGISTERED', 'queue-watcher',
+    json_object('priority', '${priority}', 'type', '${esc_type}', 'shard', '${esc_shard}', 'model', '${esc_model}'),
+    '${TRACE_ID}'
+WHERE changes() > 0;
+SQL
 
-    if _sqlite_exec "$STATE_DB" "INSERT OR IGNORE INTO tasks (id, name, type, priority, state, payload, trace_id, checksum, created_at, updated_at) VALUES ('${esc_id}','${esc_name}','${esc_type}',${p_int},'QUEUED','${esc_payload}','${esc_trace}','${esc_checksum}',datetime('now'),datetime('now'));" 2>/dev/null; then
-        watcher_log_info "Bridged task: $task_id (priority: $priority, type: $type)"
+    if [[ $? -eq 0 ]]; then
+        log_info "M1-002: Registered task $task_id (priority: $priority, type: $task_type)"
+        ((TASKS_REGISTERED++)) || true
         return 0
     else
-        watcher_log_error "Failed to create task in SQLite: $task_id"
+        log_error "Failed to register task: $task_id"
         return 1
     fi
 }
 
-# =============================================================================
-# Synchronization Functions
-# =============================================================================
+#===============================================================================
+# Queue Scanning
+#===============================================================================
 
-# Scan queue directory and bridge all tasks
-scan_queue_directory() {
-    local bridged_this_scan=0
+# Scan all queue directories and register tasks
+scan_queue() {
+    local registered=0
+    local scanned=0
 
-    if [[ ! -d "$QUEUE_ROOT" ]]; then
-        watcher_log_warn "Queue directory does not exist: $QUEUE_ROOT"
-        mkdir -p "$QUEUE_ROOT" 2>/dev/null || true
-        return 0
-    fi
+    # Ensure queue directory exists
+    mkdir -p "$QUEUE_DIR"
 
-    # Find all .md files in queue (including priority subdirectories)
-    while IFS= read -r -d '' file; do
-        if [[ -f "$file" && -r "$file" ]]; then
-            if create_task_from_file "$file"; then
-                bridged_this_scan=$((bridged_this_scan + 1))
-                BRIDGE_COUNT=$((BRIDGE_COUNT + 1))
-            fi
-        fi
-    done < <(find "$QUEUE_ROOT" -type f -name "*.md" -print0 2>/dev/null)
+    # Scan root queue and priority subdirectories
+    local dirs=("$QUEUE_DIR" "$QUEUE_DIR/CRITICAL" "$QUEUE_DIR/HIGH" "$QUEUE_DIR/MEDIUM" "$QUEUE_DIR/LOW")
 
-    SCAN_COUNT=$((SCAN_COUNT + 1))
+    for dir in "${dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
 
-    if [[ $bridged_this_scan -gt 0 ]]; then
-        watcher_log_info "Scan #$SCAN_COUNT: Bridged $bridged_this_scan new tasks (total: $BRIDGE_COUNT)"
-    else
-        watcher_log_debug "Scan #$SCAN_COUNT: No new tasks to bridge"
-    fi
-
-    return $bridged_this_scan
-}
-
-# Verify SQLite-to-file synchronization (find orphaned SQLite entries)
-verify_sync() {
-    watcher_log_debug "Running synchronization verification..."
-
-    local orphaned_count=0
-    local file_missing_count=0
-
-    # Get all QUEUED tasks from SQLite
-    local queued_tasks
-    queued_tasks=$(_sqlite_exec "$STATE_DB" "SELECT id FROM tasks WHERE state='QUEUED';" 2>/dev/null || true)
-
-    if [[ -n "$queued_tasks" ]]; then
-        while IFS= read -r task_id; do
-            [[ -z "$task_id" ]] && continue
-
-            # Check if corresponding file exists
-            local found=false
-
-            # Check in queue root
-            if [[ -f "$QUEUE_ROOT/${task_id}.md" ]]; then
-                found=true
-            else
-                # Check in priority subdirectories
-                for priority_dir in "$QUEUE_ROOT"/{CRITICAL,HIGH,MEDIUM,LOW}; do
-                    if [[ -f "$priority_dir/${task_id}.md" ]]; then
-                        found=true
-                        break
-                    fi
-                done
-            fi
-
-            if [[ "$found" == "false" ]]; then
-                file_missing_count=$((file_missing_count + 1))
-                watcher_log_warn "Task in SQLite but file missing: $task_id"
-
-                # Optionally mark as orphaned or remove
-                # For now, just log the discrepancy
-            fi
-        done <<< "$queued_tasks"
-    fi
-
-    if [[ $file_missing_count -gt 0 ]]; then
-        watcher_log_warn "Sync check found $file_missing_count tasks with missing files"
-    else
-        watcher_log_debug "Sync check complete: all SQLite tasks have corresponding files"
-    fi
-
-    LAST_SYNC_CHECK=$(date +%s)
-}
-
-# =============================================================================
-# Watch Modes
-# =============================================================================
-
-# Poll-based watching (fallback)
-watch_with_polling() {
-    watcher_log_info "Starting poll-based watching (interval: ${POLL_INTERVAL}s)"
-
-    while $RUNNING; do
-        scan_queue_directory
-
-        # Periodic sync verification
-        local now
-        now=$(date +%s)
-        if [[ $((now - LAST_SYNC_CHECK)) -ge $SYNC_CHECK_INTERVAL ]]; then
-            verify_sync
-        fi
-
-        # Sleep in small increments for responsive shutdown
-        local sleep_remaining=$POLL_INTERVAL
-        while [[ $sleep_remaining -gt 0 ]] && $RUNNING; do
-            sleep 1
-            sleep_remaining=$((sleep_remaining - 1))
-        done
-    done
-}
-
-# inotifywait-based watching (more efficient)
-watch_with_inotify() {
-    watcher_log_info "Starting inotifywait-based watching"
-
-    # Initial scan
-    scan_queue_directory
-
-    # Watch for file system events
-    while $RUNNING; do
-        # Use timeout to allow periodic sync checks
-        if inotifywait -q -t "$INOTIFY_TIMEOUT" -e create -e moved_to -e modify \
-            --format '%w%f' -r "$QUEUE_ROOT" 2>/dev/null | while read -r file; do
-
-            if [[ "$file" == *.md && -f "$file" ]]; then
-                watcher_log_debug "inotify event on: $file"
-                create_task_from_file "$file" || true
-            fi
-        done; then
-            # File event received - continue
-            :
-        else
-            # Timeout or error - do periodic scan
-            scan_queue_directory
-        fi
-
-        # Periodic sync verification
-        local now
-        now=$(date +%s)
-        if [[ $((now - LAST_SYNC_CHECK)) -ge $SYNC_CHECK_INTERVAL ]]; then
-            verify_sync
-        fi
-    done
-}
-
-# =============================================================================
-# Main Watch Loop
-# =============================================================================
-
-start_watching() {
-    watcher_log_info "Queue watcher starting (PID $$)"
-    watcher_log_info "  AUTONOMOUS_ROOT: $AUTONOMOUS_ROOT"
-    watcher_log_info "  Queue directory: $QUEUE_ROOT"
-    watcher_log_info "  State database:  $STATE_DB"
-    watcher_log_info "  Log file:        $LOG_FILE"
-
-    # Ensure directories exist
-    mkdir -p "$QUEUE_ROOT" "$STATE_DIR" "$(dirname "$LOG_FILE")" 2>/dev/null || true
-
-    # Initialize database
-    if ! sqlite_state_init "$STATE_DB" >/dev/null 2>&1; then
-        watcher_log_error "Failed to initialize SQLite database"
-        exit 1
-    fi
-
-    # Write PID file
-    echo $$ > "$PID_FILE"
-    chmod 644 "$PID_FILE" 2>/dev/null || true
-
-    # Determine watch mode
-    local use_inotify=false
-
-    if [[ "$USE_INOTIFY" == "true" ]] || [[ "$USE_INOTIFY" == "auto" ]]; then
-        if command -v inotifywait >/dev/null 2>&1; then
-            use_inotify=true
-            watcher_log_info "Using inotifywait for file system monitoring"
-        else
-            watcher_log_info "inotifywait not available, falling back to polling"
-        fi
-    else
-        watcher_log_info "inotifywait disabled, using polling"
-    fi
-
-    # Initial sync check
-    LAST_SYNC_CHECK=$(date +%s)
-
-    # Start appropriate watch mode
-    if $use_inotify; then
-        watch_with_inotify
-    else
-        watch_with_polling
-    fi
-}
-
-# =============================================================================
-# One-time Operations
-# =============================================================================
-
-# One-time scan and bridge
-run_once() {
-    watcher_log_info "Running one-time queue scan..."
-
-    # Initialize database
-    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
-
-    # Scan and report
-    local bridged=0
-
-    if [[ -d "$QUEUE_ROOT" ]]; then
         while IFS= read -r -d '' file; do
-            if [[ -f "$file" ]]; then
-                local task_id
-                task_id=$(basename "$file" | sed 's/\.md$//')
+            ((scanned++)) || true
+            if register_task "$file"; then
+                ((registered++)) || true
+            fi
+        done < <(find "$dir" -maxdepth 1 -name "*.md" -type f -print0 2>/dev/null)
+    done
 
-                if create_task_from_file "$file"; then
-                    bridged=$((bridged + 1))
-                    echo "BRIDGED: $task_id"
-                else
-                    echo "EXISTS:  $task_id"
+    LAST_SYNC_TIME=$(date -Iseconds)
+    ((SYNC_COUNT++)) || true
+
+    log_debug "M1-002: Queue scan complete (scanned: $scanned, registered: $registered)"
+    return 0
+}
+
+# Sync completed/failed/review directories back to SQLite state
+sync_task_states() {
+    local dirs_and_states=(
+        "${AUTONOMOUS_ROOT}/tasks/running:RUNNING"
+        "${AUTONOMOUS_ROOT}/tasks/review:REVIEW"
+        "${AUTONOMOUS_ROOT}/tasks/completed:COMPLETED"
+        "${AUTONOMOUS_ROOT}/tasks/failed:FAILED"
+    )
+
+    for item in "${dirs_and_states[@]}"; do
+        local dir="${item%%:*}"
+        local expected_state="${item##*:}"
+
+        [[ -d "$dir" ]] || continue
+
+        while IFS= read -r -d '' file; do
+            local filename
+            filename=$(basename "$file")
+            local task_id="${filename%.md}"
+            local esc_id="${task_id//\'/\'\'}"
+
+            # Check current state in SQLite
+            local current_state
+            current_state=$(_sqlite_exec "$STATE_DB" "SELECT state FROM tasks WHERE id='${esc_id}' LIMIT 1;" 2>/dev/null || echo "")
+
+            if [[ -z "$current_state" ]]; then
+                # Task not in SQLite, register it with current state
+                _sqlite_exec "$STATE_DB" "INSERT OR IGNORE INTO tasks (id, name, state, created_at, updated_at, trace_id) VALUES ('${esc_id}', '${esc_id}', '${expected_state}', datetime('now'), datetime('now'), '${TRACE_ID}');"
+            elif [[ "$current_state" != "$expected_state" ]]; then
+                # State mismatch - file location is canonical for completed/failed
+                if [[ "$expected_state" == "COMPLETED" || "$expected_state" == "FAILED" ]]; then
+                    log_warn "M1-002: State mismatch for $task_id: SQLite=$current_state, File=$expected_state - updating SQLite"
+                    _sqlite_exec "$STATE_DB" "UPDATE tasks SET state='${expected_state}', updated_at=datetime('now') WHERE id='${esc_id}';"
                 fi
             fi
-        done < <(find "$QUEUE_ROOT" -type f -name "*.md" -print0 2>/dev/null)
-    fi
-
-    echo ""
-    echo "Summary: Bridged $bridged new tasks"
+        done < <(find "$dir" -maxdepth 1 -name "*.md" -type f -print0 2>/dev/null)
+    done
 }
 
-# Show current status
-show_status() {
-    echo "=== Queue Watcher Status ==="
-    echo ""
+#===============================================================================
+# Inotify Monitoring
+#===============================================================================
 
-    # Check if daemon is running
-    if [[ -f "$PID_FILE" ]]; then
-        local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            echo "Daemon:     RUNNING (PID $pid)"
-        else
-            echo "Daemon:     STOPPED (stale PID file)"
+# Check if inotifywait is available
+has_inotify() {
+    command -v inotifywait &>/dev/null
+}
+
+# Watch queue directory with inotify
+watch_with_inotify() {
+    log_info "M1-002: Using inotify for queue monitoring"
+
+    # Create priority directories if they don't exist
+    mkdir -p "$QUEUE_DIR"/{CRITICAL,HIGH,MEDIUM,LOW}
+
+    # Initial sync
+    scan_queue
+
+    # Watch for file creation, modification, and movement
+    inotifywait -m -r -e create -e moved_to -e modify \
+        --format '%w%f' \
+        "$QUEUE_DIR" 2>/dev/null |
+    while read -r filepath; do
+        if [[ "$RUNNING" != "true" ]]; then
+            break
         fi
-    else
-        echo "Daemon:     STOPPED"
-    fi
 
-    echo ""
-    echo "Queue Directory: $QUEUE_ROOT"
-    echo "State Database:  $STATE_DB"
-    echo ""
+        if [[ "$filepath" == *.md ]]; then
+            log_debug "M1-002: Detected file: $filepath"
+            register_task "$filepath"
+        fi
+    done
+}
+
+# Polling fallback when inotify is not available
+watch_with_polling() {
+    log_info "M1-002: Using polling for queue monitoring (interval: ${SYNC_INTERVAL}s)"
+
+    while [[ "$RUNNING" == "true" ]]; do
+        scan_queue
+        sync_task_states
+        sleep "$SYNC_INTERVAL"
+    done
+}
+
+#===============================================================================
+# Status Display
+#===============================================================================
+
+show_status() {
+    local queued_count=0
+    local running_count=0
+    local review_count=0
+
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        queued_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM tasks WHERE state='QUEUED';" 2>/dev/null || echo "0")
+        running_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM tasks WHERE state='RUNNING';" 2>/dev/null || echo "0")
+        review_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM tasks WHERE state='REVIEW';" 2>/dev/null || echo "0")
+    fi
 
     # Count files in queue
     local queue_files=0
-    if [[ -d "$QUEUE_ROOT" ]]; then
-        queue_files=$(find "$QUEUE_ROOT" -type f -name "*.md" 2>/dev/null | wc -l)
-    fi
-    echo "Files in queue:  $queue_files"
-
-    # Count tasks in SQLite by state
-    if [[ -f "$STATE_DB" ]]; then
-        echo ""
-        echo "SQLite Task States:"
-
-        # Use Python for reliable output
-        python3 -c "
-import sqlite3
-try:
-    conn = sqlite3.connect('$STATE_DB')
-    cur = conn.cursor()
-    cur.execute('SELECT state, COUNT(*) FROM tasks GROUP BY state ORDER BY state')
-    for row in cur.fetchall():
-        print(f'  {row[0]:<12} {row[1]}')
-    conn.close()
-except Exception as e:
-    print(f'  (error: {e})')
-" 2>/dev/null || echo "  (unable to query database)"
+    if [[ -d "$QUEUE_DIR" ]]; then
+        queue_files=$(find "$QUEUE_DIR" -name "*.md" -type f 2>/dev/null | wc -l)
     fi
 
-    # Show priority distribution
-    if [[ -f "$STATE_DB" ]]; then
-        echo ""
-        echo "Priority Distribution:"
-        python3 -c "
-import sqlite3
-priorities = {0: 'CRITICAL', 1: 'HIGH', 2: 'MEDIUM', 3: 'LOW'}
-try:
-    conn = sqlite3.connect('$STATE_DB')
-    cur = conn.cursor()
-    cur.execute('SELECT priority, COUNT(*) FROM tasks WHERE state=\"QUEUED\" GROUP BY priority ORDER BY priority')
-    for row in cur.fetchall():
-        pname = priorities.get(row[0], 'UNKNOWN')
-        print(f'  {pname:<12} {row[1]}')
-    conn.close()
-except:
-    pass
-" 2>/dev/null
+    local pid=""
+    if [[ -f "$PID_FILE" ]]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+            pid=""
+        fi
     fi
 
+    cat <<EOF
+Queue Watcher Status (v${VERSION}) - M1-002
+============================================
+
+Daemon Status:    ${pid:+Running (PID: $pid)}${pid:-Not running}
+Inotify Support:  $(has_inotify && echo "Available" || echo "Not available (using polling)")
+
+Queue Statistics:
+  Files in queue/: $queue_files
+  QUEUED in SQLite: $queued_count
+  RUNNING in SQLite: $running_count
+  REVIEW in SQLite: $review_count
+
+Sync Statistics:
+  Total syncs:     $SYNC_COUNT
+  Tasks registered: $TASKS_REGISTERED
+  Last sync:       ${LAST_SYNC_TIME:-never}
+
+Queue Directory:  $QUEUE_DIR
+Database:         $STATE_DB
+
+EOF
+
+    # Show priority breakdown
+    echo "Priority Breakdown (SQLite):"
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        sqlite3 "$STATE_DB" <<SQL
+SELECT
+    CASE priority
+        WHEN 0 THEN 'CRITICAL'
+        WHEN 1 THEN 'HIGH'
+        WHEN 2 THEN 'MEDIUM'
+        WHEN 3 THEN 'LOW'
+        ELSE 'UNKNOWN'
+    END as Priority,
+    COUNT(*) as Count
+FROM tasks
+WHERE state = 'QUEUED'
+GROUP BY priority
+ORDER BY priority;
+SQL
+    fi
     echo ""
 }
 
-# Stop running daemon
-stop_daemon() {
-    if [[ -f "$PID_FILE" ]]; then
-        local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
-        if [[ -n "$pid" ]]; then
-            if kill -0 "$pid" 2>/dev/null; then
-                echo "Stopping queue watcher (PID $pid)..."
-                kill -TERM "$pid" 2>/dev/null || true
-
-                # Wait for graceful shutdown
-                local wait_count=0
-                while kill -0 "$pid" 2>/dev/null && [[ $wait_count -lt 10 ]]; do
-                    sleep 1
-                    wait_count=$((wait_count + 1))
-                done
-
-                if kill -0 "$pid" 2>/dev/null; then
-                    echo "Force killing..."
-                    kill -9 "$pid" 2>/dev/null || true
-                fi
-
-                rm -f "$PID_FILE" 2>/dev/null || true
-                echo "Stopped"
-            else
-                echo "Daemon not running (stale PID file removed)"
-                rm -f "$PID_FILE" 2>/dev/null || true
-            fi
-        fi
-    else
-        echo "No PID file found - daemon may not be running"
-    fi
-}
-
-# =============================================================================
-# Help / Usage
-# =============================================================================
-
-show_help() {
-    cat <<EOF
-tri-agent-queue-watcher - Queue-to-SQLite Bridge Daemon (M1-002)
-
-USAGE:
-    tri-agent-queue-watcher [OPTIONS]
-
-OPTIONS:
-    (none)          Start watching daemon (foreground)
-    --once          Scan queue once, bridge tasks, then exit
-    --status        Show current daemon and queue status
-    --stop          Stop running daemon
-    --help, -h      Show this help message
-
-DESCRIPTION:
-    Monitors the file-based task queue (tasks/queue/) and automatically
-    creates corresponding entries in SQLite. This makes SQLite the canonical
-    task store while maintaining file queue compatibility.
-
-    The watcher uses inotifywait for efficient file system monitoring when
-    available, falling back to polling otherwise.
-
-PRIORITY DETECTION:
-    Priority is extracted from (in order):
-    1. Filename prefix (e.g., CRITICAL_M1-001_task.md)
-    2. YAML frontmatter (priority: HIGH)
-    3. Parent directory (e.g., tasks/queue/HIGH/task.md)
-    4. Default: MEDIUM
-
-TASK TYPE DETECTION:
-    Type is extracted from:
-    1. Filename pattern (feature, bugfix, refactor, test, docs, chore, security)
-    2. YAML frontmatter (type: feature)
-    3. Default: general
-
-ENVIRONMENT VARIABLES:
-    POLL_INTERVAL         Polling interval in seconds (default: 5)
-    INOTIFY_TIMEOUT       inotifywait timeout in seconds (default: 30)
-    SYNC_CHECK_INTERVAL   Sync verification interval in seconds (default: 60)
-    USE_INOTIFY           Use inotifywait: auto|true|false (default: auto)
-    TRACE_ID              Trace ID for bridged tasks (default: watcher-PID)
-    DEBUG                 Enable debug logging: 0|1 (default: 0)
-
-FILES:
-    $QUEUE_ROOT/
-        Task files to watch (.md files)
-
-    $STATE_DB
-        SQLite database for task state
-
-    $PID_FILE
-        Daemon PID file
-
-    $LOG_FILE
-        Watcher log file
-
-EXAMPLES:
-    # Run as foreground daemon
-    ./bin/tri-agent-queue-watcher
-
-    # Run in background
-    ./bin/tri-agent-queue-watcher &
-
-    # Run with debug logging
-    DEBUG=1 ./bin/tri-agent-queue-watcher
-
-    # One-time scan and bridge
-    ./bin/tri-agent-queue-watcher --once
-
-    # Check status
-    ./bin/tri-agent-queue-watcher --status
-
-    # Stop daemon
-    ./bin/tri-agent-queue-watcher --stop
-
-SEE ALSO:
-    tri-agent-worker(1), sqlite-state.sh(3)
-
-EOF
-}
-
-# =============================================================================
-# Main Entry Point
-# =============================================================================
+#===============================================================================
+# Main
+#===============================================================================
 
 main() {
+    # Initialize database
+    sqlite_state_init "$STATE_DB"
+
     case "${1:-}" in
-        --once|-1)
-            run_once
+        --once)
+            log_info "M1-002: Running single queue sync..."
+            scan_queue
+            sync_task_states
+            log_info "M1-002: Sync complete (registered: $TASKS_REGISTERED)"
             ;;
-        --status|-s)
+
+        --status)
             show_status
             ;;
-        --stop)
-            stop_daemon
-            ;;
+
         --help|-h)
-            show_help
+            cat <<EOF
+tri-agent-queue-watcher - Queue-to-SQLite Bridge Daemon (M1-002)
+
+Usage: tri-agent-queue-watcher [OPTIONS]
+
+Options:
+  (none)     Start daemon (uses inotify if available, falls back to polling)
+  --once     Single sync and exit
+  --status   Show current status
+  --help     Show this help
+
+Environment Variables:
+  SYNC_INTERVAL    Polling interval in seconds (default: 10)
+  USE_INOTIFY      Force inotify mode: auto, yes, no (default: auto)
+
+Description:
+  Watches the filesystem queue directory and registers new tasks in SQLite.
+  This enables workers to claim tasks atomically via SQLite while allowing
+  external systems to create tasks by dropping files into the queue.
+
+Supported File Patterns:
+  - tasks/queue/*.md           -> MEDIUM priority (default)
+  - tasks/queue/CRITICAL/*.md  -> CRITICAL priority
+  - tasks/queue/HIGH/*.md      -> HIGH priority
+  - tasks/queue/MEDIUM/*.md    -> MEDIUM priority
+  - tasks/queue/LOW/*.md       -> LOW priority
+  - CRITICAL_*.md prefix       -> CRITICAL priority (overrides directory)
+  - HIGH_*.md prefix           -> HIGH priority
+
+File Metadata (parsed from content):
+  - type: <task_type>          -> Task type for worker routing
+  - shard: <shard_id>          -> Shard for worker filtering
+  - model: <model_name>        -> Assigned model for routing
+  - # <Title>                  -> Task name (first H1 heading)
+
+Examples:
+  # Start daemon
+  ./bin/tri-agent-queue-watcher
+
+  # Single sync
+  ./bin/tri-agent-queue-watcher --once
+
+  # Check status
+  ./bin/tri-agent-queue-watcher --status
+EOF
             ;;
-        "")
-            start_watching
-            ;;
+
         *)
-            echo "Unknown option: $1" >&2
-            echo "Use --help for usage information" >&2
-            exit 1
+            # Daemon mode
+            log_info "M1-002: Queue watcher daemon starting (v${VERSION})"
+
+            # Write PID file
+            mkdir -p "$(dirname "$PID_FILE")"
+            echo $$ > "$PID_FILE"
+
+            # Choose monitoring method
+            if [[ "$USE_INOTIFY" == "yes" ]] || { [[ "$USE_INOTIFY" == "auto" ]] && has_inotify; }; then
+                watch_with_inotify
+            else
+                watch_with_polling
+            fi
+
+            # Cleanup
+            rm -f "$PID_FILE"
+            log_info "M1-002: Queue watcher daemon stopped"
             ;;
     esac
 }
 
-# Run main
 main "$@"

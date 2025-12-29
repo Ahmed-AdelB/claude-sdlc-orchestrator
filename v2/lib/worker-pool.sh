@@ -52,6 +52,8 @@ SHARD_COUNT="${SHARD_COUNT:-3}"
 SHARD_HEALTH_TIMEOUT="${SHARD_HEALTH_TIMEOUT:-120}"  # seconds before shard considered unhealthy
 SHARD_REBALANCE_THRESHOLD="${SHARD_REBALANCE_THRESHOLD:-5}"  # task imbalance threshold
 SHARD_HEARTBEAT_INTERVAL="${SHARD_HEARTBEAT_INTERVAL:-30}"  # seconds between shard heartbeats
+WORKER_STALE_HEARTBEAT_MINUTES="${WORKER_STALE_HEARTBEAT_MINUTES:-5}"
+WORKER_STALE_GRACE_MULTIPLIER="${WORKER_STALE_GRACE_MULTIPLIER:-1.5}"
 
 _pool_require_sqlite() {
     if declare -F _sqlite_require >/dev/null 2>&1; then
@@ -835,7 +837,7 @@ pool_health_check() {
 
     # Recover stale tasks via heartbeat logic if available
     if declare -F check_stale_workers_sqlite >/dev/null 2>&1; then
-        check_stale_workers_sqlite
+        check_stale_workers_sqlite "$WORKER_STALE_HEARTBEAT_MINUTES" "$WORKER_STALE_GRACE_MULTIPLIER"
     elif declare -F heartbeat_check_stale >/dev/null 2>&1; then
         heartbeat_check_stale
     fi

@@ -318,15 +318,37 @@ process_task() {
     log_supervisor "INFO" "Processing task: $task_id"
 
     # Verify supervisor-approver.sh exists
-    if [[ ! -x "$SUPERVISOR_APPROVER" ]]; then
-        log_supervisor "ERROR" "Supervisor approver not found or not executable: $SUPERVISOR_APPROVER"
+    if [[ ! -f "$SUPERVISOR_APPROVER" ]]; then
+        log_supervisor "ERROR" "Supervisor approver not found: $SUPERVISOR_APPROVER"
         return 1
     fi
 
-    # Call the unified workflow
+    # Call the unified workflow (library-first, CLI fallback)
     local result=0
     local output
-    output=$("$SUPERVISOR_APPROVER" workflow "$task_id" "$workspace" 2>&1) || result=$?
+
+    output=$(
+        (
+            set -euo pipefail
+            source "$SUPERVISOR_APPROVER" || exit 96
+            if ! declare -F unified_workflow >/dev/null 2>&1; then
+                echo "Supervisor approver missing unified_workflow" >&2
+                exit 97
+            fi
+            unified_workflow "$task_id" "$workspace"
+        ) 2>&1
+    ) || result=$?
+
+    # Fallback to CLI invocation if library load failed
+    if [[ $result -eq 96 || $result -eq 97 ]]; then
+        log_supervisor "WARN" "Library workflow unavailable, falling back to CLI invocation"
+        if [[ -x "$SUPERVISOR_APPROVER" ]]; then
+            output=$("$SUPERVISOR_APPROVER" workflow "$task_id" "$workspace" 2>&1) || result=$?
+        else
+            log_supervisor "ERROR" "Supervisor approver not executable for CLI fallback: $SUPERVISOR_APPROVER"
+            return 1
+        fi
+    fi
 
     # Log the output
     [[ "$VERBOSE" == "true" ]] && log_supervisor "DEBUG" "Workflow output: $output"

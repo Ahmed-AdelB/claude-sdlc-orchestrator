@@ -3767,8 +3767,20 @@ main() {
             quality_gate "$@"
             ;;
         approve)
-            # Manually approve a task (after gates passed elsewhere)
-            approve_task "$@"
+            # Manually approve a task (requires authentication)
+            local task_id="$1"
+            local token="$2"
+            local workspace="${3:-}"
+
+            if [[ -z "$task_id" ]] || [[ -z "$token" ]]; then
+                echo "Usage: $0 approve <task_id> <token> [workspace]"
+                echo ""
+                echo "Approves a task with authentication."
+                echo "Obtain a token first with: $0 auth login"
+                exit 1
+            fi
+
+            approve_with_auth "$task_id" "$token" "$workspace"
             ;;
         reject)
             # Manually reject a task with reason
@@ -3859,7 +3871,7 @@ main() {
                         echo "TOKEN: $token"
                         echo ""
                         echo "IMPORTANT: Store this token securely!"
-                        echo "Use it with: $0 approve-auth <task_id> <token>"
+                        echo "Use it with: $0 approve <task_id> <token>"
                     fi
                     ;;
                 logout)
@@ -4028,7 +4040,7 @@ main() {
             echo ""
             echo "Quality Gate Commands:"
             echo "  gate <task_id> [workspace]     Run quality gates only"
-            echo "  approve <task_id> [workspace]  Approve a task (no auth)"
+            echo "  approve <task_id> <token> [workspace]  Approve a task (auth required)"
             echo "  reject <task_id> [workspace] [reason]  Reject a task (no auth)"
             echo "  workflow <task_id> [workspace] Unified workflow (gates + decision)"
             echo "  batch <task1> <task2> ...      Process multiple tasks"
@@ -4048,7 +4060,7 @@ main() {
             echo ""
             echo "Authentication Quick Start:"
             echo "  1. Create token:  $0 auth login"
-            echo "  2. Approve task:  $0 approve-auth TASK-001 <token>"
+            echo "  2. Approve task:  $0 approve TASK-001 <token>"
             echo "  3. Logout:        $0 auth logout <token>"
             echo ""
             echo "Environment Variables:"

@@ -29,6 +29,10 @@ fi
 # Source Circuit Breaker
 if [[ -f "${LIB_DIR}/circuit-breaker.sh" ]]; then
     source "${LIB_DIR}/circuit-breaker.sh"
+    if declare -f load_breaker_config >/dev/null 2>&1; then
+        load_breaker_config 2>/dev/null || true
+    fi
+    CB_FAILURE_THRESHOLD="${CB_FAILURE_THRESHOLD:-3}"
 fi
 
 COMPONENT="CLAUDE"
@@ -64,6 +68,65 @@ json_output() {
         --arg trace_id "$TRACE_ID" \
         --argjson duration_ms "$duration_ms" \
         '{model: $model, status: $status, decision: $decision, confidence: ($confidence | tonumber), reasoning: $reasoning, output: $output, trace_id: $trace_id, duration_ms: $duration_ms}'
+}
+
+# Fallback helpers
+FALLBACK_OUTPUT=""
+FALLBACK_EXIT=0
+FALLBACK_STDIN=""
+
+_fallback_delegate_path() {
+    local model="$1"
+    echo "${SCRIPT_DIR}/${model}-delegate"
+}
+
+attempt_fallback() {
+    local failed_model="$1"
+    local reason="$2"
+
+    if [[ "${TRI_FALLBACK_DISABLED:-false}" == "true" ]]; then
+        return 1
+    fi
+    if [[ "${TRI_FALLBACK_IN_PROGRESS:-0}" == "1" ]]; then
+        return 1
+    fi
+
+    local next_model=""
+    if declare -f fallback_to_next_model >/dev/null 2>&1; then
+        next_model=$(fallback_to_next_model "$failed_model") || return 1
+    else
+        case "$failed_model" in
+            "claude") next_model="codex" ;;
+            "codex") next_model="gemini" ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    local delegate_path
+    delegate_path=$(_fallback_delegate_path "$next_model")
+    if [[ ! -x "$delegate_path" ]]; then
+        log_warn "[${TRACE_ID:-unknown}] Fallback delegate not found for ${next_model}: ${delegate_path}"
+        return 1
+    fi
+
+    if declare -F log_claude >/dev/null 2>&1; then
+        log_claude "WARN" "FALLBACK" "Fallback from ${failed_model} to ${next_model}" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"reason\":\"${reason}\"}"
+    else
+        log_warn "[${TRACE_ID:-unknown}] Fallback from ${failed_model} to ${next_model} (reason: ${reason})"
+    fi
+
+    local output=""
+    local exit_code=0
+    if [[ -n "$FALLBACK_STDIN" ]]; then
+        output=$(printf '%s' "$FALLBACK_STDIN" | TRI_FALLBACK_IN_PROGRESS=1 "$delegate_path" --timeout "$TIMEOUT" "$PROMPT") || exit_code=$?
+    else
+        output=$(TRI_FALLBACK_IN_PROGRESS=1 "$delegate_path" --timeout "$TIMEOUT" "$PROMPT") || exit_code=$?
+    fi
+
+    FALLBACK_OUTPUT="$output"
+    FALLBACK_EXIT="$exit_code"
+    return 0
 }
 
 # --- Main Logic ---
@@ -111,6 +174,17 @@ END_MS=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
 DURATION_MS=$((END_MS - START_MS))
 
 # 3. Result Handling
+if [[ $EXIT_CODE -ne 0 ]]; then
+    failure_reason="Execution failed (exit $EXIT_CODE)"
+    if [[ $EXIT_CODE -eq 126 ]]; then
+        failure_reason="Circuit breaker OPEN"
+    fi
+    if attempt_fallback "claude" "$failure_reason"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
+fi
+
 if [[ $EXIT_CODE -eq 126 ]]; then
     # Breaker open
     json_output "error" "ABSTAIN" "0.0" "Circuit breaker OPEN" "" 0

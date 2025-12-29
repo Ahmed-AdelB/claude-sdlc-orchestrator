@@ -20,7 +20,7 @@ ALLOWED_CHARS_PATTERN='[a-zA-Z0-9_\-\.\s\/\:\,\"\{\}\[\]\=\+]'
 # MAX_TASK_SIZE_BYTES: Task-specific payload limit (default 100KB) - more restrictive
 readonly MAX_JSON_SIZE_BYTES="${MAX_JSON_SIZE_BYTES:-1048576}"   # 1MB = 1048576 bytes
 readonly MAX_TASK_SIZE_BYTES="${MAX_TASK_SIZE_BYTES:-102400}"    # 100KB task payload limit
-readonly MAX_JSON_DEPTH="${MAX_JSON_DEPTH:-20}"                  # Maximum nesting depth
+readonly MAX_JSON_DEPTH="${MAX_JSON_DEPTH:-10}"                  # Maximum nesting depth
 readonly MAX_ARRAY_ITEMS="${MAX_ARRAY_ITEMS:-1000}"              # Maximum array elements
 
 # Dangerous patterns for detection (using grep -E compatible patterns)

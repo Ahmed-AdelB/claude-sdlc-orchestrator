@@ -601,13 +601,43 @@ transition_task() {
         completed_at=", completed_at=datetime('now')"
     fi
 
-    _sqlite_exec "$STATE_DB" "UPDATE tasks SET state='${esc_state}', updated_at=datetime('now')${completed_at} WHERE id='${esc_task}';"
+    # M1-FIX: Verify UPDATE succeeded via changes()
+    local result
+    if command -v sqlite3 >/dev/null 2>&1; then
+        result=$(sqlite3 "$STATE_DB" <<SQL
+UPDATE tasks SET state='${esc_state}', updated_at=datetime('now')${completed_at} WHERE id='${esc_task}';
+SELECT changes();
+SQL
+)
+    else
+        # Python fallback
+        result=$(python3 -c "
+import sqlite3, sys
+try:
+    conn = sqlite3.connect('$STATE_DB', timeout=10.0)
+    cur = conn.cursor()
+    cur.execute(\"UPDATE tasks SET state='${esc_state}', updated_at=datetime('now')${completed_at} WHERE id='${esc_task}'\")
+    conn.commit()
+    print(cur.rowcount)
+    conn.close()
+except:
+    print('0')
+")
+    fi
+
+    # Check if row was updated
+    if [[ "$result" == "0" ]]; then
+        echo "Error: Failed to update task $task_id state to $new_state (DB lock or concurrent mod)" >&2
+        return 1
+    fi
 
     if [[ -n "$reason" ]]; then
         _sqlite_exec "$STATE_DB" "INSERT INTO events (task_id, event_type, actor, payload, trace_id) VALUES ('${esc_task}','STATE_${esc_state}','${esc_actor}','${esc_reason}','${TRACE_ID}');"
     else
         _sqlite_exec "$STATE_DB" "INSERT INTO events (task_id, event_type, actor, payload, trace_id) VALUES ('${esc_task}','STATE_${esc_state}','${esc_actor}','', '${TRACE_ID}');"
     fi
+    
+    return 0
 }
 
 create_task() {
@@ -657,7 +687,41 @@ increment_retry() {
 # =============================================================================
 # Uses BEGIN IMMEDIATE transaction for atomic task claiming.
 # Verifies the UPDATE succeeded before returning task ID.
+#
+# Key guarantees:
+# 1. BEGIN IMMEDIATE acquires write lock at transaction start
+# 2. WHERE state='QUEUED' prevents claiming already-claimed tasks
+# 3. changes() > 0 check verifies the claim actually succeeded
+# 4. Only the worker that successfully claimed gets the task ID
+#
+# This prevents race conditions where multiple workers try to claim
+# the same task simultaneously.
 # =============================================================================
+
+# M1-001: Log task claim attempt for audit trail
+_log_claim_attempt() {
+    local worker_id="$1"
+    local task_id="$2"
+    local success="$3"
+    local reason="${4:-}"
+
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$STATE_DB" ]]; then
+        local esc_worker="${worker_id//\'/\'\'}"
+        local esc_task="${task_id//\'/\'\'}"
+        local esc_reason="${reason//\'/\'\'}"
+
+        sqlite3 "$STATE_DB" "
+            INSERT INTO events (task_id, event_type, actor, payload, trace_id)
+            VALUES (
+                NULLIF('${esc_task}', ''),
+                CASE WHEN $success THEN 'TASK_CLAIM_SUCCESS' ELSE 'TASK_CLAIM_ATTEMPT' END,
+                '${esc_worker}',
+                json_object('success', $success, 'reason', '${esc_reason}'),
+                '${TRACE_ID}'
+            );
+        " 2>/dev/null || true
+    fi
+}
 
 # Canonical SQLite task claim function (M1-001)
 # Returns task ID only if claim succeeded, empty otherwise
@@ -668,7 +732,15 @@ sqlite_claim_task() {
     local model="${4:-}"
 
     # Delegate to the filtered version for full functionality
-    claim_task_atomic_filtered "$worker_id" "$task_types_csv" "$shard" "$model"
+    local result
+    result=$(claim_task_atomic_filtered "$worker_id" "$task_types_csv" "$shard" "$model")
+
+    # M1-001: Log the result for audit trail
+    if [[ -n "$result" ]]; then
+        _log_claim_attempt "$worker_id" "$result" 1 "atomic claim success"
+    fi
+
+    echo "$result"
 }
 
 # Atomic task claim (returns task id if claimed, empty otherwise)

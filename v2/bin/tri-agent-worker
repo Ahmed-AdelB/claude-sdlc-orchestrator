@@ -622,17 +622,35 @@ process_task() {
     if [[ "$result" == "SUCCESS" ]]; then
         # Move to REVIEW
         mkdir -p "$REVIEW_DIR"
-        mv "$running_file" "$REVIEW_DIR/$task_id.md"
-        transition_task "$task_id" "REVIEW" "Execution complete" "$WORKER_ID"
-
-        # Notify Supervisor (File-based trigger for now, until unified)
-        # The unified supervisor will poll the DB or Review dir
-        log_info "Task $task_id submitted for review (duration: ${task_duration:-unknown})"
+        
+        # M1-FIX: Update DB first to prevent orphans
+        if transition_task "$task_id" "REVIEW" "Execution complete" "$WORKER_ID"; then
+            if mv "$running_file" "$REVIEW_DIR/$task_id.md"; then
+                log_info "Task $task_id submitted for review (duration: ${task_duration:-unknown})"
+                
+                # Notify Supervisor (File-based trigger for now, until unified)
+                # The unified supervisor will poll the DB or Review dir
+            else
+                log_error "Failed to move file for $task_id to REVIEW. Reverting DB state."
+                transition_task "$task_id" "RUNNING" "File move failed" "$WORKER_ID" || true
+            fi
+        else
+            log_error "Failed to transition task $task_id to REVIEW (DB Error). Moving to FAILED."
+            mkdir -p "$FAILED_DIR"
+            mv "$running_file" "$FAILED_DIR/$task_id.md"
+            transition_task "$task_id" "FAILED" "DB Transition Error" "$WORKER_ID" || true
+        fi
     else
         # Move to FAILED
         mkdir -p "$FAILED_DIR"
-        mv "$running_file" "$FAILED_DIR/$task_id.md"
-        transition_task "$task_id" "FAILED" "Delegate execution failed" "$WORKER_ID"
+        
+        # M1-FIX: Update DB first
+        if transition_task "$task_id" "FAILED" "Delegate execution failed" "$WORKER_ID"; then
+            mv "$running_file" "$FAILED_DIR/$task_id.md"
+        else
+            log_error "Failed to transition task $task_id to FAILED (DB Error). Moving file anyway."
+            mv "$running_file" "$FAILED_DIR/$task_id.md"
+        fi
         log_error "Task $task_id failed (duration: ${task_duration:-unknown})"
     fi
 
@@ -780,7 +798,9 @@ while true; do
     fi
 
     # 4. Bridge Queue (Sync files to DB)
-    scan_queue_dirs
+    if ! scan_queue_dirs; then
+        log_warn "Queue sync failed temporarily (DB busy?) - continuing"
+    fi
 
     # 5. Claim Task (only if in RUNNING state)
     if [[ "$WORKER_STATE" == "RUNNING" ]]; then

@@ -193,6 +193,87 @@ SQL
     done <<< "$rows"
 }
 
+mark_worker_dead() {
+    local worker_id="$1"
+    local reason="${2:-unknown}"
+
+    _heartbeat_require_sqlite
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
+
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local esc_worker_id esc_reason
+        esc_worker_id="${worker_id//\'/\'\'}"
+        esc_reason="${reason//\'/\'\'}"
+
+        sqlite3 "$STATE_DB" <<SQL
+UPDATE workers
+SET status='dead',
+    last_heartbeat=datetime('now')
+WHERE worker_id='${esc_worker_id}';
+
+INSERT INTO events (task_id, event_type, actor, payload, trace_id)
+VALUES (
+    NULL,
+    'WORKER_CRASH_DETECTED',
+    'heartbeat',
+    '{"worker_id":"${esc_worker_id}","reason":"${esc_reason}"}',
+    '${TRACE_ID}'
+);
+SQL
+    fi
+}
+
+detect_crashed_workers_sqlite() {
+    local threshold_minutes="${1:-5}"
+    local grace_multiplier="${2:-1.5}"
+
+    _heartbeat_require_sqlite
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
+
+    local rows
+    rows=$(sqlite3 "$STATE_DB" -separator '|' <<SQL
+SELECT
+    w.worker_id,
+    w.pid,
+    w.status,
+    t.id,
+    t.type,
+    h.expected_timeout,
+    CAST((julianday('now') - julianday(COALESCE(h.updated_at, h.timestamp, w.last_heartbeat))) * 86400 AS INTEGER) AS heartbeat_age
+FROM workers w
+LEFT JOIN worker_heartbeats h ON h.worker_id = w.worker_id
+LEFT JOIN tasks t ON t.worker_id = w.worker_id AND t.state = 'RUNNING'
+WHERE w.status NOT IN ('dead','stopping')
+  AND (w.last_heartbeat IS NOT NULL OR h.timestamp IS NOT NULL);
+SQL
+)
+
+    while IFS='|' read -r worker_id pid status task_id task_type expected_timeout heartbeat_age; do
+        [[ -z "$worker_id" ]] && continue
+
+        if [[ -z "$heartbeat_age" ]] || ! [[ "$heartbeat_age" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+
+        local timeout_seconds
+        if [[ -n "$expected_timeout" ]] && [[ "$expected_timeout" =~ ^[0-9]+$ ]] && [[ "$expected_timeout" -gt 0 ]]; then
+            timeout_seconds="$expected_timeout"
+        elif [[ -n "$task_type" ]]; then
+            timeout_seconds=$(heartbeat_timeout_for_task_type "$task_type")
+        else
+            timeout_seconds=$((threshold_minutes * 60))
+        fi
+
+        if awk "BEGIN{exit !($heartbeat_age > $timeout_seconds * $grace_multiplier)}"; then
+            local reason="stale heartbeat age=${heartbeat_age}s timeout=${timeout_seconds}s"
+            if [[ -n "$task_id" ]]; then
+                recover_stale_task "$task_id" "$worker_id" "$reason"
+            fi
+            mark_worker_dead "$worker_id" "$reason"
+        fi
+    done <<< "$rows"
+}
+
 check_stale_workers_sqlite() {
     local threshold_minutes="${1:-5}"
     local grace_multiplier="${2:-1.5}"
@@ -202,6 +283,9 @@ check_stale_workers_sqlite() {
 
     if declare -F heartbeat_check_stale >/dev/null 2>&1; then
         heartbeat_check_stale "$grace_multiplier"
+    fi
+    if declare -F detect_crashed_workers_sqlite >/dev/null 2>&1; then
+        detect_crashed_workers_sqlite "$threshold_minutes" "$grace_multiplier"
     fi
 
     local rows
@@ -224,12 +308,14 @@ SQL
 
         if [[ -n "$task_id" ]]; then
             recover_stale_task "$task_id" "$worker_id" "heartbeat_timeout"
+            mark_worker_dead "$worker_id" "heartbeat_timeout"
         else
             if declare -F log_warn >/dev/null 2>&1; then
                 log_warn "[HEARTBEAT] Stale worker detected: $worker_id (last_heartbeat=${last_heartbeat:-unknown})"
             else
                 echo "[WARN] [HEARTBEAT] Stale worker detected: $worker_id (last_heartbeat=${last_heartbeat:-unknown})" >&2
             fi
+            mark_worker_dead "$worker_id" "heartbeat_timeout"
         fi
     done <<< "$rows"
 }
@@ -404,11 +490,11 @@ SET state='QUEUED',
     retry_count = COALESCE(retry_count, 0) + 1
 WHERE id='${esc_task_id}';
 
--- Mark worker as stale
-UPDATE workers
-SET status='stale',
-    last_heartbeat=datetime('now')
-WHERE worker_id='${esc_worker_id}';
+    -- Mark worker as dead
+    UPDATE workers
+    SET status='dead',
+        last_heartbeat=datetime('now')
+    WHERE worker_id='${esc_worker_id}';
 
 -- Log recovery event
 INSERT INTO events (task_id, event_type, actor, payload, trace_id)
@@ -541,4 +627,247 @@ SQL
     echo "$recovered"
 }
 
+#===============================================================================
+# M1-005: Scheduled Stale Task Recovery
+#===============================================================================
+# Enhanced recovery daemon that runs periodically to detect and recover
+# stale tasks. Integrates with worker heartbeats and process monitoring.
+#===============================================================================
+
+# M1-005: Recovery daemon state
+RECOVERY_DAEMON_RUNNING=false
+RECOVERY_DAEMON_PID=""
+RECOVERY_INTERVAL="${RECOVERY_INTERVAL:-60}"  # Check every 60 seconds
+RECOVERY_TIMEOUT="${RECOVERY_TIMEOUT:-900}"   # Default 15 min timeout
+
+# M1-005: Start stale task recovery daemon
+start_recovery_daemon() {
+    if [[ "$RECOVERY_DAEMON_RUNNING" == "true" ]]; then
+        if declare -F log_warn >/dev/null 2>&1; then
+            log_warn "[M1-005] Recovery daemon already running"
+        fi
+        return 1
+    fi
+
+    RECOVERY_DAEMON_RUNNING=true
+
+    (
+        trap 'RECOVERY_DAEMON_RUNNING=false; exit 0' SIGTERM SIGINT
+
+        if declare -F log_info >/dev/null 2>&1; then
+            log_info "[M1-005] Stale task recovery daemon started (interval: ${RECOVERY_INTERVAL}s)"
+        else
+            echo "[INFO] [M1-005] Stale task recovery daemon started (interval: ${RECOVERY_INTERVAL}s)" >&2
+        fi
+
+        while [[ "$RECOVERY_DAEMON_RUNNING" == "true" ]]; do
+            # Run recovery
+            local recovered
+            recovered=$(recover_stale_tasks "" 2>/dev/null || echo "0")
+
+            if [[ "$recovered" -gt 0 ]]; then
+                if declare -F log_info >/dev/null 2>&1; then
+                    log_info "[M1-005] Recovered $recovered stale tasks"
+                else
+                    echo "[INFO] [M1-005] Recovered $recovered stale tasks" >&2
+                fi
+            fi
+
+            # Also check for zombie tasks (workers that died without releasing tasks)
+            local zombies
+            zombies=$(recover_zombie_tasks 30 2>/dev/null || echo "0")
+
+            if [[ "$zombies" -gt 0 ]]; then
+                if declare -F log_info >/dev/null 2>&1; then
+                    log_info "[M1-005] Recovered $zombies zombie tasks"
+                else
+                    echo "[INFO] [M1-005] Recovered $zombies zombie tasks" >&2
+                fi
+            fi
+
+            sleep "$RECOVERY_INTERVAL"
+        done
+    ) &
+
+    RECOVERY_DAEMON_PID=$!
+
+    if declare -F log_debug >/dev/null 2>&1; then
+        log_debug "[M1-005] Recovery daemon PID: $RECOVERY_DAEMON_PID"
+    fi
+}
+
+# M1-005: Stop stale task recovery daemon
+stop_recovery_daemon() {
+    if [[ -n "$RECOVERY_DAEMON_PID" ]] && kill -0 "$RECOVERY_DAEMON_PID" 2>/dev/null; then
+        kill "$RECOVERY_DAEMON_PID" 2>/dev/null || true
+        wait "$RECOVERY_DAEMON_PID" 2>/dev/null || true
+        RECOVERY_DAEMON_PID=""
+    fi
+    RECOVERY_DAEMON_RUNNING=false
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M1-005] Stale task recovery daemon stopped"
+    else
+        echo "[INFO] [M1-005] Stale task recovery daemon stopped" >&2
+    fi
+}
+
+# M1-005: Check if a specific worker is alive
+is_worker_alive() {
+    local worker_id="$1"
+
+    if [[ -z "$worker_id" ]]; then
+        return 1
+    fi
+
+    _heartbeat_require_sqlite
+
+    # Get worker info from SQLite
+    local info
+    info=$(sqlite3 "$STATE_DB" -separator '|' <<SQL
+SELECT pid, status, last_heartbeat,
+    CAST((julianday('now') - julianday(last_heartbeat)) * 86400 AS INTEGER) AS heartbeat_age
+FROM workers
+WHERE worker_id='${worker_id//\'/\'\'}'
+LIMIT 1;
+SQL
+)
+
+    if [[ -z "$info" ]]; then
+        return 1  # Worker not found
+    fi
+
+    local pid status last_heartbeat heartbeat_age
+    IFS='|' read -r pid status last_heartbeat heartbeat_age <<< "$info"
+
+    # Check status
+    if [[ "$status" == "dead" || "$status" == "stopping" ]]; then
+        return 1
+    fi
+
+    # Check if process is running
+    if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]]; then
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0  # Process is running
+        else
+            # Process died, update status
+            sqlite3 "$STATE_DB" "UPDATE workers SET status='dead' WHERE worker_id='${worker_id//\'/\'\'}';"
+            return 1
+        fi
+    fi
+
+    # Check heartbeat age (default 5 min timeout)
+    local timeout="${RECOVERY_TIMEOUT:-300}"
+    if [[ -n "$heartbeat_age" ]] && (( heartbeat_age > timeout )); then
+        return 1  # Heartbeat too old
+    fi
+
+    return 0  # Assume alive if we can't determine otherwise
+}
+
+# M1-005: Force recover a specific task
+force_recover_task() {
+    local task_id="$1"
+    local reason="${2:-manual recovery}"
+
+    if [[ -z "$task_id" ]]; then
+        echo "Error: task_id required" >&2
+        return 1
+    fi
+
+    _heartbeat_require_sqlite
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
+
+    # Get current task state
+    local task_info
+    task_info=$(sqlite3 "$STATE_DB" -separator '|' <<SQL
+SELECT state, worker_id FROM tasks WHERE id='${task_id//\'/\'\'}' LIMIT 1;
+SQL
+)
+
+    if [[ -z "$task_info" ]]; then
+        echo "Error: Task not found: $task_id" >&2
+        return 1
+    fi
+
+    local current_state worker_id
+    IFS='|' read -r current_state worker_id <<< "$task_info"
+
+    if [[ "$current_state" != "RUNNING" ]]; then
+        echo "Warning: Task $task_id is not in RUNNING state (current: $current_state)" >&2
+    fi
+
+    # Force recovery
+    recover_stale_task "$task_id" "${worker_id:-unknown}" "$reason"
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M1-005] Force recovered task: $task_id (reason: $reason)"
+    else
+        echo "[INFO] [M1-005] Force recovered task: $task_id (reason: $reason)" >&2
+    fi
+
+    return 0
+}
+
+# M1-005: Get recovery status/statistics
+get_recovery_stats() {
+    _heartbeat_require_sqlite
+
+    local stats
+    stats=$(sqlite3 "$STATE_DB" <<SQL
+SELECT
+    (SELECT COUNT(*) FROM tasks WHERE state='RUNNING') as running_tasks,
+    (SELECT COUNT(*) FROM tasks WHERE state='QUEUED') as queued_tasks,
+    (SELECT COUNT(*) FROM workers WHERE status IN ('idle', 'busy')) as active_workers,
+    (SELECT COUNT(*) FROM workers WHERE status='dead') as dead_workers,
+    (SELECT COUNT(*) FROM events WHERE event_type='TASK_RECOVERED' AND timestamp > datetime('now', '-1 hour')) as recovered_last_hour,
+    (SELECT COUNT(*) FROM events WHERE event_type='ZOMBIE_RECOVERY' AND timestamp > datetime('now', '-1 hour')) as zombies_last_hour;
+SQL
+)
+
+    echo "M1-005 Recovery Statistics:"
+    echo "  Running tasks:        $(echo "$stats" | cut -d'|' -f1)"
+    echo "  Queued tasks:         $(echo "$stats" | cut -d'|' -f2)"
+    echo "  Active workers:       $(echo "$stats" | cut -d'|' -f3)"
+    echo "  Dead workers:         $(echo "$stats" | cut -d'|' -f4)"
+    echo "  Recovered (1hr):      $(echo "$stats" | cut -d'|' -f5)"
+    echo "  Zombie recoveries:    $(echo "$stats" | cut -d'|' -f6)"
+    echo "  Recovery daemon:      ${RECOVERY_DAEMON_RUNNING:-false}"
+    echo "  Recovery interval:    ${RECOVERY_INTERVAL}s"
+}
+
+# M1-005: Run immediate recovery check (for cron or manual use)
+run_recovery_check() {
+    local timeout="${1:-}"
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M1-005] Running immediate recovery check"
+    else
+        echo "[INFO] [M1-005] Running immediate recovery check" >&2
+    fi
+
+    # Check stale tasks
+    local stale_recovered
+    stale_recovered=$(recover_stale_tasks "$timeout" 2>/dev/null || echo "0")
+
+    # Check zombie tasks
+    local zombie_recovered
+    zombie_recovered=$(recover_zombie_tasks 30 2>/dev/null || echo "0")
+
+    # Check workers with stale heartbeats
+    check_stale_workers_sqlite 5 1.5 2>/dev/null || true
+
+    local total=$((stale_recovered + zombie_recovered))
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M1-005] Recovery check complete: $stale_recovered stale, $zombie_recovered zombies recovered"
+    else
+        echo "[INFO] [M1-005] Recovery check complete: $stale_recovered stale, $zombie_recovered zombies recovered" >&2
+    fi
+
+    echo "$total"
+}
+
 export -f recover_stale_tasks recover_stale_task recover_zombie_tasks
+export -f start_recovery_daemon stop_recovery_daemon is_worker_alive
+export -f force_recover_task get_recovery_stats run_recovery_check

@@ -90,6 +90,140 @@ declare -A PHASE_REQUIREMENTS=(
 )
 
 # =============================================================================
+# M2-011: Phase Artifact Helpers
+# =============================================================================
+# Provides parsing, resolution, and classification for phase-required artifacts.
+# =============================================================================
+
+# phase_required_artifacts(phase)
+# Outputs required artifacts for a phase, one per line (comma-separated in map).
+phase_required_artifacts() {
+    local phase="$1"
+    local required="${PHASE_ARTIFACTS[$phase]:-}"
+
+    [[ -z "$required" ]] && return 0
+
+    local item
+    local -a _items
+    IFS=',' read -ra _items <<< "$required"
+    for item in "${_items[@]}"; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [[ -n "$item" ]] && echo "$item"
+    done
+}
+
+# artifact_matches_requirement(artifact_path, requirement)
+# Returns 0 if artifact_path satisfies requirement.
+artifact_matches_requirement() {
+    local artifact_path="${1:-}"
+    local requirement="${2:-}"
+
+    [[ -z "$artifact_path" || -z "$requirement" ]] && return 1
+
+    local clean_path="${artifact_path%/}"
+    local clean_req="${requirement%/}"
+    local base_path="${clean_path##*/}"
+    local base_req="${clean_req##*/}"
+
+    if [[ "$clean_path" == "$clean_req" ]]; then
+        return 0
+    fi
+    if [[ "$clean_path" == */"$clean_req" ]]; then
+        return 0
+    fi
+    if [[ -n "$base_req" && "$base_path" == "$base_req" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# resolve_required_artifact(task_id, requirement)
+# Attempts to resolve a required artifact to an existing path.
+# Supports files and directories (directories should end with '/').
+resolve_required_artifact() {
+    local task_id="$1"
+    local requirement="$2"
+
+    [[ -z "$task_id" || -z "$requirement" ]] && return 1
+
+    local candidates=()
+    if [[ "$requirement" == /* ]]; then
+        candidates=("$requirement")
+    else
+        candidates=(
+            "${AUTONOMOUS_ROOT}/artifacts/${task_id}/${requirement}"
+            "${AUTONOMOUS_ROOT}/docs/${requirement}"
+            "${AUTONOMOUS_ROOT}/docs/${task_id}_${requirement}"
+            "${STATE_DIR}/tasks/${task_id}/${requirement}"
+        )
+    fi
+
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ "$requirement" == */ ]]; then
+            if [[ -d "$candidate" && -n "$(ls -A "$candidate" 2>/dev/null)" ]]; then
+                echo "$candidate"
+                return 0
+            fi
+        else
+            if [[ -f "$candidate" && -s "$candidate" ]]; then
+                echo "$candidate"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+# infer_artifact_type(artifact_path)
+# Derives artifact type based on path/extension.
+infer_artifact_type() {
+    local artifact_path="$1"
+    local lower_path
+    lower_path=$(printf '%s' "$artifact_path" | tr '[:upper:]' '[:lower:]')
+
+    case "$lower_path" in
+        *.md|*.txt|*.rst|*.adoc) echo "document" ;;
+        *.json|*.yml|*.yaml|*.toml|*.ini|*.env) echo "config" ;;
+        *.test.*|*.spec.*|*test*|*tests*) echo "test" ;;
+        *.sh|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rb|*.java|*.kt|*.cs|*.cpp|*.c|*.rs|*.php) echo "code" ;;
+        *)
+            if [[ -d "$artifact_path" ]]; then
+                if [[ "$lower_path" == *test* ]]; then
+                    echo "test"
+                else
+                    echo "code"
+                fi
+            else
+                echo "other"
+            fi
+            ;;
+    esac
+}
+
+# auto_register_phase_artifacts(task_id, phase)
+# Registers required artifacts for a phase when they exist on disk.
+auto_register_phase_artifacts() {
+    local task_id="$1"
+    local phase="$2"
+
+    [[ -z "$task_id" || -z "$phase" ]] && return 1
+
+    local requirement
+    while IFS= read -r requirement; do
+        [[ -z "$requirement" ]] && continue
+        local resolved=""
+        if resolved=$(resolve_required_artifact "$task_id" "$requirement"); then
+            register_artifact "$task_id" "$phase" "$resolved" "$(infer_artifact_type "$resolved")" 2>/dev/null || true
+        fi
+    done < <(phase_required_artifacts "$phase")
+
+    return 0
+}
+
+# =============================================================================
 # M2-012: Artifact Tracking SQLite Schema
 # =============================================================================
 
@@ -423,7 +557,7 @@ except Exception as e:
             if command -v sqlite3 >/dev/null 2>&1; then
                 sqlite3 -separator '|' "$db" "SELECT artifact_path, artifact_type, file_size, verified_at FROM task_artifacts WHERE task_id='${esc_task_id}' AND phase='${esc_phase}' ORDER BY created_at;" | while IFS='|' read -r path type size verified; do
                     local exists_marker="[MISSING]"
-                    if [[ -f "$path" ]]; then
+                    if [[ -e "$path" ]]; then
                         exists_marker="[EXISTS]"
                     fi
                     echo "  - $path ($type, ${size:-0} bytes) $exists_marker"
@@ -446,7 +580,7 @@ try:
     ''', ('$task_id', '$phase'))
     for row in cur.fetchall():
         path, atype, size, verified = row
-        exists = '[EXISTS]' if os.path.isfile(path) else '[MISSING]'
+        exists = '[EXISTS]' if os.path.exists(path) else '[MISSING]'
         print(f'  - {path} ({atype}, {size or 0} bytes) {exists}')
         if verified:
             print(f'    Verified: {verified}')
@@ -485,54 +619,49 @@ validate_phase_artifacts() {
     fi
 
     local db="${STATE_DB:-${STATE_DIR}/tri-agent.db}"
-
-    if [[ ! -f "$db" ]]; then
-        log_warn "Database not found: $db"
-        # Fall back to checking PHASE_ARTIFACTS
-        local required_artifact="${PHASE_ARTIFACTS[$phase]:-}"
-        if [[ -n "$required_artifact" ]]; then
-            local artifact_found=false
-            local possible_paths=(
-                "${AUTONOMOUS_ROOT}/artifacts/${task_id}/${required_artifact}"
-                "${AUTONOMOUS_ROOT}/docs/${required_artifact}"
-                "${AUTONOMOUS_ROOT}/docs/${task_id}_${required_artifact}"
-            )
-
-            for path in "${possible_paths[@]}"; do
-                if [[ -f "$path" && -s "$path" ]]; then
-                    artifact_found=true
-                    break
-                fi
-            done
-
-            if [[ "$artifact_found" == "false" ]]; then
-                log_error "validate_phase_artifacts: Required artifact '$required_artifact' not found for phase $phase"
-                return 1
-            fi
-        fi
-        return 0
-    fi
-
-    # Escape values
-    local esc_task_id esc_phase
-    if declare -F _sql_escape >/dev/null 2>&1; then
-        esc_task_id=$(_sql_escape "$task_id")
-        esc_phase=$(_sql_escape "$phase")
-    else
-        esc_task_id="${task_id//\'/\'\'}"
-        esc_phase="${phase//\'/\'\'}"
-    fi
-
     local validation_failed=false
+    local missing_required=()
     local missing_artifacts=()
     local invalid_artifacts=()
 
-    # Get artifacts from database
-    local artifacts
-    if command -v sqlite3 >/dev/null 2>&1; then
-        artifacts=$(sqlite3 -separator '|' "$db" "SELECT artifact_path, checksum FROM task_artifacts WHERE task_id='${esc_task_id}' AND phase='${esc_phase}';")
-    else
-        artifacts=$(python3 -c "
+    # Resolve required artifacts list for this phase
+    local required_list=()
+    local requirement
+    while IFS= read -r requirement; do
+        [[ -n "$requirement" ]] && required_list+=("$requirement")
+    done < <(phase_required_artifacts "$phase")
+
+    # Best-effort auto-registration of required artifacts
+    if [[ ${#required_list[@]} -gt 0 ]]; then
+        auto_register_phase_artifacts "$task_id" "$phase" 2>/dev/null || true
+    fi
+
+    # Fetch registered artifacts from database if available
+    local registered_paths=()
+    local registered_checksums=()
+    if [[ -f "$db" ]]; then
+        # Escape values
+        local esc_task_id esc_phase
+        if declare -F _sql_escape >/dev/null 2>&1; then
+            esc_task_id=$(_sql_escape "$task_id")
+            esc_phase=$(_sql_escape "$phase")
+        else
+            esc_task_id="${task_id//\'/\'\'}"
+            esc_phase="${phase//\'/\'\'}"
+        fi
+
+        if command -v sqlite3 >/dev/null 2>&1; then
+            while IFS='|' read -r artifact_path stored_checksum; do
+                [[ -z "$artifact_path" ]] && continue
+                registered_paths+=("$artifact_path")
+                registered_checksums+=("$stored_checksum")
+            done < <(sqlite3 -separator '|' "$db" "SELECT artifact_path, checksum FROM task_artifacts WHERE task_id='${esc_task_id}' AND phase='${esc_phase}';")
+        elif command -v python3 >/dev/null 2>&1; then
+            while IFS='|' read -r artifact_path stored_checksum; do
+                [[ -z "$artifact_path" ]] && continue
+                registered_paths+=("$artifact_path")
+                registered_checksums+=("$stored_checksum")
+            done < <(python3 -c "
 import sqlite3, sys
 db_path = '$db'
 try:
@@ -542,57 +671,73 @@ try:
     for row in cur.fetchall():
         print(f'{row[0]}|{row[1] or \"\"}')
     conn.close()
-except Exception as e:
+except Exception:
     sys.exit(1)
 ")
+        fi
+    else
+        log_warn "Database not found: $db"
     fi
 
-    # If no registered artifacts, check fallback PHASE_ARTIFACTS
-    if [[ -z "$artifacts" ]]; then
-        local required_artifact="${PHASE_ARTIFACTS[$phase]:-}"
-        if [[ -n "$required_artifact" ]]; then
-            local artifact_found=false
-            local possible_paths=(
-                "${AUTONOMOUS_ROOT}/artifacts/${task_id}/${required_artifact}"
-                "${AUTONOMOUS_ROOT}/docs/${required_artifact}"
-                "${AUTONOMOUS_ROOT}/docs/${task_id}_${required_artifact}"
-            )
-
-            for path in "${possible_paths[@]}"; do
-                if [[ -f "$path" && -s "$path" ]]; then
-                    artifact_found=true
-                    log_info "validate_phase_artifacts: Found fallback artifact at $path"
+    # Ensure required artifacts are present (registered or on disk)
+    if [[ ${#required_list[@]} -gt 0 ]]; then
+        for requirement in "${required_list[@]}"; do
+            local matched=false
+            local artifact_path
+            for artifact_path in "${registered_paths[@]}"; do
+                if artifact_matches_requirement "$artifact_path" "$requirement"; then
+                    matched=true
                     break
                 fi
             done
 
-            if [[ "$artifact_found" == "false" ]]; then
-                log_error "validate_phase_artifacts: No registered artifacts and fallback '$required_artifact' not found"
-                return 1
+            if [[ "$matched" == "false" ]]; then
+                local resolved=""
+                if resolved=$(resolve_required_artifact "$task_id" "$requirement"); then
+                    register_artifact "$task_id" "$phase" "$resolved" "$(infer_artifact_type "$resolved")" 2>/dev/null || true
+                    registered_paths+=("$resolved")
+                    registered_checksums+=("")
+                    matched=true
+                fi
             fi
-        fi
-        return 0
+
+            if [[ "$matched" == "false" ]]; then
+                missing_required+=("$requirement")
+                validation_failed=true
+            fi
+        done
     fi
 
     # Validate each registered artifact
-    while IFS='|' read -r artifact_path stored_checksum; do
+    local idx
+    for idx in "${!registered_paths[@]}"; do
+        local artifact_path="${registered_paths[$idx]}"
+        local stored_checksum="${registered_checksums[$idx]}"
         [[ -z "$artifact_path" ]] && continue
 
-        # Check file existence
-        if [[ ! -f "$artifact_path" ]]; then
+        if [[ ! -e "$artifact_path" ]]; then
             missing_artifacts+=("$artifact_path")
             validation_failed=true
             continue
         fi
 
-        # Check file is not empty
+        if [[ -d "$artifact_path" ]]; then
+            if [[ -z "$(ls -A "$artifact_path" 2>/dev/null)" ]]; then
+                invalid_artifacts+=("$artifact_path (empty directory)")
+                validation_failed=true
+                continue
+            fi
+            log_info "validate_phase_artifacts: Artifact valid: $artifact_path"
+            continue
+        fi
+
         if [[ ! -s "$artifact_path" ]]; then
             invalid_artifacts+=("$artifact_path (empty file)")
             validation_failed=true
             continue
         fi
 
-        # Strict mode: verify checksum
+        # Strict mode: verify checksum for files
         if [[ "$strict" == "true" && -n "$stored_checksum" ]]; then
             local current_checksum=""
             if command -v sha256sum >/dev/null 2>&1; then
@@ -609,20 +754,26 @@ except Exception as e:
         fi
 
         log_info "validate_phase_artifacts: Artifact valid: $artifact_path"
-    done <<< "$artifacts"
+    done
 
     # Report results
     if [[ "$validation_failed" == "true" ]]; then
+        if [[ ${#missing_required[@]} -gt 0 ]]; then
+            log_error "validate_phase_artifacts: Missing required artifacts for $task_id/$phase:"
+            for requirement in "${missing_required[@]}"; do
+                log_error "  - $requirement"
+            done
+        fi
         if [[ ${#missing_artifacts[@]} -gt 0 ]]; then
             log_error "validate_phase_artifacts: Missing artifacts for $task_id/$phase:"
-            for artifact in "${missing_artifacts[@]}"; do
-                log_error "  - $artifact"
+            for artifact_path in "${missing_artifacts[@]}"; do
+                log_error "  - $artifact_path"
             done
         fi
         if [[ ${#invalid_artifacts[@]} -gt 0 ]]; then
             log_error "validate_phase_artifacts: Invalid artifacts for $task_id/$phase:"
-            for artifact in "${invalid_artifacts[@]}"; do
-                log_error "  - $artifact"
+            for artifact_path in "${invalid_artifacts[@]}"; do
+                log_error "  - $artifact_path"
             done
         fi
         return 1
@@ -1357,6 +1508,10 @@ verify_artifact_exists() {
         return 0
     fi
 
+    if [[ -d "$artifact_path" && -n "$(ls -A "$artifact_path" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
     return 1
 }
 
@@ -1524,7 +1679,7 @@ except Exception as e:
                         echo "  Phase: $phase"
                     fi
                     local exists_marker="[MISSING]"
-                    if [[ -f "$path" ]]; then
+                    if [[ -e "$path" ]]; then
                         exists_marker="[EXISTS]"
                     fi
                     echo "    - $path ($type, ${size:-0} bytes) $exists_marker"
@@ -1549,7 +1704,7 @@ try:
             current_phase = phase
             print(f'')
             print(f'  Phase: {phase}')
-        exists = '[EXISTS]' if os.path.isfile(path) else '[MISSING]'
+        exists = '[EXISTS]' if os.path.exists(path) else '[MISSING]'
         print(f'    - {path} ({atype}, {size or 0} bytes) {exists}')
     conn.close()
 except Exception as e:
@@ -1568,7 +1723,13 @@ sdlc_init_task() {
     local task_id="$1"
     local phase="${2:-BRAINSTORM}"
 
+    if [[ -z "${PHASE_ORDER[$phase]:-}" ]]; then
+        log_warn "sdlc_init_task: Invalid phase '$phase', defaulting to BRAINSTORM"
+        phase="BRAINSTORM"
+    fi
+
     mkdir -p "${STATE_DIR}/sdlc"
+    mkdir -p "${AUTONOMOUS_ROOT}/artifacts/${task_id}" 2>/dev/null || true
     echo "$phase" > "${STATE_DIR}/sdlc/${task_id}.phase"
 
     # M2-012: Ensure artifact tracking table exists
@@ -1613,7 +1774,12 @@ validate_transition() {
         failure_reason="Invalid transition: $current_phase -> $next_phase"
     fi
 
-    # 2. M2-012: Validate phase artifacts using new artifact tracking system
+    # 2. M2-011: Auto-register required artifacts for current phase
+    if [[ "$validation_failed" == "false" ]]; then
+        auto_register_phase_artifacts "$task_id" "$current_phase" 2>/dev/null || true
+    fi
+
+    # 3. M2-012: Validate phase artifacts using new artifact tracking system
     if [[ "$validation_failed" == "false" ]]; then
         # First try the new validate_phase_artifacts function (M2-012)
         if ! validate_phase_artifacts "$task_id" "$current_phase"; then
@@ -1623,7 +1789,7 @@ validate_transition() {
         fi
     fi
 
-    # 3. M2-012: File existence verification for registered artifacts
+    # 4. M2-012: File existence verification for registered artifacts
     if [[ "$validation_failed" == "false" ]]; then
         local db="${STATE_DB:-${STATE_DIR}/tri-agent.db}"
         if [[ -f "$db" ]]; then
@@ -1649,7 +1815,7 @@ validate_transition() {
         fi
     fi
 
-    # 4. M2-013: Phase gate validation - enforce phase-specific quality gates
+    # 5. M2-013: Phase gate validation - enforce phase-specific quality gates
     if [[ "$validation_failed" == "false" && "$skip_gate" != "true" ]]; then
         log_info "M2-013: Running phase gate validation for $current_phase -> $next_phase"
 

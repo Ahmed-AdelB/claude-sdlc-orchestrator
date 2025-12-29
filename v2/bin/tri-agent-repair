@@ -1,0 +1,86 @@
+#!/bin/bash
+# =============================================================================
+# bin/tri-agent-repair
+# =============================================================================
+# Repair script for TRI-24 Incident 20251229
+# Function: Re-syncs SQLite database from filesystem state
+# =============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+source "${AUTONOMOUS_ROOT}/lib/common.sh"
+source "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh"
+
+log_info "Starting System Repair..."
+
+# 1. Sync QUEUE
+log_info "Syncing QUEUE..."
+find "${AUTONOMOUS_ROOT}/tasks/queue" -name "*.md" | while read -r file; do
+    id=$(basename "$file" .md)
+    ensure_task_exists "$id" "MEDIUM" "QUEUED"
+    echo "Queued: $id"
+done
+
+# 2. Sync RUNNING
+log_info "Syncing RUNNING..."
+find "${AUTONOMOUS_ROOT}/tasks/running" -name "*.md" | while read -r file; do
+    id=$(basename "$file" .md)
+    # Ensure it exists first
+    ensure_task_exists "$id" "MEDIUM" "RUNNING"
+    # Force state to RUNNING
+    transition_task "$id" "RUNNING" "Repair Sync" "repair-script" || true
+    echo "Running: $id"
+done
+
+# 3. Sync REVIEW
+log_info "Syncing REVIEW..."
+find "${AUTONOMOUS_ROOT}/tasks/review" -name "*.md" | while read -r file; do
+    id=$(basename "$file" .md)
+    ensure_task_exists "$id" "MEDIUM" "REVIEW"
+    # Force state update (might need to jump from QUEUED)
+    _sqlite_exec "$STATE_DB" "UPDATE tasks SET state='REVIEW', updated_at=datetime('now') WHERE id='$id';"
+    echo "Review: $id"
+done
+
+# 4. Sync COMPLETED/FAILED/APPROVED/REJECTED
+for state in COMPLETED FAILED APPROVED REJECTED; do
+    dir="${AUTONOMOUS_ROOT}/tasks/${state,,}" # lowercase
+    if [[ -d "$dir" ]]; then
+        log_info "Syncing $state..."
+        find "$dir" -name "*.md" | while read -r file; do
+            id=$(basename "$file" .md)
+            ensure_task_exists "$id" "MEDIUM" "$state"
+            _sqlite_exec "$STATE_DB" "UPDATE tasks SET state='$state', updated_at=datetime('now') WHERE id='$id';"
+            echo "$state: $id"
+        done
+    fi
+done
+
+# 5. Fix Orphans (In DB as RUNNING but not on FS)
+log_info "Checking for orphans..."
+orphans=$(_sqlite_exec "$STATE_DB" "SELECT id FROM tasks WHERE state='RUNNING';")
+for id in $orphans; do
+    if [[ ! -f "${AUTONOMOUS_ROOT}/tasks/running/$id.md" ]]; then
+        log_warn "Orphan found in DB: $id (State: RUNNING, File: Missing)"
+        # Check if it is elsewhere
+        found=false
+        for d in queue review approved rejected completed failed; do
+            if [[ -f "${AUTONOMOUS_ROOT}/tasks/$d/$id.md" ]]; then
+                log_info "Found $id in $d. Updating DB..."
+                new_state=${d^^}
+                _sqlite_exec "$STATE_DB" "UPDATE tasks SET state='$new_state', updated_at=datetime('now') WHERE id='$id';"
+                found=true
+                break
+            fi
+        done
+        
+        if [[ "$found" == "false" ]]; then
+            log_warn "Task $id is lost. Resetting to FAILED."
+            transition_task "$id" "FAILED" "Orphaned (File missing)" "repair-script"
+        fi
+    fi
+done
+
+log_info "Repair Complete."

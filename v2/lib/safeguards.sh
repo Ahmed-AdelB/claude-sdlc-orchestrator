@@ -141,6 +141,9 @@ normalize_for_matching() {
     # Step 3: Normalize whitespace (multiple spaces/tabs to single space)
     normalized=$(printf '%s' "$normalized" | tr -s '[:space:]' ' ')
 
+    # Step 3b: Trim leading/trailing whitespace
+    normalized=$(printf '%s' "$normalized" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
     # Step 4: Remove non-printable characters except newline
     normalized=$(printf '%s' "$normalized" | tr -d '\000-\010\013-\037\177')
 
@@ -167,7 +170,8 @@ normalize_pattern_for_matching() {
     # Return empty if input is empty
     [[ -z "$input" ]] && return 0
 
-    local normalized=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+    local normalized
+    normalized=$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
     printf '%s' "$normalized"
 }
 
@@ -294,10 +298,16 @@ check_destructive_ops() {
         return 1
     fi
 
+    # Normalize command for case-insensitive legacy matching
+    local normalized_command
+    normalized_command=$(normalize_for_matching "$command")
+
     # Legacy blacklist check (kept for backwards compatibility and explicit patterns)
     for pattern in "${BLACKLISTED_PATTERNS[@]}"; do
-        if [[ "$command" == *"$pattern"* ]]; then
-            log_safeguard "CRITICAL" "Blocked destructive command: $command"
+        local normalized_pattern
+        normalized_pattern=$(normalize_pattern_for_matching "$pattern")
+        if [[ "$normalized_command" == *"$normalized_pattern"* ]]; then
+            log_safeguard "CRITICAL" "Blocked destructive command (normalized): $normalized_pattern"
             return 1
         fi
     done

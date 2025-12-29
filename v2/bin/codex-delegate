@@ -45,6 +45,10 @@ fi
 # Source Circuit Breaker
 if [[ -f "${LIB_DIR}/circuit-breaker.sh" ]]; then
     source "${LIB_DIR}/circuit-breaker.sh"
+    if declare -f load_breaker_config >/dev/null 2>&1; then
+        load_breaker_config 2>/dev/null || true
+    fi
+    CB_FAILURE_THRESHOLD="${CB_FAILURE_THRESHOLD:-3}"
 fi
 
 # Set component for logging
@@ -333,6 +337,67 @@ extract_reasoning() {
 }
 
 #===============================================================================
+# Fallback Helpers
+#===============================================================================
+FALLBACK_OUTPUT=""
+FALLBACK_EXIT=0
+FALLBACK_STDIN=""
+
+_fallback_delegate_path() {
+    local model="$1"
+    echo "${SCRIPT_DIR}/${model}-delegate"
+}
+
+attempt_fallback() {
+    local failed_model="$1"
+    local reason="$2"
+
+    if [[ "${TRI_FALLBACK_DISABLED:-false}" == "true" ]]; then
+        return 1
+    fi
+    if [[ "${TRI_FALLBACK_IN_PROGRESS:-0}" == "1" ]]; then
+        return 1
+    fi
+
+    local next_model=""
+    if declare -f fallback_to_next_model >/dev/null 2>&1; then
+        next_model=$(fallback_to_next_model "$failed_model") || return 1
+    else
+        case "$failed_model" in
+            "claude") next_model="codex" ;;
+            "codex") next_model="gemini" ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    local delegate_path
+    delegate_path=$(_fallback_delegate_path "$next_model")
+    if [[ ! -x "$delegate_path" ]]; then
+        log_warn "[${TRACE_ID:-unknown}] Fallback delegate not found for ${next_model}: ${delegate_path}"
+        return 1
+    fi
+
+    if declare -F log_codex >/dev/null 2>&1; then
+        log_codex "WARN" "FALLBACK" "Fallback from ${failed_model} to ${next_model}" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"reason\":\"${reason}\"}"
+    else
+        log_warn "[${TRACE_ID:-unknown}] Fallback from ${failed_model} to ${next_model} (reason: ${reason})"
+    fi
+
+    local output=""
+    local exit_code=0
+    if [[ -n "$FALLBACK_STDIN" ]]; then
+        output=$(printf '%s' "$FALLBACK_STDIN" | TRI_FALLBACK_IN_PROGRESS=1 "$delegate_path" --timeout "$TIMEOUT" "$PROMPT") || exit_code=$?
+    else
+        output=$(TRI_FALLBACK_IN_PROGRESS=1 "$delegate_path" --timeout "$TIMEOUT" "$PROMPT") || exit_code=$?
+    fi
+
+    FALLBACK_OUTPUT="$output"
+    FALLBACK_EXIT="$exit_code"
+    return 0
+}
+
+#===============================================================================
 # Validate Input
 #===============================================================================
 if [[ -z "$PROMPT" ]]; then
@@ -342,6 +407,10 @@ fi
 
 # Check if Codex CLI exists
 if ! command_exists "$CODEX_CMD"; then
+    if attempt_fallback "codex" "Codex CLI not found"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
     json_output "error" "ABSTAIN" "0.0" "Codex CLI not found" "" 0
     exit 1
 fi
@@ -360,6 +429,7 @@ if [[ ! -t 0 ]]; then
         log_warn "Stdin truncated to ${MAX_STDIN_SIZE} bytes (500KB limit)"
     fi
 fi
+FALLBACK_STDIN="$STDIN_CONTENT"
 
 # Build full prompt
 FULL_PROMPT="$PROMPT"
@@ -466,6 +536,10 @@ if [[ $EXIT_CODE -eq 126 ]]; then
     # Breaker open
     log_codex "WARN" "CIRCUIT_BREAKER" "Circuit breaker open for codex" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
     record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
+    if attempt_fallback "codex" "Circuit breaker OPEN"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
     json_output "error" "ABSTAIN" "0.0" "Circuit breaker OPEN" "" "$DURATION_MS"
     exit 1
 elif [[ $EXIT_CODE -eq 124 ]]; then
@@ -474,6 +548,10 @@ elif [[ $EXIT_CODE -eq 124 ]]; then
         "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
 
     record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
+    if attempt_fallback "codex" "Request timed out after ${TIMEOUT}s"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
     json_output "error" "ABSTAIN" "0.0" "Request timed out after ${TIMEOUT}s" "" "$DURATION_MS"
     exit 1
 
@@ -516,6 +594,10 @@ elif [[ $EXIT_CODE -ne 0 ]]; then
 
     masked_reason=$(mask_secrets_local "$error_reason")
     record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
+    if attempt_fallback "codex" "$masked_reason"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
     json_output "error" "ABSTAIN" "0.0" "$masked_reason" "" "$DURATION_MS"
     exit 1
 fi

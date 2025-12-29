@@ -290,7 +290,10 @@ security:
     - 'AWS_ACCESS_KEY_ID=[A-Z0-9]{20}'
     - 'aws_access_key_id["\s:=]+[A-Za-z0-9/+=]{20,}'
     - 'aws_secret_access_key["\s:=]+[A-Za-z0-9/+=]{40,}'
+    - 'aws_session_token["\s:=]+[A-Za-z0-9/+=]{16,}'
     - 'AWS_SECRET_ACCESS_KEY=[^\s]+'
+    - 'AWS_SESSION_TOKEN=[^\s]+'
+    - 'AWS_SECURITY_TOKEN=[^\s]+'
     - 'AWS_[A-Z_]+=[^\s]+'
 
     # Azure
@@ -303,6 +306,8 @@ security:
     - 'gho_[a-zA-Z0-9]{36,}'
     - 'ghs_[a-zA-Z0-9]{36,}'
     - 'ghr_[a-zA-Z0-9]{36,}'
+    - 'ghu_[a-zA-Z0-9]{36,}'
+    - 'ghv_[a-zA-Z0-9]{36,}'
     - 'github_pat_[a-zA-Z0-9_]{22,}'
 
     # GitLab (SEC-010)
@@ -329,6 +334,8 @@ security:
 
     # JWT tokens (SEC-010)
     - 'eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'
+    - 'eyJhbGci[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
+    - 'jwt["\s:=]+eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'
 
     # OAuth tokens (SEC-010)
     - 'oauth[_-]?token["\s:=]+[a-zA-Z0-9._~-]{20,}'

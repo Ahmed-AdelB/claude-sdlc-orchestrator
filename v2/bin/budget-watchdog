@@ -36,13 +36,21 @@ if [[ -f "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" ]]; then
 fi
 
 # Config
-VERSION="2.1.0"
+VERSION="2.2.0"  # M1-003: Enhanced active monitoring
 BUDGET_DAILY_LIMIT="${BUDGET_DAILY_LIMIT:-75.00}"
-BUDGET_RATE_LIMIT="${BUDGET_RATE_LIMIT:-1.00}"          # $1/min hard limit
+BUDGET_RATE_LIMIT="${BUDGET_RATE_LIMIT:-1.00}"          # $1/min hard limit (M1-003)
 BUDGET_RATE_WARNING="${BUDGET_RATE_WARNING:-0.50}"      # $0.50/min soft limit
 BUDGET_DAILY_PAUSE_PCT="${BUDGET_DAILY_PAUSE_PCT:-0.90}" # Pause workers at 90% of daily limit
-BUDGET_CHECK_INTERVAL="${BUDGET_CHECK_INTERVAL:-30}"    # seconds
+BUDGET_CHECK_INTERVAL="${BUDGET_CHECK_INTERVAL:-30}"    # seconds (normal mode)
+BUDGET_CHECK_INTERVAL_FAST="${BUDGET_CHECK_INTERVAL_FAST:-5}"  # M1-003: Fast mode interval
 BUDGET_WINDOW_SIZE="${BUDGET_WINDOW_SIZE:-300}"         # 5-minute rolling window
+BUDGET_WINDOW_SIZE_FAST="${BUDGET_WINDOW_SIZE_FAST:-60}"  # M1-003: 1-minute window for fast rate calc
+
+# M1-003: Active monitoring state
+ACTIVE_MONITORING_MODE="normal"  # normal | fast | critical
+CONSECUTIVE_HIGH_RATE_COUNT=0
+RATE_HISTORY=()
+MAX_RATE_HISTORY=12  # Keep last 12 rate samples for trend analysis
 
 STATE_DIR="${AUTONOMOUS_ROOT}/state/budget"
 STATE_DB="${AUTONOMOUS_ROOT}/state/tri-agent.db"
@@ -185,6 +193,164 @@ get_current_rate() {
 
     COST_SOURCE_RATE="spend_log"
     get_current_rate_log
+}
+
+#===============================================================================
+# M1-003: Active Rate Monitoring with $1/min Kill-Switch
+#===============================================================================
+# Provides faster rate calculation using 1-minute sliding window
+# and trend analysis for proactive budget protection.
+#===============================================================================
+
+# M1-003: Get fast rate (1-minute window for immediate response)
+get_current_rate_fast() {
+    local window_seconds="${BUDGET_WINDOW_SIZE_FAST:-60}"
+
+    if sqlite_has_costs_table && rate_configured; then
+        local total
+        total=$(sqlite_cost_sum "timestamp >= datetime('now', '-${window_seconds} seconds')")
+
+        local window_minutes
+        window_minutes=$(awk "BEGIN {print $window_seconds / 60}")
+        if awk "BEGIN{exit !($window_minutes > 0)}" 2>/dev/null; then
+            local rate
+            rate=$(awk "BEGIN {printf \"%.4f\", $total / $window_minutes}")
+            echo "$rate"
+            return
+        fi
+    fi
+
+    # Fallback to spend log with fast window
+    if [[ ! -f "$SPEND_LOG" ]]; then
+        echo "0.00"
+        return
+    fi
+
+    local window_start=$(($(date +%s) - window_seconds))
+    local total=0
+
+    while IFS= read -r line; do
+        local ts=$(echo "$line" | grep -oE '"timestamp_epoch":[0-9]+' | cut -d: -f2)
+        if [[ -n "$ts" && $ts -ge $window_start ]]; then
+            local amount=$(echo "$line" | grep -oE '"amount":[0-9.]+' | cut -d: -f2)
+            if [[ -n "$amount" ]]; then
+                total=$(awk "BEGIN {print $total + $amount}")
+            fi
+        fi
+    done < "$SPEND_LOG"
+
+    local window_minutes=$(awk "BEGIN {print $window_seconds / 60}")
+    if [[ $(echo "$window_minutes > 0" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+        local rate=$(awk "BEGIN {printf \"%.4f\", $total / $window_minutes}")
+        echo "$rate"
+    else
+        echo "0.00"
+    fi
+}
+
+# M1-003: Update rate history for trend analysis
+update_rate_history() {
+    local current_rate="$1"
+
+    # Add to history
+    RATE_HISTORY+=("$current_rate")
+
+    # Trim to max size
+    while [[ ${#RATE_HISTORY[@]} -gt $MAX_RATE_HISTORY ]]; do
+        RATE_HISTORY=("${RATE_HISTORY[@]:1}")
+    done
+}
+
+# M1-003: Analyze rate trend (returns: stable, increasing, decreasing, spike)
+analyze_rate_trend() {
+    if [[ ${#RATE_HISTORY[@]} -lt 3 ]]; then
+        echo "stable"
+        return
+    fi
+
+    local recent_avg=0
+    local older_avg=0
+    local len=${#RATE_HISTORY[@]}
+    local half=$((len / 2))
+
+    # Calculate recent average (second half)
+    local count=0
+    for ((i = half; i < len; i++)); do
+        recent_avg=$(awk "BEGIN {print $recent_avg + ${RATE_HISTORY[$i]}}")
+        ((count++))
+    done
+    recent_avg=$(awk "BEGIN {printf \"%.4f\", $recent_avg / $count}")
+
+    # Calculate older average (first half)
+    count=0
+    for ((i = 0; i < half; i++)); do
+        older_avg=$(awk "BEGIN {print $older_avg + ${RATE_HISTORY[$i]}}")
+        ((count++))
+    done
+    older_avg=$(awk "BEGIN {printf \"%.4f\", $older_avg / $count}")
+
+    # Detect spike (last value > 2x average)
+    local last_rate="${RATE_HISTORY[-1]}"
+    local avg_all=$(awk "BEGIN {printf \"%.4f\", ($recent_avg + $older_avg) / 2}")
+
+    if awk "BEGIN{exit !($last_rate > $avg_all * 2)}" 2>/dev/null; then
+        echo "spike"
+        return
+    fi
+
+    # Detect trend
+    local diff=$(awk "BEGIN {printf \"%.4f\", $recent_avg - $older_avg}")
+
+    if awk "BEGIN{exit !($diff > 0.1)}" 2>/dev/null; then
+        echo "increasing"
+    elif awk "BEGIN{exit !($diff < -0.1)}" 2>/dev/null; then
+        echo "decreasing"
+    else
+        echo "stable"
+    fi
+}
+
+# M1-003: Determine monitoring mode based on current rate
+determine_monitoring_mode() {
+    local current_rate="$1"
+    local trend="$2"
+
+    # Critical: Rate >= 80% of limit
+    if awk "BEGIN{exit !($current_rate >= $BUDGET_RATE_LIMIT * 0.8)}" 2>/dev/null; then
+        echo "critical"
+        return
+    fi
+
+    # Fast: Rate >= 50% of limit OR increasing trend at >= 30%
+    if awk "BEGIN{exit !($current_rate >= $BUDGET_RATE_LIMIT * 0.5)}" 2>/dev/null; then
+        echo "fast"
+        return
+    fi
+
+    if [[ "$trend" == "increasing" || "$trend" == "spike" ]]; then
+        if awk "BEGIN{exit !($current_rate >= $BUDGET_RATE_LIMIT * 0.3)}" 2>/dev/null; then
+            echo "fast"
+            return
+        fi
+    fi
+
+    # Normal: Low rate and stable
+    echo "normal"
+}
+
+# M1-003: Get effective check interval based on monitoring mode
+get_effective_check_interval() {
+    case "$ACTIVE_MONITORING_MODE" in
+        critical)
+            echo 2  # Check every 2 seconds in critical mode
+            ;;
+        fast)
+            echo "$BUDGET_CHECK_INTERVAL_FAST"  # 5 seconds
+            ;;
+        *)
+            echo "$BUDGET_CHECK_INTERVAL"  # 30 seconds
+            ;;
+    esac
 }
 
 get_current_rate_sqlite() {
@@ -516,14 +682,45 @@ check_budget_status() {
 
     local daily_spend=$(get_daily_spend)
     local current_rate=$(get_current_rate)
+    local fast_rate=$(get_current_rate_fast)  # M1-003: Fast 1-min rate
     local daily_pause_threshold
     daily_pause_threshold=$(awk "BEGIN {printf \"%.2f\", $BUDGET_DAILY_LIMIT * $BUDGET_DAILY_PAUSE_PCT}")
 
-    log_debug "Budget check: daily=\$$daily_spend/${BUDGET_DAILY_LIMIT}, rate=\$$current_rate/min/${BUDGET_RATE_LIMIT}/min"
+    # M1-003: Update rate history and analyze trend
+    update_rate_history "$fast_rate"
+    local trend=$(analyze_rate_trend)
+
+    # M1-003: Update monitoring mode
+    local new_mode=$(determine_monitoring_mode "$fast_rate" "$trend")
+    if [[ "$new_mode" != "$ACTIVE_MONITORING_MODE" ]]; then
+        log_info "M1-003: Monitoring mode changed: $ACTIVE_MONITORING_MODE -> $new_mode (rate=\$$fast_rate/min, trend=$trend)"
+        ACTIVE_MONITORING_MODE="$new_mode"
+    fi
+
+    log_debug "Budget check: daily=\$$daily_spend/${BUDGET_DAILY_LIMIT}, rate=\$$current_rate/min, fast_rate=\$$fast_rate/min, mode=$ACTIVE_MONITORING_MODE, trend=$trend"
 
     update_budget_state "$daily_spend" "$current_rate"
 
-    # Check rate limit (hard kill)
+    # M1-003: Check FAST rate limit first (more sensitive, 1-min window)
+    # This catches spikes immediately before they average out
+    if awk "BEGIN{exit !($fast_rate >= $BUDGET_RATE_LIMIT)}" 2>/dev/null; then
+        ((CONSECUTIVE_HIGH_RATE_COUNT++)) || true
+        log_error "M1-003: Fast rate limit breach detected! \$${fast_rate}/min >= \$${BUDGET_RATE_LIMIT}/min (count: $CONSECUTIVE_HIGH_RATE_COUNT)"
+
+        # Immediate kill-switch on 2nd consecutive breach or any breach in critical mode
+        if [[ $CONSECUTIVE_HIGH_RATE_COUNT -ge 2 ]] || [[ "$ACTIVE_MONITORING_MODE" == "critical" ]]; then
+            activate_kill_switch "M1-003 Kill-Switch: Fast rate \$${fast_rate}/min >= \$${BUDGET_RATE_LIMIT}/min (consecutive: $CONSECUTIVE_HIGH_RATE_COUNT)"
+            return 1
+        else
+            # First breach - pause workers immediately as warning
+            log_warn "M1-003: First rate breach - pausing workers as precaution"
+            pause_workers "budget_rate_warning" "auto"
+        fi
+    else
+        CONSECUTIVE_HIGH_RATE_COUNT=0
+    fi
+
+    # Check standard rate limit (hard kill) - 5-min average
     if awk "BEGIN{exit !($current_rate >= $BUDGET_RATE_LIMIT)}" 2>/dev/null; then
         activate_kill_switch "Rate limit exceeded: \$${current_rate}/min >= \$${BUDGET_RATE_LIMIT}/min"
         return 1
@@ -535,17 +732,30 @@ check_budget_status() {
         return 1
     fi
 
+    # M1-003: Proactive pause at 70% of rate limit when in fast/critical mode
+    if [[ "$ACTIVE_MONITORING_MODE" != "normal" ]]; then
+        if awk "BEGIN{exit !($fast_rate >= $BUDGET_RATE_LIMIT * 0.7)}" 2>/dev/null; then
+            if ! budget_pause_active; then
+                log_warn "M1-003: Proactive pause at 70% rate limit (\$${fast_rate}/min)"
+                pause_workers "budget_rate_proactive" "auto"
+            fi
+        fi
+    fi
+
     # Auto-pause workers when approaching daily limit
     if awk "BEGIN{exit !($daily_spend >= $daily_pause_threshold)}" 2>/dev/null; then
         log_warn "Daily spend approaching limit: \$$daily_spend >= \$$daily_pause_threshold (\$${BUDGET_DAILY_LIMIT} * ${BUDGET_DAILY_PAUSE_PCT})"
         pause_workers "budget_near_daily_limit" "auto"
     else
         # Auto-resume if daily limit pressure cleared (e.g., new day)
+        # M1-003: Only resume if rate is also safe
         if budget_pause_active; then
             local reason
             reason=$(budget_pause_reason)
-            if [[ "$reason" == "budget_near_daily_limit" ]]; then
-                resume_workers "budget_daily_reset"
+            if [[ "$reason" == "budget_near_daily_limit" || "$reason" == "budget_rate_proactive" || "$reason" == "budget_rate_warning" ]]; then
+                if awk "BEGIN{exit !($fast_rate < $BUDGET_RATE_LIMIT * 0.5)}" 2>/dev/null; then
+                    resume_workers "budget_conditions_cleared"
+                fi
             fi
         fi
     fi
@@ -622,13 +832,16 @@ EOF
 watch_loop() {
     log_info "Budget Watchdog v${VERSION} started (PID $$)"
     log_info "  Daily limit: \$$BUDGET_DAILY_LIMIT"
-    log_info "  Rate limit: \$$BUDGET_RATE_LIMIT/min"
-    log_info "  Check interval: ${BUDGET_CHECK_INTERVAL}s"
+    log_info "  Rate limit: \$$BUDGET_RATE_LIMIT/min (M1-003 active monitoring)"
+    log_info "  Check interval: ${BUDGET_CHECK_INTERVAL}s (normal), ${BUDGET_CHECK_INTERVAL_FAST}s (fast), 2s (critical)"
 
     echo $$ > "$PID_FILE"
     echo $$ > "$ROOT_PID_FILE"
 
     trap handle_manual_toggle SIGUSR1
+
+    local check_count=0
+    local last_mode_log_time=0
 
     while true; do
         check_budget_status || {
@@ -636,7 +849,24 @@ watch_loop() {
             exit 1
         }
 
-        sleep "$BUDGET_CHECK_INTERVAL"
+        # M1-003: Get adaptive check interval
+        local interval=$(get_effective_check_interval)
+
+        # Log mode change periodically
+        local now=$(date +%s)
+        if [[ "$ACTIVE_MONITORING_MODE" != "normal" ]] && (( now - last_mode_log_time > 60 )); then
+            log_info "M1-003: Active monitoring in $ACTIVE_MONITORING_MODE mode (interval: ${interval}s)"
+            last_mode_log_time=$now
+        fi
+
+        ((check_count++)) || true
+
+        # M1-003: Log check count every 100 checks in fast/critical mode
+        if [[ "$ACTIVE_MONITORING_MODE" != "normal" ]] && (( check_count % 100 == 0 )); then
+            log_debug "M1-003: Check count: $check_count (mode: $ACTIVE_MONITORING_MODE)"
+        fi
+
+        sleep "$interval"
     done
 }
 
