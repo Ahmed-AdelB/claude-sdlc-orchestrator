@@ -111,6 +111,23 @@ LOCKS_ONLY=false
 CONTAINERS_ONLY=false
 STATUS_ONLY=false
 
+# Cleanup handler - release locks and remove temp files
+REAPER_LOCK_FD=""
+REAPER_TEMP_FILES=()
+cleanup_reaper() {
+    local exit_code=$?
+    # Release any held lock
+    if [[ -n "${REAPER_LOCK_FD:-}" && -e "/proc/$$/fd/$REAPER_LOCK_FD" ]]; then
+        flock -u "$REAPER_LOCK_FD" 2>/dev/null || true
+    fi
+    # Remove temp files
+    for tmp_file in "${REAPER_TEMP_FILES[@]:-}"; do
+        [[ -n "$tmp_file" && -f "$tmp_file" ]] && rm -f "$tmp_file" 2>/dev/null || true
+    done
+    exit "$exit_code"
+}
+trap cleanup_reaper EXIT INT TERM
+
 # Helpers
 is_true() {
     local val
@@ -251,6 +268,11 @@ reap_stale_workers() {
         return 0
     fi
 
+    if ! [[ "$timeout_minutes" =~ ^[0-9]+$ ]]; then
+        log_rwarn "Invalid timeout_minutes: $timeout_minutes"
+        return 1
+    fi
+
     local rows
     rows=$(sqlite3 -separator '|' "$STATE_DB" <<SQL
 SELECT worker_id, pid, status, last_heartbeat
@@ -258,7 +280,7 @@ FROM workers
 WHERE status NOT IN ('dead', 'stopping')
   AND last_heartbeat < datetime('now', '-${timeout_minutes} minutes');
 SQL
-) || true
+) || { log_rwarn "Failed to query stale workers"; return 0; }
 
     local row
     while IFS='|' read -r worker_id pid status last_heartbeat; do
@@ -329,8 +351,13 @@ requeue_stuck_tasks() {
         return 0
     fi
 
+    if ! [[ "$ZOMBIE_TASK_MINUTES" =~ ^[0-9]+$ ]]; then
+        log_rwarn "Invalid ZOMBIE_TASK_MINUTES: $ZOMBIE_TASK_MINUTES"
+        return 0
+    fi
+
     if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$STATE_DB" ]]; then
-        sqlite3 "$STATE_DB" <<SQL
+        (sqlite3 "$STATE_DB" <<SQL
 BEGIN IMMEDIATE;
 UPDATE tasks
 SET state='QUEUED', worker_id=NULL, updated_at=datetime('now')
@@ -345,6 +372,7 @@ WHERE last_heartbeat < datetime('now', '-${ZOMBIE_TASK_MINUTES} minutes')
   AND status != 'dead';
 COMMIT;
 SQL
+) || { log_rwarn "Failed to execute zombie task recovery SQL"; return 0; }
         log_rinfo "Zombie task recovery complete (fallback SQL)"
     fi
 }

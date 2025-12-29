@@ -73,6 +73,52 @@ _sql_escape() {
     printf '%s' "$value"
 }
 
+# =============================================================================
+# db_query() - Safe parameterized SQL query wrapper (Round 6 improvement)
+# =============================================================================
+# Usage: db_query "SELECT * FROM tasks WHERE id = ?" "$task_id"
+#        db_query "UPDATE tasks SET status = ? WHERE id = ?" "$status" "$id"
+#
+# Arguments:
+#   $1 - SQL query template with ? placeholders
+#   $2+ - Values to substitute (auto-escaped)
+#
+# Returns: Query result on stdout, exit code from SQLite
+# =============================================================================
+db_query() {
+    local template="$1"
+    shift
+    local query="$template"
+    local param_index=0
+
+    # Replace each ? with escaped parameter value
+    for param in "$@"; do
+        local escaped
+        escaped=$(_sql_escape "$param")
+        # Replace first occurrence of ? with escaped value
+        query="${query/\?/\'$escaped\'}"
+        ((param_index++))
+    done
+
+    # Execute the query
+    _sqlite_exec "$STATE_DB" "$query"
+}
+
+# db_query_raw - Execute query without result filtering (for multi-statement)
+db_query_raw() {
+    local template="$1"
+    shift
+    local query="$template"
+
+    for param in "$@"; do
+        local escaped
+        escaped=$(_sql_escape "$param")
+        query="${query/\?/\'$escaped\'}"
+    done
+
+    _sqlite_exec "$STATE_DB" "$query"
+}
+
 _sqlite_exec() {
     local db="${1:-$STATE_DB}"
     shift

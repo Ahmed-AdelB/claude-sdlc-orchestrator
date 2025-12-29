@@ -46,6 +46,41 @@ BUDGET_CHECK_INTERVAL_FAST="${BUDGET_CHECK_INTERVAL_FAST:-5}"  # M1-003: Fast mo
 BUDGET_WINDOW_SIZE="${BUDGET_WINDOW_SIZE:-300}"         # 5-minute rolling window
 BUDGET_WINDOW_SIZE_FAST="${BUDGET_WINDOW_SIZE_FAST:-60}"  # M1-003: 1-minute window for fast rate calc
 
+# Validate numeric configuration
+_validate_budget_config() {
+    local errors=0
+    if ! [[ "$BUDGET_DAILY_LIMIT" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "Invalid BUDGET_DAILY_LIMIT: $BUDGET_DAILY_LIMIT"
+        ((errors++))
+    fi
+    if ! [[ "$BUDGET_RATE_LIMIT" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "Invalid BUDGET_RATE_LIMIT: $BUDGET_RATE_LIMIT"
+        ((errors++))
+    fi
+    if ! [[ "$BUDGET_CHECK_INTERVAL" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid BUDGET_CHECK_INTERVAL: $BUDGET_CHECK_INTERVAL"
+        ((errors++))
+    fi
+    # CRITICAL: Validate window sizes to prevent SQL injection (Gemini audit)
+    if ! [[ "$BUDGET_WINDOW_SIZE" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid BUDGET_WINDOW_SIZE: $BUDGET_WINDOW_SIZE"
+        ((errors++))
+    fi
+    if ! [[ "$BUDGET_WINDOW_SIZE_FAST" =~ ^[0-9]+$ ]]; then
+        log_error "Invalid BUDGET_WINDOW_SIZE_FAST: $BUDGET_WINDOW_SIZE_FAST"
+        ((errors++))
+    fi
+    if ! [[ "$BUDGET_RATE_WARNING" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "Invalid BUDGET_RATE_WARNING: $BUDGET_RATE_WARNING"
+        ((errors++))
+    fi
+    if ! [[ "$BUDGET_DAILY_PAUSE_PCT" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "Invalid BUDGET_DAILY_PAUSE_PCT: $BUDGET_DAILY_PAUSE_PCT"
+        ((errors++))
+    fi
+    return $errors
+}
+
 # M1-003: Active monitoring state
 ACTIVE_MONITORING_MODE="normal"  # normal | fast | critical
 CONSECUTIVE_HIGH_RATE_COUNT=0
@@ -66,6 +101,26 @@ COST_SOURCE_RATE="unknown"
 
 mkdir -p "$STATE_DIR"
 
+# Cleanup handler - release locks, remove PID files
+WATCHDOG_LOCK_FD=""
+cleanup_watchdog() {
+    local exit_code=$?
+    log_info "Budget watchdog shutting down (exit code: $exit_code)"
+    # Release any held lock
+    if [[ -n "${WATCHDOG_LOCK_FD:-}" && -e "/proc/$$/fd/$WATCHDOG_LOCK_FD" ]]; then
+        flock -u "$WATCHDOG_LOCK_FD" 2>/dev/null || true
+    fi
+    # Remove PID files if we own them
+    if [[ -f "$PID_FILE" ]] && [[ "$(cat "$PID_FILE" 2>/dev/null)" == "$$" ]]; then
+        rm -f "$PID_FILE" 2>/dev/null || true
+    fi
+    if [[ -f "$ROOT_PID_FILE" ]] && [[ "$(cat "$ROOT_PID_FILE" 2>/dev/null)" == "$$" ]]; then
+        rm -f "$ROOT_PID_FILE" 2>/dev/null || true
+    fi
+    exit "$exit_code"
+}
+trap cleanup_watchdog EXIT INT TERM
+
 #===============================================================================
 # SQLite Helpers & Cost Estimation
 #===============================================================================
@@ -76,7 +131,7 @@ sqlite_available() {
 
 ensure_sqlite_state() {
     if command -v sqlite3 &>/dev/null && type -t sqlite_state_init >/dev/null 2>&1; then
-        sqlite_state_init "$STATE_DB" 2>/dev/null || true
+        sqlite_state_init "$STATE_DB" 2>/dev/null || log_warn "sqlite_state_init failed"
     fi
 }
 
@@ -135,6 +190,7 @@ sqlite_cost_sum() {
 }
 
 ensure_sqlite_state
+_validate_budget_config || log_warn "Budget configuration validation failed"
 
 #===============================================================================
 # Spend Calculation
@@ -606,7 +662,7 @@ EOF
 
     # Set pause flag in SQLite
     if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
-        set_pause_requested "budget_kill_switch" 2>/dev/null || true
+        set_pause_requested "budget_kill_switch" 2>/dev/null || log_warn "set_pause_requested failed"
     fi
 }
 
@@ -635,6 +691,11 @@ signal_all_workers() {
         local pids
         pids=$(sqlite3 "$STATE_DB" "SELECT pid FROM workers WHERE status IN ('idle','busy','paused') AND pid IS NOT NULL;" 2>/dev/null || echo "")
         for pid in $pids; do
+            # Validate PID is numeric before signaling (Codex audit)
+            if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+                log_warn "Invalid PID from database: $pid"
+                continue
+            fi
             if kill -0 "$pid" 2>/dev/null; then
                 kill -"$signal" "$pid" 2>/dev/null || true
                 log_debug "Sent $signal to worker PID $pid"
