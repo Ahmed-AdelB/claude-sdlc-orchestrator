@@ -19,7 +19,7 @@
 
 # NOTE: We intentionally do NOT use set -e here to enable crash-resistant behavior
 # The main loop catches and handles all errors without exiting
-set -uo pipefail
+set -o pipefail
 
 # Resolve paths
 SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -32,6 +32,21 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
 source "${AUTONOMOUS_ROOT}/lib/common.sh"
+
+# Load supervisor configuration from tri-agent.yaml
+_load_supervisor_config() {
+    WATCH_INTERVAL="${WATCH_INTERVAL:-$(read_config '.monitoring.health_check_interval' '30')}"
+    INITIAL_BACKOFF="${INITIAL_BACKOFF:-$(read_config '.error_handling.backoff_base' '1')}"
+    MAX_BACKOFF="${MAX_BACKOFF:-$(read_config '.error_handling.backoff_max' '300')}"
+    BACKOFF_MULTIPLIER="${BACKOFF_MULTIPLIER:-$(read_config '.error_handling.backoff_multiplier' '2')}"
+    MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-$(read_config '.error_handling.max_retries' '10')}"
+    log_info "Supervisor config loaded"
+}
+_load_supervisor_config
+
+# M2-011: Disable set -e enforced by common.sh
+# The supervisor main loop is designed to handle errors without exiting
+set +e
 
 # =============================================================================
 # CONFIGURATION

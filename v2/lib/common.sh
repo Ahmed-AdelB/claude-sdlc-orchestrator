@@ -475,6 +475,54 @@ secure_exec() {
     "$bin_path" "$@"
 }
 
+# SEC-FIX: Secure temp file creation with validation
+# Usage: tmpfile=$(secure_mktemp "prefix") || exit 1
+# Returns: Path to created temp file, or returns 1 on failure
+# This function validates TMPDIR, checks mktemp success, and sets proper permissions
+secure_mktemp() {
+    local prefix="${1:-tri-agent}"
+    local tmpdir="${TMPDIR:-/tmp}"
+    local tmpfile=""
+
+    # Validate TMPDIR exists and is writable
+    if [[ ! -d "$tmpdir" ]]; then
+        log_error "SEC-FIX: TMPDIR does not exist: $tmpdir" 2>/dev/null || true
+        return 1
+    fi
+
+    if [[ ! -w "$tmpdir" ]]; then
+        log_error "SEC-FIX: TMPDIR not writable: $tmpdir" 2>/dev/null || true
+        return 1
+    fi
+
+    # Create temp file
+    tmpfile=$(mktemp -t "${prefix}.XXXXXXXXXX" 2>/dev/null) || {
+        log_error "SEC-FIX: mktemp failed in $tmpdir" 2>/dev/null || true
+        return 1
+    }
+
+    # Validate the result
+    if [[ -z "$tmpfile" ]]; then
+        log_error "SEC-FIX: mktemp returned empty string" 2>/dev/null || true
+        return 1
+    fi
+
+    if [[ ! -f "$tmpfile" ]]; then
+        log_error "SEC-FIX: mktemp file does not exist: $tmpfile" 2>/dev/null || true
+        return 1
+    fi
+
+    # Set restrictive permissions
+    chmod 600 "$tmpfile" 2>/dev/null || {
+        log_error "SEC-FIX: Failed to chmod temp file: $tmpfile" 2>/dev/null || true
+        rm -f "$tmpfile" 2>/dev/null || true
+        return 1
+    }
+
+    echo "$tmpfile"
+    return 0
+}
+
 # Clear potentially dangerous environment variables before executing
 # Usage: safe_env_exec "python3" script.py
 # This prevents attacks via PYTHONPATH, LD_PRELOAD, etc.
@@ -554,13 +602,26 @@ log_security_event() {
 # =============================================================================
 # Git Output Sanitization (SEC-001)
 # =============================================================================
-# Prevents prompt injection attacks via git commit messages and diff output.
-# Strips known LLM control sequences that could hijack agent behavior.
+# Prevents BOTH:
+# 1. Command injection attacks via malicious git commit messages containing
+#    shell metacharacters that could execute arbitrary commands
+# 2. Prompt injection attacks via LLM control sequences
+#
+# CRITICAL: Git commit messages can contain ANY characters. When passed to
+# shell functions without sanitization, characters like $(), ``, etc. can
+# execute arbitrary commands.
 # =============================================================================
 
-# Sanitize git log/diff output to prevent prompt injection
+# Sanitize git log/diff output to prevent command injection AND prompt injection
 # Usage: sanitized_output=$(git log -1 | sanitize_git_log)
 # Or:    sanitize_git_log "$git_output"
+#
+# Security measures:
+# - Removes null bytes
+# - Removes control characters (except newline and tab)
+# - Escapes shell metacharacters ($, `, !, \, ", ')
+# - Removes ANSI escape sequences
+# - Strips LLM prompt injection patterns
 sanitize_git_log() {
     local input="${1:-}"
 
@@ -572,10 +633,34 @@ sanitize_git_log() {
     # Return empty if input is empty
     [[ -z "$input" ]] && return 0
 
-    # Remove LLM control sequences and prompt injection patterns
+    # Step 1: Remove null bytes (could break string processing)
+    input=$(printf '%s' "$input" | tr -d '\0')
+
+    # Step 2: Remove control characters except newline (\n = \012) and tab (\t = \011)
+    # Control chars are \001-\010, \013-\037, and \177 (DEL)
+    input=$(printf '%s' "$input" | tr -d '\001-\010\013-\037\177')
+
+    # Step 3: Remove ANSI escape sequences (color codes, cursor movement, etc.)
+    # Matches: ESC [ followed by optional numbers/semicolons and a letter
+    input=$(printf '%s' "$input" | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+    # Also remove other escape sequences (OSC, etc.)
+    input=$(printf '%s' "$input" | sed -E 's/\x1b\][^\x07]*\x07//g')
+    input=$(printf '%s' "$input" | sed -E 's/\x1b[PX^_][^\x1b]*\x1b\\//g')
+
+    # Step 4: Escape shell metacharacters to prevent command injection
+    # Order matters: escape backslash first, then other characters
+    # Using printf to avoid issues with echo interpreting escapes
+    input=$(printf '%s' "$input" | sed -e 's/\\/\\\\/g')       # Escape backslash first
+    input=$(printf '%s' "$input" | sed -e 's/\$/\\$/g')        # Escape $
+    input=$(printf '%s' "$input" | sed -e 's/`/\\`/g')         # Escape backtick
+    input=$(printf '%s' "$input" | sed -e 's/!/\\!/g')         # Escape !
+    input=$(printf '%s' "$input" | sed -e 's/"/\\"/g')         # Escape double quote
+    # Single quote: replace ' with '\'' (end quote, escaped quote, start quote)
+    input=$(printf '%s' "$input" | sed -e "s/'/'\\\\''/g")
+
+    # Step 5: Remove LLM control sequences and prompt injection patterns
     # These patterns are case-insensitive
-    # Use multiple sed calls for better compatibility across sed versions
-    echo "$input" | \
+    input=$(printf '%s' "$input" | \
         sed -E 's/\[SYSTEM\]//gi' | \
         sed -E 's/\[INST\]//gi' | \
         sed -E 's/\[\/INST\]//gi' | \
@@ -598,7 +683,198 @@ sanitize_git_log() {
         sed -E 's/ACT[[:space:]]+AS[[:space:]]+IF//gi' | \
         sed -E 's/PRETEND[[:space:]]+YOU[[:space:]]+ARE//gi' | \
         sed -E 's/base64[[:space:]]*\|[[:space:]]*curl//gi' | \
-        sed -E 's/curl.*base64//gi'
+        sed -E 's/curl.*base64//gi')
+
+    printf '%s' "$input"
+}
+
+# Validate git ref format (branch, tag, or commit hash)
+# Only allows alphanumeric, slashes, dots, dashes, underscores, tildes, and carets
+# Usage: if validate_git_ref "$ref"; then ...
+# Returns: 0 if valid, 1 if invalid
+validate_git_ref() {
+    local ref="$1"
+
+    # Empty ref is invalid
+    [[ -z "$ref" ]] && return 1
+
+    # Check against allowed characters for git refs
+    # Allows: a-z, A-Z, 0-9, /, ., -, _, ~, ^, @
+    # Also allows HEAD and special refs like HEAD~1, HEAD^2, @{upstream}
+    if printf '%s' "$ref" | grep -qE '^[a-zA-Z0-9/_.\-~^@{}]+$'; then
+        # Additional check: no consecutive dots (..) which could be path traversal
+        if printf '%s' "$ref" | grep -qE '\.\.'; then
+            # Allow .. only in ref range syntax like main..feature
+            # But not in paths like ../etc
+            if printf '%s' "$ref" | grep -qE '\.\./|/\.\.'; then
+                log_warn "SEC-001: Rejected git ref with path traversal: $ref"
+                return 1
+            fi
+        fi
+        return 0
+    fi
+
+    log_warn "SEC-001: Invalid git ref format rejected: $ref"
+    return 1
+}
+
+# Validate commit hash format
+# Must be 7-40 hex characters, or special refs like HEAD
+# Usage: if validate_commit_hash "$commit"; then ...
+validate_commit_hash() {
+    local commit="$1"
+
+    # Empty commit is invalid
+    [[ -z "$commit" ]] && return 1
+
+    # Allow HEAD and refs
+    if [[ "$commit" == "HEAD" ]] || [[ "$commit" =~ ^HEAD[~^][0-9]*$ ]]; then
+        return 0
+    fi
+
+    # Commit hash: 7-40 hex characters
+    if printf '%s' "$commit" | grep -qE '^[a-fA-F0-9]{7,40}$'; then
+        return 0
+    fi
+
+    # Allow branch/tag names (validated as git ref)
+    if validate_git_ref "$commit"; then
+        return 0
+    fi
+
+    log_warn "SEC-001: Invalid commit format rejected: $commit"
+    return 1
+}
+
+# Safely get git log with sanitization
+# Usage: safe_git_log [format] [count] [ref]
+# Returns: Sanitized git log output
+safe_git_log() {
+    local format="${1:-%s}"
+    local count="${2:-10}"
+    local ref="${3:-HEAD}"
+
+    # Validate count is a positive integer
+    if ! _validate_numeric "$count"; then
+        log_error "SEC-001: Invalid count for git log: $count"
+        return 1
+    fi
+
+    # Validate ref format
+    if ! validate_git_ref "$ref"; then
+        log_error "SEC-001: Invalid git ref format: $ref"
+        return 1
+    fi
+
+    # Get git log output (suppress errors for missing refs)
+    local output
+    output=$(git log --format="$format" -n "$count" "$ref" 2>/dev/null) || {
+        log_warn "SEC-001: git log failed for ref: $ref"
+        echo ""
+        return 0
+    }
+
+    # Sanitize and return
+    sanitize_git_log "$output"
+}
+
+# Safely get commit message with sanitization
+# Usage: safe_git_commit_message [commit]
+# Returns: Sanitized commit message (full body)
+safe_git_commit_message() {
+    local commit="${1:-HEAD}"
+
+    # Validate commit format
+    if ! validate_commit_hash "$commit"; then
+        log_error "SEC-001: Invalid commit format: $commit"
+        return 1
+    fi
+
+    # Get commit message (full body with %B)
+    local message
+    message=$(git log --format='%B' -n 1 "$commit" 2>/dev/null) || {
+        log_warn "SEC-001: git log failed for commit: $commit"
+        echo ""
+        return 0
+    }
+
+    # Sanitize and return
+    sanitize_git_log "$message"
+}
+
+# Safely get git diff file list with sanitization
+# Usage: safe_git_diff [ref1] [ref2]
+# Returns: Sanitized list of changed files
+safe_git_diff() {
+    local ref1="${1:-HEAD~1}"
+    local ref2="${2:-HEAD}"
+
+    # Validate both refs
+    if ! validate_git_ref "$ref1"; then
+        log_error "SEC-001: Invalid git ref format: $ref1"
+        return 1
+    fi
+
+    if ! validate_git_ref "$ref2"; then
+        log_error "SEC-001: Invalid git ref format: $ref2"
+        return 1
+    fi
+
+    # Get diff output (file names only for safety)
+    local output
+    output=$(git diff --name-only "$ref1" "$ref2" 2>/dev/null) || {
+        log_warn "SEC-001: git diff failed for refs: $ref1 $ref2"
+        echo ""
+        return 0
+    }
+
+    # Sanitize and return
+    sanitize_git_log "$output"
+}
+
+# Safely get git diff stat with sanitization
+# Usage: safe_git_diff_stat [ref1] [ref2]
+# Returns: Sanitized diff statistics
+safe_git_diff_stat() {
+    local ref1="${1:-HEAD~1}"
+    local ref2="${2:-HEAD}"
+
+    # Validate both refs
+    if ! validate_git_ref "$ref1"; then
+        log_error "SEC-001: Invalid git ref format: $ref1"
+        return 1
+    fi
+
+    if ! validate_git_ref "$ref2"; then
+        log_error "SEC-001: Invalid git ref format: $ref2"
+        return 1
+    fi
+
+    # Get diff stat output
+    local output
+    output=$(git diff --stat "$ref1" "$ref2" 2>/dev/null) || {
+        log_warn "SEC-001: git diff --stat failed for refs: $ref1 $ref2"
+        echo ""
+        return 0
+    }
+
+    # Sanitize and return
+    sanitize_git_log "$output"
+}
+
+# Safely get current branch name with sanitization
+# Usage: safe_git_branch
+# Returns: Sanitized current branch name
+safe_git_branch() {
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || {
+        log_warn "SEC-001: git rev-parse failed (not in git repo?)"
+        echo ""
+        return 0
+    }
+
+    # Sanitize and return
+    sanitize_git_log "$branch"
 }
 
 # SEC-006: Sanitize task content before sending to LLM
@@ -1538,6 +1814,15 @@ export -f ensure_all_dirs
 export -f mask_secrets
 export -f sanitize_git_log
 export -f sanitize_llm_input
+
+# SEC-001: Export git security functions
+export -f validate_git_ref
+export -f validate_commit_hash
+export -f safe_git_log
+export -f safe_git_commit_message
+export -f safe_git_diff
+export -f safe_git_diff_stat
+export -f safe_git_branch
 export -f read_config
 export -f is_valid_json
 export -f get_model_display_name

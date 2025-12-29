@@ -17,6 +17,9 @@
 #   - Circuit breaker states
 #   - Disk space
 #   - Recent error rates
+#   - Worker process status
+#   - Task queue depth (queued/running)
+#   - SQLite database health
 #
 # Outputs:
 #   - Status: OK, DEGRADED, FAIL
@@ -225,6 +228,42 @@ check_session_running() {
     fi
 }
 
+# Check if worker process is running and heartbeat is fresh
+check_worker_status() {
+    local worker_pid_file="${STATE_DIR}/worker.pid"
+    if [[ ! -f "$worker_pid_file" ]]; then
+        echo "not_running"; return
+    fi
+    local pid=$(cat "$worker_pid_file" 2>/dev/null)
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "dead"; return
+    fi
+    echo "running"
+}
+
+# Count tasks in queue and running directories
+check_queue_depth() {
+    local autonomous_root="${AUTONOMOUS_ROOT:-$HOME/.claude/autonomous}"
+    local queue_dir="${autonomous_root}/tasks/queue"
+    local running_dir="${autonomous_root}/tasks/running"
+    local queued=$(find "$queue_dir" -name "*.json" 2>/dev/null | wc -l)
+    local running=$(find "$running_dir" -name "*.json" 2>/dev/null | wc -l)
+    echo "queued:${queued},running:${running}"
+}
+
+# Verify SQLite database is accessible and has integrity
+check_database_health() {
+    local db_file="${STATE_DIR}/tri-agent.db"
+    if [[ ! -f "$db_file" ]]; then
+        echo "no_database"; return
+    fi
+    if timeout 5s sqlite3 "$db_file" "SELECT 1;" &>/dev/null; then
+        echo "ok"
+    else
+        echo "connection_failed"
+    fi
+}
+
 #===============================================================================
 # Main Health Check
 #===============================================================================
@@ -266,12 +305,19 @@ run_health_check() {
     local pid_errors=$!
     check_session_running > "$tmp_dir/session" &
     local pid_session=$!
+    check_worker_status > "$tmp_dir/worker" &
+    local pid_worker=$!
+    check_queue_depth > "$tmp_dir/queue" &
+    local pid_queue=$!
+    check_database_health > "$tmp_dir/database" &
+    local pid_database=$!
 
     # Wait for all background jobs
     wait $pid_claude_cli $pid_gemini_cli $pid_codex_cli \
          $pid_claude_auth $pid_gemini_auth $pid_codex_auth \
          $pid_claude_cb $pid_gemini_cb $pid_codex_cb \
-         $pid_disk $pid_errors $pid_session 2>/dev/null || true
+         $pid_disk $pid_errors $pid_session \
+         $pid_worker $pid_queue $pid_database 2>/dev/null || true
 
     # Collect results
     local claude_cli gemini_cli codex_cli
@@ -293,6 +339,11 @@ run_health_check() {
     disk_status=$(cat "$tmp_dir/disk" 2>/dev/null || echo "unknown")
     error_count=$(cat "$tmp_dir/errors" 2>/dev/null || echo "0")
     session_status=$(cat "$tmp_dir/session" 2>/dev/null || echo "unknown")
+
+    local worker_status queue_depth database_health
+    worker_status=$(cat "$tmp_dir/worker" 2>/dev/null || echo "unknown")
+    queue_depth=$(cat "$tmp_dir/queue" 2>/dev/null || echo "queued:0,running:0")
+    database_health=$(cat "$tmp_dir/database" 2>/dev/null || echo "unknown")
 
     # Determine overall status
     local overall_status="OK"
@@ -374,6 +425,22 @@ run_health_check() {
         issues+=("Elevated error rate: ${error_count} errors/hour")
     fi
 
+    # Check worker status
+    if [[ "$worker_status" == "dead" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Worker process dead (stale PID file)")
+    fi
+
+    # Check database health
+    if [[ "$database_health" == "connection_failed" ]]; then
+        if [[ "$overall_status" == "OK" ]]; then
+            overall_status="DEGRADED"
+        fi
+        issues+=("Database connection failed")
+    fi
+
     # Build issues JSON array
     local issues_json="[]"
     if [[ ${#issues[@]} -gt 0 ]]; then
@@ -405,7 +472,10 @@ run_health_check() {
         },
         "disk": "${disk_status}",
         "error_rate": ${error_count},
-        "session": "${session_status}"
+        "session": "${session_status}",
+        "worker": "${worker_status}",
+        "queue": "${queue_depth}",
+        "database": "${database_health}"
     },
     "issues": ${issues_json}
 }
@@ -502,10 +572,13 @@ display_status() {
     echo ""
 
     echo -e "${BOLD}System:${RESET}"
-    local disk_status error_rate session
+    local disk_status error_rate session worker_status queue_depth database_health
     disk_status=$(echo "$json" | jq -r '.checks.disk')
     error_rate=$(echo "$json" | jq -r '.checks.error_rate')
     session=$(echo "$json" | jq -r '.checks.session')
+    worker_status=$(echo "$json" | jq -r '.checks.worker // "unknown"')
+    queue_depth=$(echo "$json" | jq -r '.checks.queue // "queued:0,running:0"')
+    database_health=$(echo "$json" | jq -r '.checks.database // "unknown"')
 
     if [[ "$disk_status" == ok:* ]]; then
         echo -e "  Disk:    ${GREEN}${disk_status#*:}${RESET}"
@@ -524,6 +597,32 @@ display_status() {
     fi
 
     [[ "$session" == "running" ]] && echo -e "  Session: ${GREEN}RUNNING${RESET}" || echo -e "  Session: ${YELLOW}${session}${RESET}"
+
+    # Worker status
+    case "$worker_status" in
+        running)     echo -e "  Worker:  ${GREEN}RUNNING${RESET}" ;;
+        not_running) echo -e "  Worker:  ${YELLOW}NOT RUNNING${RESET}" ;;
+        dead)        echo -e "  Worker:  ${RED}DEAD${RESET}" ;;
+        *)           echo -e "  Worker:  ${YELLOW}${worker_status}${RESET}" ;;
+    esac
+
+    # Queue depth
+    local queued_count running_count
+    queued_count=$(echo "$queue_depth" | sed 's/queued:\([0-9]*\),.*/\1/')
+    running_count=$(echo "$queue_depth" | sed 's/.*running:\([0-9]*\)/\1/')
+    if [[ "$queued_count" -gt 10 ]]; then
+        echo -e "  Queue:   ${YELLOW}${queued_count} queued, ${running_count} running${RESET}"
+    else
+        echo -e "  Queue:   ${GREEN}${queued_count} queued, ${running_count} running${RESET}"
+    fi
+
+    # Database health
+    case "$database_health" in
+        ok)                echo -e "  Database: ${GREEN}OK${RESET}" ;;
+        no_database)       echo -e "  Database: ${YELLOW}NO DATABASE${RESET}" ;;
+        connection_failed) echo -e "  Database: ${RED}CONNECTION FAILED${RESET}" ;;
+        *)                 echo -e "  Database: ${YELLOW}${database_health}${RESET}" ;;
+    esac
     echo ""
 
     # Show issues if any
@@ -663,6 +762,9 @@ ${BOLD}CHECKS PERFORMED:${RESET}
     - Disk space usage
     - Recent error rates from logs
     - Tmux session status
+    - Worker process status
+    - Task queue depth (queued/running)
+    - SQLite database health
 
 ${BOLD}STATUS VALUES:${RESET}
     OK        All systems operational

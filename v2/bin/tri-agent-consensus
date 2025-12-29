@@ -105,6 +105,42 @@ CONFIG_FILE="${CONFIG_DIR}/tri-agent.yaml"
 mkdir -p "$AUDIT_LOG_DIR"
 
 #===============================================================================
+# SEC-001: Source common.sh for LLM Input Sanitization
+#===============================================================================
+# Source common.sh to get access to sanitize_llm_input() function which prevents
+# prompt injection attacks via malicious git commit messages or user input.
+#===============================================================================
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/common.sh"
+    _COMMON_SH_LOADED=true
+else
+    _COMMON_SH_LOADED=false
+fi
+
+# Load consensus configuration from tri-agent.yaml
+_load_consensus_config() {
+    if [[ "$_COMMON_SH_LOADED" != "true" ]]; then
+        return 0  # Skip if common.sh not loaded (no read_config function)
+    fi
+
+    # Timeout per model (default: 60s)
+    DEFAULT_TIMEOUT="${DEFAULT_TIMEOUT:-$(read_config '.consensus.timeout_per_model' '60')}"
+
+    # Voting weights
+    CLAUDE_WEIGHT="${CLAUDE_WEIGHT:-$(read_config '.consensus.weights.claude' '0.4')}"
+    GEMINI_WEIGHT="${GEMINI_WEIGHT:-$(read_config '.consensus.weights.gemini' '0.3')}"
+    CODEX_WEIGHT="${CODEX_WEIGHT:-$(read_config '.consensus.weights.codex' '0.3')}"
+
+    # Minimum approvals for majority mode
+    MIN_APPROVALS="${MIN_APPROVALS:-$(read_config '.consensus.min_approvals' '2')}"
+
+    # Confidence threshold
+    CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-$(read_config '.routing.confidence_threshold' '0.7')}"
+}
+_load_consensus_config
+
+#===============================================================================
 # Trace ID Generation
 #===============================================================================
 generate_trace_id() {
@@ -805,9 +841,19 @@ main() {
         [[ -n "$temp_dir" ]] && rm -rf "$temp_dir"
     }
 
+    # SEC-001: Sanitize the question before building prompt to prevent prompt injection
+    # This is critical when the question contains git commit messages or external input
+    local sanitized_question="$QUESTION"
+    if [[ "$_COMMON_SH_LOADED" == "true" ]] && declare -f sanitize_llm_input &>/dev/null; then
+        sanitized_question=$(sanitize_llm_input "$QUESTION")
+        log_debug "SEC-001: Question sanitized before consensus vote"
+    else
+        log_warn "SEC-001: sanitize_llm_input not available, question not sanitized"
+    fi
+
     # Build the consensus prompt
     local prompt
-    prompt=$(build_consensus_prompt "$QUESTION" "${CATEGORY:-general}")
+    prompt=$(build_consensus_prompt "$sanitized_question" "${CATEGORY:-general}")
 
     # Record voting start time for SEC-002-1 minimum window
     local voting_start_time

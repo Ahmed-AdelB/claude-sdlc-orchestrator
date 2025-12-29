@@ -391,6 +391,30 @@ record_result() {
 # Fallback Logic
 # =============================================================================
 
+# Model fallback chains - configurable per model
+# Each model has a space-separated list of fallback models in priority order
+declare -A MODEL_FALLBACKS=(
+    ["claude"]="codex gemini"
+    ["codex"]="claude gemini"
+    ["gemini"]="claude codex"
+)
+
+# Check circuit breaker state (public wrapper)
+# Usage: check_breaker "model"
+# Returns: CLOSED, OPEN, or HALF_OPEN
+check_breaker() {
+    local model="$1"
+    _read_breaker_state "$model"
+}
+
+# Get failure count (public wrapper)
+# Usage: get_failure_count "model"
+# Returns: Number of consecutive failures
+get_failure_count() {
+    local model="$1"
+    _get_failure_count "$model"
+}
+
 # Get the next fallback model in the chain: Claude -> Codex -> Gemini
 # Usage: fallback_to_next_model "current_model"
 # Returns: Next available model name on stdout, or exits with 1 if none
@@ -399,8 +423,8 @@ fallback_to_next_model() {
     local next_model=""
 
     case "$failed_model" in
-        "claude") next_model="codex" ;; 
-        "codex") next_model="gemini" ;; 
+        "claude") next_model="codex" ;;
+        "codex") next_model="gemini" ;;
         "gemini")
             log_warn "[${TRACE_ID:-unknown}] End of fallback chain reached (Gemini failed)" 2>/dev/null || true
             return 1
@@ -421,6 +445,173 @@ fallback_to_next_model() {
         log_warn "[${TRACE_ID:-unknown}] Fallback model ${next_model} is unavailable (Circuit Breaker OPEN), trying next..." 2>/dev/null || true
         fallback_to_next_model "$next_model"
     fi
+}
+
+# Get next available model in fallback chain (enhanced version)
+# Usage: get_fallback_model "failed_model" [excluded_models...]
+# Returns: Next available model name on stdout, or exits with 1 if none available
+get_fallback_model() {
+    local failed_model="$1"
+    shift
+    local excluded_models=("$@")
+    local fallbacks="${MODEL_FALLBACKS[$failed_model]:-}"
+
+    if [[ -z "$fallbacks" ]]; then
+        log_error "[${TRACE_ID:-unknown}] No fallback chain defined for model: $failed_model" 2>/dev/null || true
+        return 1
+    fi
+
+    for fallback in $fallbacks; do
+        # Skip if in excluded list
+        local is_excluded=false
+        for excluded in "${excluded_models[@]}"; do
+            if [[ "$fallback" == "$excluded" ]]; then
+                is_excluded=true
+                break
+            fi
+        done
+        [[ "$is_excluded" == "true" ]] && continue
+
+        # Check circuit breaker state
+        local state
+        state=$(check_breaker "$fallback")
+        if [[ "$state" != "OPEN" ]]; then
+            log_info "[${TRACE_ID:-unknown}] Fallback selected: $fallback (state: $state)" 2>/dev/null || true
+            echo "$fallback"
+            return 0
+        else
+            log_debug "[${TRACE_ID:-unknown}] Skipping fallback $fallback (circuit OPEN)" 2>/dev/null || true
+        fi
+    done
+
+    # All circuits open
+    log_error "[${TRACE_ID:-unknown}] All model circuits are open - no fallback available" 2>/dev/null || true
+    return 1
+}
+
+# Execute with automatic fallback across the model chain
+# Usage: execute_with_auto_fallback "primary_model" "prompt" [timeout_seconds]
+# Returns: 0 on success with output, 1 on all fallbacks exhausted
+execute_with_auto_fallback() {
+    local primary_model="$1"
+    local prompt="$2"
+    local timeout="${3:-300}"
+
+    local current_model="$primary_model"
+    local attempts=0
+    local max_attempts=3
+    local tried_models=()
+
+    while [[ $attempts -lt $max_attempts ]]; do
+        ((attempts++))
+        tried_models+=("$current_model")
+
+        # Check circuit breaker state
+        local state
+        state=$(check_breaker "$current_model")
+
+        if [[ "$state" == "OPEN" ]]; then
+            log_warn "[${TRACE_ID:-unknown}] Circuit OPEN for $current_model (attempt $attempts/$max_attempts), finding fallback" 2>/dev/null || true
+            current_model=$(get_fallback_model "$current_model" "${tried_models[@]}") || {
+                log_error "[${TRACE_ID:-unknown}] No available fallback after $attempts attempts" 2>/dev/null || true
+                return 1
+            }
+            continue
+        fi
+
+        # Attempt execution
+        local result=""
+        local exit_code=0
+        local start_time
+        start_time=$(date +%s)
+
+        log_info "[${TRACE_ID:-unknown}] Executing with $current_model (attempt $attempts/$max_attempts)" 2>/dev/null || true
+
+        case "$current_model" in
+            claude)
+                result=$(timeout "$timeout" claude --dangerously-skip-permissions -p "$prompt" 2>&1) || exit_code=$?
+                ;;
+            codex)
+                result=$(timeout "$timeout" codex exec "$prompt" 2>&1) || exit_code=$?
+                ;;
+            gemini)
+                result=$(timeout "$timeout" gemini -y "$prompt" 2>&1) || exit_code=$?
+                ;;
+            *)
+                log_error "[${TRACE_ID:-unknown}] Unknown model: $current_model" 2>/dev/null || true
+                exit_code=127
+                ;;
+        esac
+
+        local duration=$(( $(date +%s) - start_time ))
+
+        if [[ $exit_code -eq 0 ]]; then
+            record_success "$current_model"
+            log_info "[${TRACE_ID:-unknown}] Execution successful with $current_model (${duration}s, attempt $attempts)" 2>/dev/null || true
+            echo "$result"
+            return 0
+        else
+            # Check for timeout (exit code 124)
+            local error_type="exit_$exit_code"
+            if [[ $exit_code -eq 124 ]]; then
+                error_type="timeout"
+                log_warn "[${TRACE_ID:-unknown}] $current_model timed out after ${timeout}s" 2>/dev/null || true
+            fi
+
+            record_failure "$current_model" "$error_type"
+            log_warn "[${TRACE_ID:-unknown}] $current_model failed (exit $exit_code, ${duration}s), finding fallback" 2>/dev/null || true
+
+            current_model=$(get_fallback_model "$current_model" "${tried_models[@]}") || {
+                log_error "[${TRACE_ID:-unknown}] All fallback attempts exhausted (tried: ${tried_models[*]})" 2>/dev/null || true
+                return 1
+            }
+        fi
+    done
+
+    log_error "[${TRACE_ID:-unknown}] Maximum attempts ($max_attempts) exhausted" 2>/dev/null || true
+    return 1
+}
+
+# Get model health summary for monitoring
+# Usage: get_model_health_summary
+# Returns: JSON object with health status of all models
+get_model_health_summary() {
+    local models=("claude" "codex" "gemini")
+    local first=true
+
+    echo "{"
+    for model in "${models[@]}"; do
+        local state
+        local failure_count
+
+        state=$(check_breaker "$model")
+        failure_count=$(get_failure_count "$model")
+
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            echo ","
+        fi
+        echo "  \"$model\": {\"state\": \"$state\", \"failures\": $failure_count}"
+    done
+    echo "}"
+}
+
+# Check if all circuits are open (system degraded)
+# Usage: all_circuits_open
+# Returns: 0 if all open (degraded), 1 if at least one is available
+all_circuits_open() {
+    local models=("claude" "codex" "gemini")
+
+    for model in "${models[@]}"; do
+        local state
+        state=$(check_breaker "$model")
+        if [[ "$state" != "OPEN" ]]; then
+            return 1  # At least one is available
+        fi
+    done
+
+    return 0  # All are open - system degraded
 }
 
 # =============================================================================
@@ -664,8 +855,13 @@ circuit_breaker_call() {
 # =============================================================================
 
 # Quality Gate specific constants
-readonly QG_FAILURE_THRESHOLD=3
-readonly QG_COOLDOWN_SECONDS=300 # 5 minutes
+# Guard against re-sourcing
+if [[ -z "${QG_FAILURE_THRESHOLD:-}" ]]; then
+    readonly QG_FAILURE_THRESHOLD=3
+fi
+if [[ -z "${QG_COOLDOWN_SECONDS:-}" ]]; then
+    readonly QG_COOLDOWN_SECONDS=300 # 5 minutes
+fi
 
 # Handle Quality Gate Circuit Breaker
 # Usage: quality_gate_breaker "gate_type" "action" [args...]
@@ -733,3 +929,11 @@ export -f _get_failure_count
 export -f _update_breaker_state
 export -f fallback_to_next_model
 export -f circuit_breaker_call
+
+# Fallback chain exports
+export -f check_breaker
+export -f get_failure_count
+export -f get_fallback_model
+export -f execute_with_auto_fallback
+export -f get_model_health_summary
+export -f all_circuits_open

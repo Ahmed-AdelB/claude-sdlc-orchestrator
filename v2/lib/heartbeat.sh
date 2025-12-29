@@ -868,6 +868,283 @@ run_recovery_check() {
     echo "$total"
 }
 
+#===============================================================================
+# M3-019: Worker Crash Recovery Functions
+#===============================================================================
+# These functions implement automatic task recovery when workers crash.
+# - Detects dead workers via heartbeat timeout
+# - Marks worker as crashed with crash count tracking
+# - Requeues running tasks from crashed workers
+# - Respawns workers with cooldown and max crash limit protection
+#===============================================================================
+
+# M3-019: Default configuration
+HEARTBEAT_TIMEOUT_SECONDS="${HEARTBEAT_TIMEOUT_SECONDS:-300}"  # 5 minutes
+MAX_WORKER_CRASHES="${MAX_WORKER_CRASHES:-5}"
+CRASH_COOLDOWN_MINUTES="${CRASH_COOLDOWN_MINUTES:-10}"
+
+# M3-019: Update worker heartbeat
+# Usage: update_heartbeat WORKER_ID [STATUS] [CURRENT_TASK]
+update_heartbeat() {
+    local worker_id="$1"
+    local status="${2:-active}"
+    local current_task="${3:-}"
+
+    _heartbeat_require_sqlite || return 1
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
+
+    local esc_worker esc_status esc_task
+    esc_worker="${worker_id//\'/\'\'}"
+    esc_status="${status//\'/\'\'}"
+    esc_task="${current_task//\'/\'\'}"
+
+    sqlite3 "$STATE_DB" <<SQL
+UPDATE workers
+SET last_heartbeat = datetime('now'),
+    status = '${esc_status}',
+    current_task = '${esc_task}'
+WHERE worker_id = '${esc_worker}';
+SQL
+}
+
+# M3-019: Detect dead workers (wrapper for detect_crashed_workers_sqlite)
+# Usage: detect_dead_workers [TIMEOUT_SECONDS]
+# Returns: pipe-separated rows: worker_id|current_task|pid
+detect_dead_workers() {
+    local timeout_seconds="${1:-$HEARTBEAT_TIMEOUT_SECONDS}"
+
+    _heartbeat_require_sqlite || return 1
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
+
+    sqlite3 "$STATE_DB" -separator '|' <<SQL
+SELECT worker_id, current_task, pid
+FROM workers
+WHERE status IN ('starting', 'busy', 'idle')
+AND last_heartbeat < datetime('now', '-${timeout_seconds} seconds');
+SQL
+}
+
+# M3-019: Recover a single crashed worker
+# Usage: recover_crashed_worker WORKER_ID [CURRENT_TASK] [PID]
+recover_crashed_worker() {
+    local worker_id="$1"
+    local current_task="${2:-}"
+    local pid="${3:-}"
+
+    if declare -F log_warn >/dev/null 2>&1; then
+        log_warn "[M3-019] Recovering crashed worker: $worker_id (pid: $pid)"
+    else
+        echo "[WARN] [M3-019] Recovering crashed worker: $worker_id (pid: $pid)" >&2
+    fi
+
+    _heartbeat_require_sqlite || return 1
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
+
+    local esc_worker="${worker_id//\'/\'\'}"
+
+    # 1. Mark worker as crashed in database
+    sqlite3 "$STATE_DB" <<SQL
+UPDATE workers
+SET status = 'crashed',
+    crashed_at = datetime('now'),
+    crash_count = COALESCE(crash_count, 0) + 1
+WHERE worker_id = '${esc_worker}';
+SQL
+
+    # 2. Requeue any running tasks
+    if [[ -n "$current_task" ]]; then
+        requeue_task "$current_task" "$worker_id"
+    fi
+
+    # 3. Ensure process is actually dead
+    if [[ -n "$pid" ]] && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if declare -F log_warn >/dev/null 2>&1; then
+            log_warn "[M3-019] Force killing zombie process: $pid"
+        else
+            echo "[WARN] [M3-019] Force killing zombie process: $pid" >&2
+        fi
+        kill -SIGKILL "$pid" 2>/dev/null || true
+    fi
+
+    # 4. Log to event store
+    sqlite3 "$STATE_DB" <<SQL
+INSERT INTO events (task_id, event_type, actor, payload, trace_id)
+VALUES (
+    NULLIF('${current_task//\'/\'\'}', ''),
+    'WORKER_CRASHED',
+    'heartbeat',
+    '{"worker_id":"${esc_worker}","task":"${current_task//\'/\'\'}","pid":"$pid"}',
+    '${TRACE_ID}'
+);
+SQL
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M3-019] Worker $worker_id recovery complete"
+    else
+        echo "[INFO] [M3-019] Worker $worker_id recovery complete" >&2
+    fi
+}
+
+# M3-019: Requeue task from crashed worker
+# Usage: requeue_task TASK_ID WORKER_ID
+requeue_task() {
+    local task_id="$1"
+    local worker_id="${2:-unknown}"
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M3-019] Requeuing task $task_id from crashed worker $worker_id"
+    else
+        echo "[INFO] [M3-019] Requeuing task $task_id from crashed worker $worker_id" >&2
+    fi
+
+    _heartbeat_require_sqlite || return 1
+
+    local esc_task="${task_id//\'/\'\'}"
+    local esc_worker="${worker_id//\'/\'\'}"
+
+    # Update task state in SQLite
+    sqlite3 "$STATE_DB" <<SQL
+UPDATE tasks
+SET state = 'QUEUED',
+    assigned_worker = NULL,
+    worker_id = NULL,
+    updated_at = datetime('now'),
+    retry_count = COALESCE(retry_count, 0) + 1
+WHERE id = '${esc_task}' AND state = 'RUNNING';
+SQL
+
+    # Move file from running to queue if file-based
+    local running_file="${AUTONOMOUS_ROOT}/tasks/running/${task_id}"
+    local queue_file="${AUTONOMOUS_ROOT}/tasks/queue/${task_id}"
+
+    if [[ -f "$running_file" ]]; then
+        mkdir -p "${AUTONOMOUS_ROOT}/tasks/queue"
+        mv "$running_file" "$queue_file" 2>/dev/null || true
+
+        # Remove lock
+        rm -f "${running_file}.lock" 2>/dev/null || true
+        rmdir "${running_file}.lock.d" 2>/dev/null || true
+    fi
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M3-019] Task $task_id requeued successfully"
+    else
+        echo "[INFO] [M3-019] Task $task_id requeued successfully" >&2
+    fi
+}
+
+# M3-019: Recover all stale tasks from dead workers
+# Usage: recover_all_stale_tasks [TIMEOUT_SECONDS]
+recover_all_stale_tasks() {
+    local timeout_seconds="${1:-$HEARTBEAT_TIMEOUT_SECONDS}"
+    local recovered=0
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M3-019] Scanning for stale tasks (timeout: ${timeout_seconds}s)..."
+    else
+        echo "[INFO] [M3-019] Scanning for stale tasks (timeout: ${timeout_seconds}s)..." >&2
+    fi
+
+    local dead_workers
+    dead_workers=$(detect_dead_workers "$timeout_seconds")
+
+    while IFS='|' read -r worker_id current_task pid; do
+        [[ -z "$worker_id" ]] && continue
+
+        recover_crashed_worker "$worker_id" "$current_task" "$pid"
+        ((recovered++)) || true
+    done <<< "$dead_workers"
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M3-019] Recovery complete: $recovered workers processed"
+    else
+        echo "[INFO] [M3-019] Recovery complete: $recovered workers processed" >&2
+    fi
+
+    echo "$recovered"
+}
+
+# M3-019: Check if worker should be restarted (based on crash count and cooldown)
+# Usage: should_respawn_worker WORKER_ID [MAX_CRASHES] [COOLDOWN_MINUTES]
+# Returns: "yes", "cooldown", or "no"
+should_respawn_worker() {
+    local worker_id="$1"
+    local max_crashes="${2:-$MAX_WORKER_CRASHES}"
+    local cooldown_minutes="${3:-$CRASH_COOLDOWN_MINUTES}"
+
+    _heartbeat_require_sqlite || { echo "yes"; return; }
+
+    local esc_worker="${worker_id//\'/\'\'}"
+
+    local result
+    result=$(sqlite3 "$STATE_DB" <<SQL
+SELECT CASE
+    WHEN crash_count >= $max_crashes THEN 'no'
+    WHEN crashed_at > datetime('now', '-$cooldown_minutes minutes') THEN 'cooldown'
+    ELSE 'yes'
+END
+FROM workers
+WHERE worker_id = '${esc_worker}';
+SQL
+)
+
+    echo "${result:-yes}"
+}
+
+# M3-019: Reset worker for respawn
+# Usage: reset_worker_for_respawn WORKER_ID
+reset_worker_for_respawn() {
+    local worker_id="$1"
+
+    _heartbeat_require_sqlite || return 1
+
+    local esc_worker="${worker_id//\'/\'\'}"
+
+    sqlite3 "$STATE_DB" <<SQL
+UPDATE workers
+SET status = 'starting',
+    pid = NULL,
+    last_heartbeat = datetime('now'),
+    current_task = NULL
+WHERE worker_id = '${esc_worker}';
+SQL
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[M3-019] Worker $worker_id reset for respawn"
+    else
+        echo "[INFO] [M3-019] Worker $worker_id reset for respawn" >&2
+    fi
+}
+
+# M3-019: Get crash recovery statistics
+get_crash_recovery_stats() {
+    _heartbeat_require_sqlite || return 1
+
+    local stats
+    stats=$(sqlite3 "$STATE_DB" <<SQL
+SELECT
+    (SELECT COUNT(*) FROM workers WHERE status='crashed') as crashed_workers,
+    (SELECT COUNT(*) FROM workers WHERE crash_count >= $MAX_WORKER_CRASHES) as max_crashed_workers,
+    (SELECT COALESCE(SUM(crash_count), 0) FROM workers) as total_crashes,
+    (SELECT COUNT(*) FROM events WHERE event_type='WORKER_CRASHED' AND timestamp > datetime('now', '-1 hour')) as crashes_last_hour;
+SQL
+)
+
+    echo "M3-019 Crash Recovery Statistics:"
+    echo "  Crashed workers:      $(echo "$stats" | cut -d'|' -f1)"
+    echo "  Max-crashed workers:  $(echo "$stats" | cut -d'|' -f2)"
+    echo "  Total crashes:        $(echo "$stats" | cut -d'|' -f3)"
+    echo "  Crashes (last hour):  $(echo "$stats" | cut -d'|' -f4)"
+    echo "  Max crashes allowed:  $MAX_WORKER_CRASHES"
+    echo "  Cooldown period:      ${CRASH_COOLDOWN_MINUTES}m"
+    echo "  Heartbeat timeout:    ${HEARTBEAT_TIMEOUT_SECONDS}s"
+}
+
 export -f recover_stale_tasks recover_stale_task recover_zombie_tasks
 export -f start_recovery_daemon stop_recovery_daemon is_worker_alive
 export -f force_recover_task get_recovery_stats run_recovery_check
+
+# M3-019: Export crash recovery functions
+export -f update_heartbeat detect_dead_workers recover_crashed_worker
+export -f requeue_task recover_all_stale_tasks should_respawn_worker
+export -f reset_worker_for_respawn get_crash_recovery_stats

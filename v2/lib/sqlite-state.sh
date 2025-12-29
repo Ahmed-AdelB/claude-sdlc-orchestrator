@@ -66,22 +66,59 @@ _sqlite_require() {
 
 _sql_escape() {
     local value="${1:-}"
-    value=${value//'/'/''}
+    # SQL escape: double single quotes to prevent SQL injection
+    # SECURITY: This is CRITICAL - single quotes in SQL strings must be doubled
+    # The original code only removed forward slashes which was incorrect
+    value="${value//\'/\'\'}"
     printf '%s' "$value"
 }
 
 _sqlite_exec() {
     local db="${1:-$STATE_DB}"
     shift
-    
-    if command -v sqlite3 >/dev/null 2>&1;
-     then
-        # Standard CLI
-        if [[ $# -eq 0 ]]; then
-            sqlite3 "$db"  # Read from stdin
-        else
-            sqlite3 "$db" "$@"
-        fi
+
+    # Retry settings for concurrent access
+    local max_retries="${SQLITE_MAX_RETRIES:-5}"
+    local retry_delay="${SQLITE_RETRY_DELAY:-0.1}"
+    local attempt=0
+    local result=""
+    local exit_code=0
+
+    if command -v sqlite3 >/dev/null 2>&1; then
+        # Standard CLI with busy_timeout and WAL pragmas
+        while (( attempt < max_retries )); do
+            ((attempt++))
+
+            local raw_result
+            if [[ $# -eq 0 ]]; then
+                # Read from stdin - prepend pragmas
+                raw_result=$(cat | {
+                    echo "PRAGMA busy_timeout=10000;"
+                    echo "PRAGMA journal_mode=WAL;"
+                    cat
+                } | sqlite3 "$db" 2>&1) && exit_code=0 || exit_code=$?
+            else
+                # Direct SQL - prepend pragmas
+                raw_result=$(sqlite3 "$db" "PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL; $*" 2>&1) && exit_code=0 || exit_code=$?
+            fi
+
+            # Check if it's a locking error
+            if [[ $exit_code -eq 0 ]] || ! echo "$raw_result" | grep -qiE "database is locked|busy"; then
+                # Success or non-locking error - filter out PRAGMA output
+                result=$(echo "$raw_result" | grep -vE '^[0-9]+$|^wal$' || true)
+                echo "$result"
+                return $exit_code
+            fi
+
+            # Locking error - retry with exponential backoff
+            if (( attempt < max_retries )); then
+                sleep "$(echo "$retry_delay * $attempt" | bc 2>/dev/null || echo "0.2")"
+            fi
+        done
+
+        # All retries exhausted
+        echo "$result" >&2
+        return $exit_code
     elif command -v python3 >/dev/null 2>&1;
      then
         # Python fallback
@@ -145,6 +182,69 @@ finally:
         echo "Error: sqlite3/python3 missing" >&2
         return 1
     fi
+}
+
+# =============================================================================
+# db_exec_checked - Execute SQL with error handling and logging
+# =============================================================================
+# Usage: db_exec_checked "SQL" "operation_name" [critical]
+#
+# Arguments:
+#   sql        - The SQL statement to execute
+#   operation  - Human-readable name for the operation (for logging)
+#   critical   - If "true", logs CRITICAL and returns 1 on failure
+#                If "false" (default), logs WARN and returns 1 on failure
+#
+# Returns:
+#   0 on success, 1 on failure
+#
+# Example:
+#   db_exec_checked "INSERT INTO tasks ..." "create task" true
+#   db_exec_checked "UPDATE workers SET ..." "update worker heartbeat" false
+# =============================================================================
+db_exec_checked() {
+    local sql="$1"
+    local operation="${2:-SQL operation}"
+    local critical="${3:-false}"
+
+    local result=""
+    local exit_code=0
+
+    # Execute the SQL and capture both output and exit code
+    result=$(_sqlite_exec "$STATE_DB" "$sql" 2>&1) && exit_code=0 || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        # SQL execution failed
+        if [[ "$critical" == "true" ]]; then
+            log_error "CRITICAL: $operation failed (exit code: $exit_code)"
+            if [[ -n "$result" ]]; then
+                log_error "CRITICAL: SQLite error: $result"
+            fi
+        else
+            log_warn "$operation failed (exit code: $exit_code)"
+            if [[ -n "$result" ]]; then
+                log_warn "SQLite error: $result"
+            fi
+        fi
+        return 1
+    fi
+
+    # Check for SQLite error messages in output (some errors don't set exit code)
+    if echo "$result" | grep -qiE "^(Error|SQLite Error|Runtime error|database is locked)"; then
+        if [[ "$critical" == "true" ]]; then
+            log_error "CRITICAL: $operation returned error: $result"
+        else
+            log_warn "$operation returned error: $result"
+        fi
+        return 1
+    fi
+
+    # Success - output the result if any
+    if [[ -n "$result" ]]; then
+        echo "$result"
+    fi
+
+    return 0
 }
 
 _ensure_db() {
@@ -261,7 +361,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '5.0');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '5.1');  -- M3-019: Added crash recovery columns
 
 CREATE TABLE IF NOT EXISTS state (
     file_path TEXT NOT NULL,
@@ -344,7 +444,7 @@ CREATE TABLE IF NOT EXISTS consensus_votes (
 CREATE TABLE IF NOT EXISTS workers (
     worker_id TEXT PRIMARY KEY,
     pid INTEGER,
-    status TEXT CHECK(status IN ('starting','idle','busy','stopping','dead')) DEFAULT 'starting',
+    status TEXT CHECK(status IN ('starting','idle','busy','stopping','dead','crashed')) DEFAULT 'starting',
     specialization TEXT,
     started_at TEXT DEFAULT (datetime('now')),
     last_heartbeat TEXT,
@@ -352,7 +452,11 @@ CREATE TABLE IF NOT EXISTS workers (
     tasks_failed INTEGER DEFAULT 0,
     shard TEXT,
     model TEXT,
-    metadata TEXT
+    metadata TEXT,
+    -- M3-019: Worker Crash Recovery columns
+    crash_count INTEGER DEFAULT 0,
+    crashed_at TEXT,
+    current_task TEXT
 );
 
 CREATE TABLE IF NOT EXISTS worker_heartbeats (
@@ -602,13 +706,42 @@ transition_task() {
     fi
 
     # M1-FIX: Verify UPDATE succeeded via changes()
+    # Added: flock + busy_timeout + retry logic for concurrent access
     local result
+    local attempt=0
+    local max_retries="${SQLITE_MAX_RETRIES:-10}"
+    local exit_code=0
+    local lock_file="${STATE_DB}.lock"
+    touch "$lock_file" 2>/dev/null || lock_file="/tmp/.tri-agent-sqlite.lock"
+    touch "$lock_file" 2>/dev/null || true
+
     if command -v sqlite3 >/dev/null 2>&1; then
-        result=$(sqlite3 "$STATE_DB" <<SQL
+        while (( attempt < max_retries )); do
+            ((attempt++))
+            # Use flock for application-level serialization
+            local raw_result
+            raw_result=$(
+                flock -w 15 200 2>/dev/null || true
+                sqlite3 "$STATE_DB" <<SQL 2>&1
+PRAGMA busy_timeout=30000;
+PRAGMA journal_mode=WAL;
 UPDATE tasks SET state='${esc_state}', updated_at=datetime('now')${completed_at} WHERE id='${esc_task}';
 SELECT changes();
 SQL
-)
+            ) 200>"$lock_file" && exit_code=0 || exit_code=$?
+
+            if [[ $exit_code -eq 0 ]] || ! echo "$raw_result" | grep -qiE "database is locked|busy|Runtime error"; then
+                # Filter out PRAGMA output, keep only the changes() result
+                result=$(echo "$raw_result" | grep -vE '^wal$' | tail -1)
+                break
+            fi
+            if (( attempt < max_retries )); then
+                local delay jitter
+                delay=$(awk "BEGIN {printf \"%.2f\", 0.2 * $attempt * $attempt}" 2>/dev/null || echo "0.5")
+                jitter=$(awk "BEGIN {srand(); printf \"%.2f\", rand() * 0.3}" 2>/dev/null || echo "0.1")
+                sleep "$(awk "BEGIN {printf \"%.2f\", $delay + $jitter}" 2>/dev/null || echo "0.5")" 2>/dev/null || sleep 1
+            fi
+        done
     else
         # Python fallback
         result=$(python3 -c "
@@ -896,11 +1029,29 @@ claim_task_atomic_filtered() {
     if command -v sqlite3 >/dev/null 2>&1;
      then
         local result
+        local attempt=0
+        local max_retries="${SQLITE_MAX_RETRIES:-10}"
+        local exit_code=0
+        local lock_file="${STATE_DB}.lock"
+        touch "$lock_file" 2>/dev/null || lock_file="/tmp/.tri-agent-sqlite.lock"
+        touch "$lock_file" 2>/dev/null || true
+
         # M1-001: BEGIN IMMEDIATE for atomic claiming with verified success
-        result=$(sqlite3 "$STATE_DB" <<SQL
+        # Added: flock + busy_timeout + retry logic for concurrent access
+        # Research: https://berthub.eu/articles/posts/a-brief-post-on-sqlite3-database-locked-despite-timeout/
+        while (( attempt < max_retries )); do
+            ((attempt++))
+            # Use flock for application-level serialization
+            # M1-001-FIX: Atomic claim with direct UPDATE
+            # Filter PRAGMA output at bash level to avoid .output issues
+            local raw_result
+            raw_result=$(
+                flock -w 15 200 2>/dev/null || true  # Wait up to 15s for lock
+                sqlite3 "$STATE_DB" <<SQL 2>&1
+PRAGMA busy_timeout=30000;
+PRAGMA journal_mode=WAL;
 BEGIN IMMEDIATE;
--- M1-001: Atomic task claim with filters
--- Priority: 0=CRITICAL, 1=HIGH, 2=MEDIUM, 3=LOW
+-- Atomic claim: Update first QUEUED task, verify success via changes()
 UPDATE tasks
 SET state='RUNNING',
     worker_id='${esc_worker}',
@@ -914,18 +1065,34 @@ WHERE id = (
     ORDER BY priority ASC, created_at ASC
     LIMIT 1
 ) AND state='QUEUED';
--- M1-001: Only return task ID if UPDATE actually succeeded (changes() > 0)
+-- Only return task ID if we actually claimed it (changes() > 0)
+-- Use max(started_at) to get the task we just updated
 SELECT CASE WHEN changes() > 0
     THEN (SELECT id FROM tasks
-          WHERE worker_id='${esc_worker}'
-            AND state='RUNNING'
-          ORDER BY started_at DESC
-          LIMIT 1)
+          WHERE worker_id='${esc_worker}' AND state='RUNNING'
+          AND started_at = (SELECT MAX(started_at) FROM tasks
+                            WHERE worker_id='${esc_worker}' AND state='RUNNING'))
     ELSE NULL
 END;
 COMMIT;
 SQL
-)
+            ) 200>"$lock_file" && exit_code=0 || exit_code=$?
+
+            # Check for locking errors in raw result
+            if [[ $exit_code -eq 0 ]] || ! echo "$raw_result" | grep -qiE "database is locked|busy|Runtime error"; then
+                # Filter out PRAGMA output (numbers and 'wal'), keep only task IDs
+                result=$(echo "$raw_result" | grep -vE '^[0-9]+$|^wal$|^$' | tail -1)
+                break  # Success or non-locking error
+            fi
+
+            # Locking error - retry with exponential backoff + jitter
+            if (( attempt < max_retries )); then
+                local delay jitter
+                delay=$(awk "BEGIN {printf \"%.2f\", 0.2 * $attempt * $attempt}" 2>/dev/null || echo "0.5")
+                jitter=$(awk "BEGIN {srand(); printf \"%.2f\", rand() * 0.3}" 2>/dev/null || echo "0.1")
+                sleep "$(awk "BEGIN {printf \"%.2f\", $delay + $jitter}" 2>/dev/null || echo "0.5")" 2>/dev/null || sleep 1
+            fi
+        done
         # Filter out empty/null results
         if [[ -n "$result" && "$result" != "NULL" && "$result" != "" ]]; then
             echo "$result"

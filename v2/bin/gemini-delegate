@@ -456,8 +456,17 @@ attempt_fallback() {
 }
 
 #===============================================================================
-# Validate Input
+# Validate Input (check stdin first if no argument provided)
 #===============================================================================
+# If no argument prompt provided, check stdin (HERE string from worker)
+_STDIN_CONSUMED=""
+if [[ -z "$PROMPT" ]]; then
+    if [[ ! -t 0 ]]; then
+        PROMPT=$(cat)
+        _STDIN_CONSUMED="1"  # Mark stdin as consumed
+    fi
+fi
+
 if [[ -z "$PROMPT" ]]; then
     json_output "error" "ABSTAIN" "0.0" "No prompt provided" "" 0
     exit 1
@@ -490,9 +499,12 @@ if [[ -n "$INCLUDE_DIRS" ]]; then
 fi
 
 # Read stdin if available (for piped content) with size limit
+# NOTE: If PROMPT was populated from stdin above, stdin is already consumed
+# This section handles the case where prompt is argument AND stdin has additional content
 MAX_STDIN_SIZE=500000  # 500KB limit to prevent memory issues
 STDIN_CONTENT=""
-if [[ ! -t 0 ]]; then
+# Only read if stdin was not already consumed for PROMPT
+if [[ ! -t 0 ]] && [[ -z "$_STDIN_CONSUMED" ]]; then
     STDIN_CONTENT=$(head -c $MAX_STDIN_SIZE)
     # Check if there was more content (stdin still has data)
     if read -n 1 -t 0 2>/dev/null; then
@@ -549,9 +561,8 @@ EXIT_CODE=0
 STDERR_OUTPUT=""
 
 # Create secure temp file for stderr (#89 fix)
-STDERR_TMP=$(mktemp -t "gemini.${TRACE_ID}.stderr.XXXXXXXXXX")
+STDERR_TMP=$(secure_mktemp "gemini-delegate.${TRACE_ID}.stderr") || { json_output "error" "ABSTAIN" "0.0" "Failed to create temp file" "" 0; exit 1; }
 trap 'rm -f "$STDERR_TMP"' EXIT
-chmod 600 "$STDERR_TMP"
 
 # Unset GOOGLE_CLOUD_PROJECT to avoid auth issues with personal OAuth
 unset GOOGLE_CLOUD_PROJECT 2>/dev/null || true

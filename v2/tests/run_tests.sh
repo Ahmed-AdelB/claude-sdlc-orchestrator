@@ -17,6 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 UNIT_DIR="${SCRIPT_DIR}/unit"
 INTEGRATION_DIR="${SCRIPT_DIR}/integration"
+E2E_DIR="${SCRIPT_DIR}/e2e"
+SECURITY_DIR="${SCRIPT_DIR}/security"
 FUZZ_DIR="${SCRIPT_DIR}/fuzz"
 PROPERTY_DIR="${SCRIPT_DIR}/property"
 STRESS_DIR="${SCRIPT_DIR}/stress"
@@ -81,6 +83,8 @@ ${BOLD}TEST TYPES:${RESET}
     all          Run all tests (default)
     unit         Run only unit tests
     integration  Run only integration tests
+    e2e          Run end-to-end tests
+    security     Run security tests
     fuzz         Run fuzzing tests
     property     Run property-based tests
     stress       Run stress/concurrency tests
@@ -119,7 +123,7 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
-        unit|integration|fuzz|property|stress|validation|chaos|advanced|deep|all)
+        unit|integration|e2e|security|fuzz|property|stress|validation|chaos|advanced|deep|all)
             TEST_TYPE="$1"
             shift
             ;;
@@ -181,6 +185,40 @@ run_integration_tests() {
     fi
 
     for test_file in "${integration_tests[@]}"; do
+        if [[ -f "$test_file" ]]; then
+            run_test_file "$test_file" || true
+        fi
+    done
+}
+
+run_e2e_tests() {
+    log_section "End-to-End Tests"
+
+    local e2e_tests=("$E2E_DIR"/test_*.sh)
+
+    if [[ ! -e "${e2e_tests[0]}" ]]; then
+        echo "  No e2e tests found in ${E2E_DIR}"
+        return 0
+    fi
+
+    for test_file in "${e2e_tests[@]}"; do
+        if [[ -f "$test_file" ]]; then
+            run_test_file "$test_file" || true
+        fi
+    done
+}
+
+run_security_tests() {
+    log_section "Security Tests"
+
+    local security_tests=("$SECURITY_DIR"/test_*.sh)
+
+    if [[ ! -e "${security_tests[0]}" ]]; then
+        echo "  No security tests found in ${SECURITY_DIR}"
+        return 0
+    fi
+
+    for test_file in "${security_tests[@]}"; do
         if [[ -f "$test_file" ]]; then
             run_test_file "$test_file" || true
         fi
@@ -328,6 +366,12 @@ main() {
         integration)
             run_integration_tests
             ;;
+        e2e)
+            run_e2e_tests
+            ;;
+        security)
+            run_security_tests
+            ;;
         fuzz)
             run_fuzz_tests
             ;;
@@ -352,6 +396,8 @@ main() {
         all)
             run_unit_tests
             run_integration_tests
+            run_e2e_tests
+            run_security_tests
             run_advanced_tests
             run_deep_tests
             ;;

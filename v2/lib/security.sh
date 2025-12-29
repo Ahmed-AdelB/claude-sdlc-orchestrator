@@ -711,6 +711,273 @@ get_security_status() {
 EOF
 }
 
+#===============================================================================
+# LLM Input Sanitization (SEC-001: Prompt Injection Prevention)
+#===============================================================================
+# Functions to sanitize inputs before sending to LLM models.
+# Prevents prompt injection attacks where malicious task content could
+# manipulate the model to bypass security controls or execute unintended
+# operations.
+#
+# These functions complement sanitize_llm_input() in lib/common.sh by providing:
+# - File-level validation (binary detection, size limits)
+# - Strict prompt injection pattern detection
+# - Template-based safe prompt building
+#===============================================================================
+
+# Maximum allowed prompt length (tokens ~ chars/4, so 100K chars ~ 25K tokens)
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-100000}"
+
+# Maximum task file size (1MB)
+MAX_TASK_FILE_SIZE="${MAX_TASK_FILE_SIZE:-1048576}"
+
+# Dangerous patterns that could indicate prompt injection attempts
+# These are grep -E (extended regex) compatible patterns
+declare -a LLM_INJECTION_PATTERNS=(
+    # Direct instruction override attempts
+    'ignore[[:space:]]+(all[[:space:]]+)?previous[[:space:]]+(instructions?|prompts?|context)'
+    'disregard[[:space:]]+(your|the|all)?[[:space:]]*(instructions?|rules?|guidelines?|constraints?)'
+    'forget[[:space:]]+(all[[:space:]]+)?(previous|your|the)?[[:space:]]*(instructions?|context)?'
+    'override[[:space:]]+(safety|security|restrictions?|guidelines?|system)'
+    'bypass[[:space:]]+(safety|security|restrictions?|filters?)'
+    # Persona/mode manipulation
+    'new[[:space:]]+(persona|identity|role|mode)'
+    'pretend[[:space:]]+(you[[:space:]]+are|to[[:space:]]+be)'
+    'act[[:space:]]+as[[:space:]]+(if|a|an)?'
+    'you[[:space:]]+are[[:space:]]+now'
+    'jailbreak'
+    'DAN[[:space:]]+mode'
+    'developer[[:space:]]+mode'
+    'unrestricted[[:space:]]+mode'
+    # System prompt extraction
+    'reveal[[:space:]]+(your|the|system)?[[:space:]]*(prompt|instructions?)'
+    'show[[:space:]]+(me[[:space:]]+)?(your|the|system)?[[:space:]]*(prompt|instructions?)'
+    'print[[:space:]]+(your|the|system)?[[:space:]]*(prompt|instructions?)'
+    'what[[:space:]]+(are|is)[[:space:]]+(your|the)[[:space:]]+(system)?[[:space:]]*(prompt|instructions?)'
+    # Role markers that shouldn't appear in user content
+    'SYSTEM:'
+    'ADMIN:'
+    'ROOT:'
+    '\[SYSTEM\]'
+    '\[ADMIN\]'
+    '<\|system\|>'
+    '<\|assistant\|>'
+    '<<SYS>>'
+    '<<\/SYS>>'
+    # Sudo/privilege escalation
+    'sudo[[:space:]]+mode'
+    'admin[[:space:]]+mode'
+    'root[[:space:]]+access'
+    'elevate[[:space:]]+privileges'
+    # Output manipulation
+    'respond[[:space:]]+with[[:space:]]+only'
+    'output[[:space:]]+only'
+    'say[[:space:]]+exactly'
+    'repeat[[:space:]]+after[[:space:]]+me'
+    # Delimiter manipulation
+    '```system'
+    '```admin'
+    '---BEGIN[[:space:]]+SYSTEM'
+    '###[[:space:]]*SYSTEM'
+    '\*\*\*[[:space:]]*SYSTEM'
+)
+
+# Check input for LLM prompt injection patterns
+# Usage: check_prompt_injection "input" [strict]
+# Returns: 0 if safe, 1 if potential injection detected
+# Args:
+#   input  - The text to check
+#   strict - If "true", logs each detection (default: true)
+check_prompt_injection() {
+    local input="$1"
+    local strict="${2:-true}"
+    local found_patterns=()
+
+    for pattern in "${LLM_INJECTION_PATTERNS[@]}"; do
+        if printf '%s' "$input" | grep -qiE "$pattern" 2>/dev/null; then
+            found_patterns+=("$pattern")
+            if [[ "$strict" == "true" ]]; then
+                log_security_event "PROMPT_INJECTION_ATTEMPT" "SEC-001: Detected pattern: $pattern" "CRITICAL"
+            fi
+        fi
+    done
+
+    if [[ ${#found_patterns[@]} -gt 0 ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Filter prompt injection patterns from input
+# Usage: filtered=$(filter_prompt_injection "input")
+# Returns: Input with injection patterns replaced with [FILTERED]
+filter_prompt_injection() {
+    local input="$1"
+    local filtered="$input"
+
+    for pattern in "${LLM_INJECTION_PATTERNS[@]}"; do
+        # Use sed with case-insensitive flag
+        filtered=$(printf '%s' "$filtered" | sed -E "s/$pattern/[FILTERED]/gi" 2>/dev/null || printf '%s' "$filtered")
+    done
+
+    printf '%s' "$filtered"
+}
+
+# Validate task content file before processing
+# Usage: validate_task_content "task_file"
+# Returns: 0 if valid, 1 if invalid
+# Checks:
+#   - File exists and is readable
+#   - File size within limits
+#   - File is text (not binary)
+#   - No obvious malicious content
+validate_task_content() {
+    local task_file="$1"
+
+    # Check file exists
+    if [[ ! -f "$task_file" ]]; then
+        log_security_event "TASK_FILE_MISSING" "SEC-001: Task file not found: $task_file" "WARN"
+        return 1
+    fi
+
+    # Check file is readable
+    if [[ ! -r "$task_file" ]]; then
+        log_security_event "TASK_FILE_UNREADABLE" "SEC-001: Task file not readable: $task_file" "WARN"
+        return 1
+    fi
+
+    # Check file size (max 1MB by default)
+    local size
+    size=$(stat -c %s "$task_file" 2>/dev/null || stat -f %z "$task_file" 2>/dev/null || echo 0)
+    if [[ $size -gt $MAX_TASK_FILE_SIZE ]]; then
+        log_security_event "TASK_FILE_TOO_LARGE" "SEC-001: Task file too large: $size bytes (max: $MAX_TASK_FILE_SIZE)" "CRITICAL"
+        return 1
+    fi
+
+    # Check if file is text (not binary)
+    # file command returns "ASCII text", "UTF-8 text", etc. for text files
+    local file_type
+    file_type=$(file -b "$task_file" 2>/dev/null || echo "unknown")
+    if ! printf '%s' "$file_type" | grep -qiE '(text|empty|ascii|utf)'; then
+        log_security_event "TASK_FILE_BINARY" "SEC-001: Task file appears to be binary: $file_type" "CRITICAL"
+        return 1
+    fi
+
+    # Check for null bytes (common in binary files or injection attempts)
+    if grep -qP '\x00' "$task_file" 2>/dev/null; then
+        log_security_event "TASK_FILE_NULL_BYTES" "SEC-001: Task file contains null bytes" "CRITICAL"
+        return 1
+    fi
+
+    log_security_event "TASK_FILE_VALIDATED" "SEC-001: Task file validated: $task_file ($size bytes)" "INFO"
+    return 0
+}
+
+# Build a safe prompt from a template and task content
+# Usage: prompt=$(build_safe_prompt "task_content" "template" [strict])
+# Args:
+#   task_content - The user/task content to insert
+#   template     - The prompt template with {{TASK_CONTENT}} placeholder
+#   strict       - If "true", filter injection patterns (default: true)
+# Returns: The assembled prompt with sanitized content
+build_safe_prompt() {
+    local task_content="$1"
+    local prompt_template="$2"
+    local strict="${3:-true}"
+
+    # Step 1: Check content length
+    if [[ ${#task_content} -gt $MAX_PROMPT_LENGTH ]]; then
+        log_security_event "PROMPT_TOO_LONG" "SEC-001: Task content exceeds max length, truncating (${#task_content} > $MAX_PROMPT_LENGTH)" "WARN"
+        task_content="${task_content:0:$MAX_PROMPT_LENGTH}"
+    fi
+
+    # Step 2: Remove null bytes
+    task_content=$(printf '%s' "$task_content" | tr -d '\0')
+
+    # Step 3: Remove non-printable characters except newline and tab
+    task_content=$(printf '%s' "$task_content" | tr -cd '[:print:]\n\t')
+
+    # Step 4: In strict mode, filter injection patterns
+    local safe_content="$task_content"
+    if [[ "$strict" == "true" ]]; then
+        if ! check_prompt_injection "$task_content" "true"; then
+            log_security_event "PROMPT_INJECTION_FILTERED" "SEC-001: Filtering detected injection patterns" "WARN"
+            safe_content=$(filter_prompt_injection "$task_content")
+        fi
+    fi
+
+    # Step 5: Replace placeholder in template
+    local prompt
+    if [[ -n "$prompt_template" ]]; then
+        prompt="${prompt_template//\{\{TASK_CONTENT\}\}/$safe_content}"
+    else
+        prompt="$safe_content"
+    fi
+
+    # Step 6: Final length check on assembled prompt
+    if [[ ${#prompt} -gt $MAX_PROMPT_LENGTH ]]; then
+        log_security_event "ASSEMBLED_PROMPT_TOO_LONG" "SEC-001: Assembled prompt too long, truncating" "WARN"
+        prompt="${prompt:0:$MAX_PROMPT_LENGTH}"
+    fi
+
+    printf '%s' "$prompt"
+}
+
+# Comprehensive LLM input validation (combines all checks)
+# Usage: validate_llm_input "input" [options]
+# Options:
+#   --strict    - Enable strict injection filtering
+#   --no-filter - Don't filter, only detect (returns 1 if injection found)
+#   --max-len=N - Override max length
+# Returns: 0 if valid, 1 if invalid/dangerous
+validate_llm_input() {
+    local input="$1"
+    shift
+
+    local strict=true
+    local filter=true
+    local max_len=$MAX_PROMPT_LENGTH
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --strict)
+                strict=true
+                ;;
+            --no-filter)
+                filter=false
+                ;;
+            --max-len=*)
+                max_len="${1#*=}"
+                ;;
+        esac
+        shift
+    done
+
+    # Length check
+    if [[ ${#input} -gt $max_len ]]; then
+        log_security_event "LLM_INPUT_TOO_LONG" "SEC-001: Input exceeds max length ($max_len)" "WARN"
+        return 1
+    fi
+
+    # Check for binary/null content
+    if printf '%s' "$input" | grep -qP '\x00' 2>/dev/null; then
+        log_security_event "LLM_INPUT_NULL_BYTES" "SEC-001: Input contains null bytes" "CRITICAL"
+        return 1
+    fi
+
+    # Check for injection patterns
+    if ! check_prompt_injection "$input" "$strict"; then
+        if [[ "$filter" == "false" ]]; then
+            return 1
+        fi
+        # If filtering is enabled, the input can still be used after filtering
+        log_security_event "LLM_INPUT_INJECTION_WARNING" "SEC-001: Input contains injection patterns (will be filtered)" "WARN"
+    fi
+
+    return 0
+}
+
 # Export functions
 export -f init_security_log
 export -f log_security_event
@@ -739,3 +1006,9 @@ export -f verify_integrity
 export -f secure_tempfile
 export -f validate_input
 export -f get_security_status
+# LLM Input Sanitization exports (SEC-001)
+export -f check_prompt_injection
+export -f filter_prompt_injection
+export -f validate_task_content
+export -f build_safe_prompt
+export -f validate_llm_input

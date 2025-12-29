@@ -1773,6 +1773,94 @@ SQL
     done
 }
 
+# =============================================================================
+# M3-019: Respawn Crashed Workers
+# =============================================================================
+# Scans for workers with status='crashed' and respawns them based on:
+# - Crash count check (prevents infinite respawn loops)
+# - Cooldown period check (prevents rapid respawn cycling)
+# Uses heartbeat.sh functions: should_respawn_worker, reset_worker_for_respawn
+# =============================================================================
+
+respawn_crashed_workers() {
+    _pool_require_sqlite
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
+
+    # Source heartbeat.sh if not already loaded
+    if ! declare -F should_respawn_worker >/dev/null 2>&1; then
+        if [[ -f "${AUTONOMOUS_ROOT}/lib/heartbeat.sh" ]]; then
+            # shellcheck source=/dev/null
+            source "${AUTONOMOUS_ROOT}/lib/heartbeat.sh"
+        fi
+    fi
+
+    # Get crashed workers with their shard and model info
+    local workers
+    workers=$(_sqlite_exec "$STATE_DB" "SELECT worker_id, shard, model, specialization FROM workers WHERE status='crashed';")
+
+    [[ -z "$workers" ]] && return 0
+
+    local respawned=0
+    local skipped=0
+    local cooldown=0
+
+    while IFS='|' read -r worker_id shard model spec; do
+        [[ -z "$worker_id" ]] && continue
+
+        local should_respawn
+        should_respawn=$(should_respawn_worker "$worker_id")
+
+        case "$should_respawn" in
+            yes)
+                _pool_log "INFO" "[M3-019] Respawning worker: $worker_id (spec: ${spec:-general}, shard: ${shard:-none})"
+
+                # Reset worker state
+                reset_worker_for_respawn "$worker_id"
+
+                # Start replacement worker
+                local new_worker_id
+                new_worker_id=$(start_worker "${spec:-general}" "${model:-claude}" "${shard:-}")
+
+                if [[ -n "$new_worker_id" ]]; then
+                    _pool_log "INFO" "[M3-019] Successfully respawned worker: $new_worker_id (replacing $worker_id)"
+                    ((respawned++)) || true
+                else
+                    _pool_log "ERROR" "[M3-019] Failed to respawn worker: $worker_id"
+                fi
+                ;;
+            cooldown)
+                _pool_log "DEBUG" "[M3-019] Worker $worker_id in cooldown, skipping respawn"
+                ((cooldown++)) || true
+                ;;
+            no)
+                _pool_log "WARN" "[M3-019] Worker $worker_id exceeded max crashes (${MAX_WORKER_CRASHES:-5}), not respawning"
+                ((skipped++)) || true
+
+                # Log event for exceeded crashes
+                _sqlite_exec "$STATE_DB" <<SQL
+INSERT INTO events (task_id, event_type, actor, payload, trace_id)
+VALUES (
+    NULL,
+    'WORKER_MAX_CRASHES',
+    'supervisor',
+    '{"worker_id": "$worker_id", "shard": "${shard:-}", "spec": "${spec:-}"}',
+    '${TRACE_ID}'
+);
+SQL
+                ;;
+        esac
+    done <<< "$workers"
+
+    if [[ $respawned -gt 0 || $skipped -gt 0 || $cooldown -gt 0 ]]; then
+        _pool_log "INFO" "[M3-019] Crash recovery summary: respawned=$respawned, cooldown=$cooldown, skipped=$skipped"
+    fi
+
+    echo "$respawned"
+}
+
+# Export M3-019 function
+export -f respawn_crashed_workers
+
 pool_run_loop() {
     pool_init
     while true; do

@@ -45,7 +45,7 @@
 # - Fallback: Bare metal execution if Docker unavailable
 #===============================================================================
 
-set -euo pipefail
+set -eo pipefail
 
 # Resolve paths
 SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -59,6 +59,23 @@ AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
 # Source common utilities
 source "${AUTONOMOUS_ROOT}/lib/common.sh"
+
+# Load worker configuration from tri-agent.yaml
+_load_worker_config() {
+    SQLITE_BUSY_TIMEOUT="${SQLITE_BUSY_TIMEOUT:-$(read_config '.error_handling.backoff_base' '30')}"
+    SQLITE_BUSY_TIMEOUT=$((SQLITE_BUSY_TIMEOUT * 1000))
+    SQLITE_MAX_RETRIES="${SQLITE_MAX_RETRIES:-$(read_config '.error_handling.max_retries' '10')}"
+    WATCH_INTERVAL="${WATCH_INTERVAL:-$(read_config '.monitoring.health_check_interval' '30')}"
+    log_info "Worker config loaded"
+}
+_load_worker_config
+
+# Source security utilities (SEC-001: LLM Input Sanitization)
+if [[ -f "${AUTONOMOUS_ROOT}/lib/security.sh" ]]; then
+    source "${AUTONOMOUS_ROOT}/lib/security.sh"
+else
+    log_warn "lib/security.sh not found - some security functions unavailable"
+fi
 
 # Source SQLite State (Essential)
 if [[ -f "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" ]]; then
@@ -80,6 +97,27 @@ if [[ -f "${AUTONOMOUS_ROOT}/lib/priority-queue.sh" ]]; then
 else
     PRIORITY_QUEUE_ENABLED=false
 fi
+
+# Source rate limiter for API cost control
+if [[ -f "${AUTONOMOUS_ROOT}/lib/rate-limiter.sh" ]]; then
+    source "${AUTONOMOUS_ROOT}/lib/rate-limiter.sh"
+    RATE_LIMITER_ENABLED=true
+    init_rate_limiter 2>/dev/null || true
+    log_info "Rate limiter enabled"
+else
+    RATE_LIMITER_ENABLED=false
+fi
+
+# Check delegate rate limit before execution
+check_delegate_rate_limit() {
+    local model="$1"
+    [[ "$RATE_LIMITER_ENABLED" != "true" ]] && return 0
+    if ! check_model_rate_limit "$model" 2>/dev/null; then
+        log_warn "Rate limit exceeded for $model"
+        return 1
+    fi
+    return 0
+}
 
 # Config
 WORKER_ID="${WORKER_ID:-worker-$$-$(date +%s)}"
@@ -132,6 +170,112 @@ DOCKER_SANDBOX_CPUS="${DOCKER_SANDBOX_CPUS:-2}"
 DOCKER_SANDBOX_NETWORK="${DOCKER_SANDBOX_NETWORK:-none}"
 DOCKER_SANDBOX_READONLY="${DOCKER_SANDBOX_READONLY:-false}"
 DOCKER_SANDBOX_WORKSPACE="${DOCKER_SANDBOX_WORKSPACE:-/workspace}"
+
+#===============================================================================
+# SQLite Wrapper with Flock + Retry Logic (Database Locking Fix)
+#===============================================================================
+# Research shows busy_timeout doesn't help when transactions upgrade from
+# read to write. The solution is application-level serialization using flock().
+#
+# Sources:
+# - https://berthub.eu/articles/posts/a-brief-post-on-sqlite3-database-locked-despite-timeout/
+# - https://tenthousandmeters.com/blog/sqlite-concurrent-writes-and-database-is-locked-errors/
+#===============================================================================
+SQLITE_BUSY_TIMEOUT="${SQLITE_BUSY_TIMEOUT:-30000}"  # 30 seconds
+SQLITE_MAX_RETRIES="${SQLITE_MAX_RETRIES:-10}"
+SQLITE_FLOCK_TIMEOUT="${SQLITE_FLOCK_TIMEOUT:-10}"   # 10 seconds per flock attempt
+SQLITE_LOCK_FILE="${STATE_DB}.lock"
+
+# Ensure lock file exists
+mkdir -p "$(dirname "$SQLITE_LOCK_FILE")" 2>/dev/null || true
+touch "$SQLITE_LOCK_FILE" 2>/dev/null || SQLITE_LOCK_FILE="/tmp/.tri-agent-sqlite.lock"
+touch "$SQLITE_LOCK_FILE" 2>/dev/null || true
+
+# Safe sqlite3 wrapper with flock serialization + retry logic
+# This ensures only one process accesses SQLite at a time at the application level
+#
+# FIX: Silent flock failure issue
+# Previously, `flock -w 10 200 2>/dev/null || true` silently ignored lock failures.
+# Now we properly track flock acquisition and retry with exponential backoff.
+_db_exec() {
+    local sql="$1"
+    local max_retries="${SQLITE_MAX_RETRIES:-10}"
+    local flock_timeout="${SQLITE_FLOCK_TIMEOUT:-10}"
+    local attempt=0
+    local result=""
+    local exit_code=0
+    local flock_acquired=false
+
+    while (( attempt < max_retries )); do
+        ((attempt++))
+        flock_acquired=false
+
+        # Use flock for application-level serialization
+        # We must track flock success separately to avoid silent failures
+        # fd 200 is used for the lock file
+        {
+            # Try to acquire the lock with timeout
+            if flock -w "$flock_timeout" 200 2>/dev/null; then
+                flock_acquired=true
+                # Lock acquired - execute SQL while holding the lock
+                result=$(_sqlite_exec "$STATE_DB" "$sql" 2>&1) && exit_code=0 || exit_code=$?
+            else
+                # Flock failed to acquire lock within timeout
+                flock_acquired=false
+                exit_code=75  # EX_TEMPFAIL - temporary failure, caller should retry
+            fi
+        } 200>"$SQLITE_LOCK_FILE"
+
+        # Handle flock acquisition failure
+        if [[ "$flock_acquired" != "true" ]]; then
+            log_warn "flock failed to acquire lock on $SQLITE_LOCK_FILE (attempt $attempt/$max_retries, timeout ${flock_timeout}s)"
+
+            # Retry with exponential backoff + jitter for flock failure
+            if (( attempt < max_retries )); then
+                local delay jitter
+                # Exponential backoff: 0.5, 2, 4.5, 8, 12.5... seconds
+                delay=$(awk "BEGIN {printf \"%.2f\", 0.5 * $attempt * $attempt}" 2>/dev/null || echo "1")
+                jitter=$(awk "BEGIN {srand(); printf \"%.2f\", rand() * 1.0}" 2>/dev/null || echo "0.5")
+                local total_delay
+                total_delay=$(awk "BEGIN {printf \"%.2f\", $delay + $jitter}" 2>/dev/null || echo "2")
+                log_debug "flock retry backoff: sleeping ${total_delay}s before attempt $((attempt + 1))"
+                sleep "$total_delay" 2>/dev/null || sleep 2
+            fi
+            continue
+        fi
+
+        # Lock was acquired - check SQL execution result
+        if [[ $exit_code -eq 0 ]]; then
+            echo "$result"
+            return 0
+        fi
+
+        # Check if it's a SQLite locking error (can happen even with flock in edge cases)
+        if ! echo "$result" | grep -qiE "database is locked|busy|Runtime error"; then
+            # Non-locking error - don't retry
+            echo "$result" >&2
+            return $exit_code
+        fi
+
+        # SQLite locking error - retry with exponential backoff + jitter
+        log_warn "SQLite locking error despite flock (attempt $attempt/$max_retries): ${result:0:100}"
+        if (( attempt < max_retries )); then
+            local delay jitter
+            delay=$(awk "BEGIN {printf \"%.2f\", 0.2 * $attempt * $attempt}" 2>/dev/null || echo "1")
+            jitter=$(awk "BEGIN {srand(); printf \"%.2f\", rand() * 0.5}" 2>/dev/null || echo "0.1")
+            sleep "$(awk "BEGIN {printf \"%.2f\", $delay + $jitter}" 2>/dev/null || echo "1")" 2>/dev/null || sleep 1
+        fi
+    done
+
+    # All retries exhausted
+    if [[ "$flock_acquired" != "true" ]]; then
+        log_error "flock acquisition failed after $max_retries attempts - database operations not serialized"
+    else
+        log_error "SQLite operation failed after $max_retries attempts: ${result:0:200}"
+    fi
+    echo "$result" >&2
+    return 1
+}
 
 #===============================================================================
 # Dependency Deadlock Resolution (Gap Analysis P0-5)
@@ -336,7 +480,7 @@ update_worker_state() {
         local esc_worker_id="${WORKER_ID//\'/\'\'}"
         local esc_reason="${reason//\'/\'\'}"
 
-        _sqlite_exec "$STATE_DB" "
+        _db_exec "
             UPDATE workers
             SET status='$new_status',
                 last_heartbeat=datetime('now'),
@@ -345,7 +489,7 @@ update_worker_state() {
         " 2>/dev/null || true
 
         # Log state change event
-        _sqlite_exec "$STATE_DB" "
+        _db_exec "
             INSERT INTO events (task_id, event_type, actor, payload, trace_id)
             VALUES ('', 'WORKER_STATE_CHANGE', '$esc_worker_id',
                     json_object('from', '$WORKER_STATE', 'to', '$new_status', 'reason', '$esc_reason'),
@@ -427,7 +571,7 @@ handle_shutdown() {
                 # Mark task as interrupted for recovery
                 if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
                     local esc_task_id="${CURRENT_TASK//\'/\'\'}"
-                    _sqlite_exec "$STATE_DB" "
+                    _db_exec "
                         UPDATE tasks
                         SET metadata=json_set(COALESCE(metadata,'{}'),
                             '$.interrupted', 1,
@@ -465,7 +609,7 @@ handle_interrupt() {
         # Release the task back to queue for another worker to pick up
         if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
             local esc_task_id="${CURRENT_TASK//\'/\'\'}"
-            _sqlite_exec "$STATE_DB" "
+            _db_exec "
                 UPDATE tasks
                 SET status='QUEUED',
                     claimed_by=NULL,
@@ -507,7 +651,7 @@ graceful_cleanup() {
     # Remove worker registration
     if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
         local esc_worker_id="${WORKER_ID//\'/\'\'}"
-        _sqlite_exec "$STATE_DB" "
+        _db_exec "
             UPDATE workers
             SET status='offline',
                 last_heartbeat=datetime('now')
@@ -537,7 +681,7 @@ immediate_cleanup() {
     # Update final state
     if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
         local esc_worker_id="${WORKER_ID//\'/\'\'}"
-        _sqlite_exec "$STATE_DB" "
+        _db_exec "
             UPDATE workers
             SET status='offline'
             WHERE worker_id='$esc_worker_id';
@@ -594,7 +738,7 @@ register_with_budget_watchdog() {
 
             # Register worker PID for watchdog to signal
             if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
-                _sqlite_exec "$STATE_DB" "
+                _db_exec "
                     UPDATE workers
                     SET metadata=json_set(COALESCE(metadata,'{}'), '$.budget_watchdog_registered', 1)
                     WHERE worker_id='$WORKER_ID';
@@ -675,19 +819,19 @@ acquire_task_lock() {
     if [[ -n "$task_id" ]]; then
         CURRENT_TASK="$task_id"
 
-        # Extract priority from task metadata (from SQLite)
+        # Extract priority from task metadata (from SQLite) - using safe wrapper
         local task_priority=""
         if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
-            task_priority=$(sqlite3 "$STATE_DB" "SELECT CASE priority WHEN 0 THEN 'CRITICAL' WHEN 1 THEN 'HIGH' WHEN 2 THEN 'MEDIUM' WHEN 3 THEN 'LOW' ELSE 'MEDIUM' END FROM tasks WHERE id='${task_id//\'/\'\'}' LIMIT 1;" 2>/dev/null || echo "MEDIUM")
+            task_priority=$(_db_exec "SELECT CASE priority WHEN 0 THEN 'CRITICAL' WHEN 1 THEN 'HIGH' WHEN 2 THEN 'MEDIUM' WHEN 3 THEN 'LOW' ELSE 'MEDIUM' END FROM tasks WHERE id='${task_id//\'/\'\'}' LIMIT 1;" 2>/dev/null || echo "MEDIUM")
         fi
 
         log_info "M1-001: Claimed task $task_id via SQLite atomic transaction (worker: $WORKER_ID, shard: ${WORKER_SHARD:-any}, model: ${WORKER_MODEL:-any}, priority: $task_priority)"
 
-        # M1-001: Log claim event for audit trail
+        # M1-001: Log claim event for audit trail - using safe wrapper
         if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
             local esc_task_id="${task_id//\'/\'\'}"
             local esc_worker_id="${WORKER_ID//\'/\'\'}"
-            sqlite3 "$STATE_DB" "INSERT INTO events (task_id, event_type, actor, payload, trace_id) VALUES ('${esc_task_id}', 'TASK_CLAIMED', '${esc_worker_id}', 'M1-001: Atomic SQLite claim', '${TRACE_ID:-}');" 2>/dev/null || true
+            _db_exec "INSERT INTO events (task_id, event_type, actor, payload, trace_id) VALUES ('${esc_task_id}', 'TASK_CLAIMED', '${esc_worker_id}', 'M1-001: Atomic SQLite claim', '${TRACE_ID:-}');" 2>/dev/null || true
         fi
 
         # Sync file state for legacy compatibility
@@ -901,6 +1045,21 @@ process_task() {
         return
     fi
 
+    # SEC-001: Validate task file before processing (size, binary check, null bytes)
+    if declare -f validate_task_content >/dev/null 2>&1; then
+        if ! validate_task_content "$task_file"; then
+            log_error "SEC-001: Task file validation failed for $task_id. Marking as FAILED."
+            transition_task "$task_id" "FAILED" "Security validation failed" "$WORKER_ID"
+            mkdir -p "$FAILED_DIR"
+            mv "$task_file" "$FAILED_DIR/$task_id.md" 2>/dev/null || true
+            CURRENT_TASK=""
+            return
+        fi
+        log_debug "SEC-001: Task file validated successfully: $task_file"
+    else
+        log_warn "SEC-001: validate_task_content not available, skipping file validation"
+    fi
+
     # 2. Move file to RUNNING (filesystem reflection)
     mkdir -p "$RUNNING_DIR"
     local running_file="$RUNNING_DIR/$task_id.md"
@@ -919,9 +1078,22 @@ process_task() {
     content=$(cat "$running_file")
 
     # SEC-001: Sanitize content before passing to delegates to prevent prompt injection
-    # The sanitize_llm_input function is provided by lib/common.sh (already sourced)
+    # Step 1: Check for prompt injection patterns (detection + logging)
+    if declare -f check_prompt_injection >/dev/null 2>&1; then
+        if ! check_prompt_injection "$content" "true"; then
+            log_warn "SEC-001: Prompt injection patterns detected in task $task_id (will be filtered)"
+        fi
+    fi
+
+    # Step 2: Apply sanitization (sanitize_llm_input from lib/common.sh)
     content=$(sanitize_llm_input "$content")
-    log_debug "Content sanitized for delegate (task: $task_id)"
+
+    # Step 3: Additional filtering via security.sh if available
+    if declare -f filter_prompt_injection >/dev/null 2>&1; then
+        content=$(filter_prompt_injection "$content")
+    fi
+
+    log_debug "SEC-001: Content sanitized for delegate (task: $task_id)"
 
     local model="claude" # Default
 
@@ -939,6 +1111,22 @@ process_task() {
     local result=""
     local exit_code=0
     local delegate_path="${AUTONOMOUS_ROOT}/bin/${model}-delegate"
+
+    # Check rate limit before delegate execution
+    if ! check_delegate_rate_limit "$model"; then
+        log_warn "Rate limit exceeded for model $model, requeueing task $task_id"
+        # Requeue the task for later processing
+        transition_task "$task_id" "QUEUED" "Rate limited - requeueing" "$WORKER_ID" || true
+        mv "$running_file" "$QUEUE_DIR/$task_id.md" 2>/dev/null || true
+        CURRENT_TASK=""
+        TASK_START_TIME=""
+        if [[ "$WORKER_STATE" == "RUNNING" ]]; then
+            update_worker_state "idle" "Rate limited - task requeued"
+        fi
+        # Sleep briefly to allow rate limit window to progress
+        sleep 5
+        return
+    fi
 
     if [[ -x "$delegate_path" ]]; then
         # P1-8: Execute delegate with optional Docker sandbox
@@ -1000,7 +1188,7 @@ process_task() {
         # Try to get retry count from task metadata
         if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
             local esc_task_id="${task_id//\'/\'\'}"
-            dep_retry_count=$(_sqlite_exec "$STATE_DB" "
+            dep_retry_count=$(_db_exec "
                 SELECT COALESCE(json_extract(metadata, '$.dep_retry_count'), 0)
                 FROM tasks WHERE id='$esc_task_id';
             " 2>/dev/null || echo "0")
@@ -1019,7 +1207,7 @@ process_task() {
                 local new_retry_count=$((dep_retry_count + 1))
                 if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
                     local esc_task_id="${task_id//\'/\'\'}"
-                    _sqlite_exec "$STATE_DB" "
+                    _db_exec "
                         UPDATE tasks
                         SET state='QUEUED',
                             worker_id=NULL,
@@ -1094,7 +1282,7 @@ heartbeat_loop() {
         else
             local esc_worker_id="${WORKER_ID//\'/\'\'}"
             local esc_task="${CURRENT_TASK//\'/\'\'}"
-            _sqlite_exec "$STATE_DB" "
+            _db_exec "
                 UPDATE workers
                 SET last_heartbeat=datetime('now'),
                     status='$heartbeat_status',
@@ -1124,7 +1312,7 @@ heartbeat_loop() {
 sqlite_state_init "$STATE_DB"
 
 # Register worker with enhanced metadata
-_sqlite_exec "$STATE_DB" "
+_db_exec "
     INSERT OR REPLACE INTO workers (worker_id, pid, status, started_at, last_heartbeat, metadata)
     VALUES (
         '$WORKER_ID',
@@ -1194,7 +1382,6 @@ while true; do
 
     # 3. Check SQLite system pause state (Fallback/Legacy)
     if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
-        local pause_flag
         pause_flag=$(state_get "system" "pause_requested" "0" 2>/dev/null || echo "0")
         if [[ "$pause_flag" == "1" ]]; then
             log_debug "System pause requested via SQLite. Waiting..."

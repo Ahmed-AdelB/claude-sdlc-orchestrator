@@ -159,7 +159,7 @@ fi
 START_MS=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
 
 # Use circuit_breaker_call if available, otherwise fallback to direct call
-OUTPUT_TMP=$(mktemp)
+OUTPUT_TMP=$(secure_mktemp "claude-delegate.${TRACE_ID}.stderr") || { json_output "error" "ABSTAIN" "0.0" "Failed to create temp file" "" 0; exit 1; }
 if declare -f circuit_breaker_call >/dev/null; then
     circuit_breaker_call "claude" timeout "$TIMEOUT" "$CLAUDE_CMD" -p "$PROMPT" > "$OUTPUT_TMP" 2>&1
     EXIT_CODE=$?
