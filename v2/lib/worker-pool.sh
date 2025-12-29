@@ -55,6 +55,439 @@ SHARD_HEARTBEAT_INTERVAL="${SHARD_HEARTBEAT_INTERVAL:-30}"  # seconds between sh
 WORKER_STALE_HEARTBEAT_MINUTES="${WORKER_STALE_HEARTBEAT_MINUTES:-5}"
 WORKER_STALE_GRACE_MULTIPLIER="${WORKER_STALE_GRACE_MULTIPLIER:-1.5}"
 
+# =============================================================================
+# SEC-009-5: Worker Anti-Starvation Configuration
+# =============================================================================
+# Prevents a single worker from monopolizing the task queue by enforcing:
+# 1. Maximum concurrent tasks per worker
+# 2. Per-user/shard task limits for queue fairness
+# 3. Backoff when limits are reached
+#
+# These limits ensure fair distribution of tasks across all workers
+# =============================================================================
+
+# Maximum number of concurrent RUNNING tasks a single worker can hold
+MAX_CONCURRENT_TASKS_PER_WORKER="${MAX_CONCURRENT_TASKS_PER_WORKER:-3}"
+
+# Maximum total tasks (RUNNING + QUEUED claimed) per worker to prevent hoarding
+MAX_TASKS_PER_WORKER="${MAX_TASKS_PER_WORKER:-5}"
+
+# Backoff time (seconds) when anti-starvation limit is hit
+ANTI_STARVATION_BACKOFF_SEC="${ANTI_STARVATION_BACKOFF_SEC:-10}"
+
+# Enable/disable anti-starvation enforcement
+ANTI_STARVATION_ENABLED="${ANTI_STARVATION_ENABLED:-true}"
+
+# =============================================================================
+# SEC-010-2: Per-User Task Limits Configuration
+# =============================================================================
+# Prevents a single user from flooding the queue by enforcing:
+# 1. Maximum concurrent RUNNING tasks per user/submitter
+# 2. Maximum total tasks (RUNNING + QUEUED) per user
+# 3. Backoff when limits are reached
+#
+# These limits ensure fair queue access across all users
+# =============================================================================
+
+# Maximum number of concurrent RUNNING tasks a single user can have
+MAX_RUNNING_TASKS_PER_USER="${MAX_RUNNING_TASKS_PER_USER:-10}"
+
+# Maximum total tasks (RUNNING + QUEUED) a single user can have in the system
+MAX_TASKS_PER_USER="${MAX_TASKS_PER_USER:-25}"
+
+# Backoff time (seconds) when per-user limit is hit (for task submission)
+PER_USER_LIMIT_BACKOFF_SEC="${PER_USER_LIMIT_BACKOFF_SEC:-5}"
+
+# Enable/disable per-user task limit enforcement
+PER_USER_LIMITS_ENABLED="${PER_USER_LIMITS_ENABLED:-true}"
+
+# =============================================================================
+# SEC-009-5: Worker Anti-Starvation Check Functions
+# =============================================================================
+
+# Get the count of RUNNING tasks for a specific worker
+get_worker_running_task_count() {
+    local worker_id="$1"
+    local db="${2:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "0"
+        return 0
+    fi
+
+    local count
+    count=$(sqlite3 "$db" "SELECT COUNT(*) FROM tasks WHERE worker_id='$(_sql_escape "$worker_id")' AND state='RUNNING';" 2>/dev/null || echo "0")
+    echo "${count:-0}"
+}
+
+# Check if worker can accept more tasks (anti-starvation enforcement)
+# Returns 0 if worker can accept, 1 if at limit
+check_worker_can_claim() {
+    local worker_id="$1"
+    local db="${2:-$STATE_DB}"
+
+    # Skip check if anti-starvation is disabled
+    if [[ "$ANTI_STARVATION_ENABLED" != "true" ]]; then
+        return 0
+    fi
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        return 0  # Can't check, allow claim
+    fi
+
+    local running_count
+    running_count=$(get_worker_running_task_count "$worker_id" "$db")
+
+    # SEC-009-5: Check against max concurrent tasks
+    if [[ "$running_count" -ge "$MAX_CONCURRENT_TASKS_PER_WORKER" ]]; then
+        _pool_log "WARN" "SEC-009-5: Worker $worker_id at limit ($running_count >= $MAX_CONCURRENT_TASKS_PER_WORKER running tasks)"
+        return 1
+    fi
+
+    return 0
+}
+
+# Get anti-starvation status for a worker (for monitoring)
+get_worker_starvation_status() {
+    local worker_id="$1"
+    local db="${2:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo '{"enabled":false,"reason":"no_sqlite"}'
+        return 0
+    fi
+
+    local running_count
+    running_count=$(get_worker_running_task_count "$worker_id" "$db")
+
+    local can_claim="true"
+    local reason="ok"
+
+    if [[ "$running_count" -ge "$MAX_CONCURRENT_TASKS_PER_WORKER" ]]; then
+        can_claim="false"
+        reason="max_concurrent_limit"
+    fi
+
+    cat <<EOF
+{
+    "worker_id": "$worker_id",
+    "running_tasks": $running_count,
+    "max_concurrent": $MAX_CONCURRENT_TASKS_PER_WORKER,
+    "can_claim": $can_claim,
+    "reason": "$reason",
+    "anti_starvation_enabled": $ANTI_STARVATION_ENABLED
+}
+EOF
+}
+
+# Apply backoff when anti-starvation limit is hit
+apply_anti_starvation_backoff() {
+    local worker_id="$1"
+
+    if [[ "$ANTI_STARVATION_ENABLED" != "true" ]]; then
+        return 0
+    fi
+
+    _pool_log "INFO" "SEC-009-5: Worker $worker_id backing off for ${ANTI_STARVATION_BACKOFF_SEC}s (anti-starvation)"
+    sleep "$ANTI_STARVATION_BACKOFF_SEC"
+}
+
+# Get queue fairness statistics across all workers
+get_queue_fairness_stats() {
+    local db="${1:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo '{"error":"no_sqlite"}'
+        return 1
+    fi
+
+    sqlite3 -json "$db" <<SQL 2>/dev/null || echo '[]'
+SELECT
+    worker_id,
+    COUNT(*) as running_tasks,
+    $MAX_CONCURRENT_TASKS_PER_WORKER as max_allowed,
+    CASE
+        WHEN COUNT(*) >= $MAX_CONCURRENT_TASKS_PER_WORKER THEN 'AT_LIMIT'
+        WHEN COUNT(*) >= ($MAX_CONCURRENT_TASKS_PER_WORKER - 1) THEN 'NEAR_LIMIT'
+        ELSE 'OK'
+    END as status
+FROM tasks
+WHERE state = 'RUNNING'
+  AND worker_id IS NOT NULL
+GROUP BY worker_id
+ORDER BY running_tasks DESC;
+SQL
+}
+
+# Export anti-starvation functions
+export -f get_worker_running_task_count
+export -f check_worker_can_claim
+export -f get_worker_starvation_status
+export -f apply_anti_starvation_backoff
+export -f get_queue_fairness_stats
+
+# =============================================================================
+# SEC-010-2: Per-User Task Limit Check Functions
+# =============================================================================
+
+# Extract submitter/user from task metadata JSON
+# Usage: _get_task_submitter TASK_ID
+# Returns: submitter ID or "unknown" if not found
+_get_task_submitter() {
+    local task_id="$1"
+    local db="${2:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "unknown"
+        return 0
+    fi
+
+    local esc_task_id
+    esc_task_id=$(_sql_escape "$task_id")
+
+    # Try to extract submitter from metadata JSON
+    # Falls back to trace_id prefix or "unknown"
+    local submitter
+    submitter=$(sqlite3 "$db" <<SQL 2>/dev/null || echo "unknown"
+SELECT COALESCE(
+    json_extract(metadata, '$.submitter'),
+    json_extract(metadata, '$.user_id'),
+    json_extract(metadata, '$.submitted_by'),
+    SUBSTR(trace_id, 1, INSTR(trace_id || '-', '-') - 1),
+    'unknown'
+) FROM tasks WHERE id='${esc_task_id}' LIMIT 1;
+SQL
+)
+    echo "${submitter:-unknown}"
+}
+
+# Get the count of RUNNING tasks for a specific user/submitter
+# Usage: get_user_running_task_count "submitter_id" [db_path]
+get_user_running_task_count() {
+    local submitter="$1"
+    local db="${2:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "0"
+        return 0
+    fi
+
+    if [[ -z "$submitter" || "$submitter" == "unknown" ]]; then
+        echo "0"
+        return 0
+    fi
+
+    local esc_submitter
+    esc_submitter=$(_sql_escape "$submitter")
+
+    local count
+    count=$(sqlite3 "$db" <<SQL 2>/dev/null || echo "0"
+SELECT COUNT(*) FROM tasks
+WHERE state='RUNNING'
+  AND (
+    json_extract(metadata, '$.submitter') = '${esc_submitter}'
+    OR json_extract(metadata, '$.user_id') = '${esc_submitter}'
+    OR json_extract(metadata, '$.submitted_by') = '${esc_submitter}'
+    OR trace_id LIKE '${esc_submitter}-%'
+  );
+SQL
+)
+    echo "${count:-0}"
+}
+
+# Get the count of all active tasks (RUNNING + QUEUED) for a user/submitter
+# Usage: get_user_total_task_count "submitter_id" [db_path]
+get_user_total_task_count() {
+    local submitter="$1"
+    local db="${2:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "0"
+        return 0
+    fi
+
+    if [[ -z "$submitter" || "$submitter" == "unknown" ]]; then
+        echo "0"
+        return 0
+    fi
+
+    local esc_submitter
+    esc_submitter=$(_sql_escape "$submitter")
+
+    local count
+    count=$(sqlite3 "$db" <<SQL 2>/dev/null || echo "0"
+SELECT COUNT(*) FROM tasks
+WHERE state IN ('RUNNING', 'QUEUED')
+  AND (
+    json_extract(metadata, '$.submitter') = '${esc_submitter}'
+    OR json_extract(metadata, '$.user_id') = '${esc_submitter}'
+    OR json_extract(metadata, '$.submitted_by') = '${esc_submitter}'
+    OR trace_id LIKE '${esc_submitter}-%'
+  );
+SQL
+)
+    echo "${count:-0}"
+}
+
+# Check if a task can be claimed based on per-user limits
+# Returns 0 if can claim, 1 if at limit
+# Usage: check_user_task_limit TASK_ID [db_path]
+check_user_task_limit() {
+    local task_id="$1"
+    local db="${2:-$STATE_DB}"
+
+    # Skip check if per-user limits are disabled
+    if [[ "$PER_USER_LIMITS_ENABLED" != "true" ]]; then
+        return 0
+    fi
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        return 0  # Can't check, allow claim
+    fi
+
+    # Get the submitter for this task
+    local submitter
+    submitter=$(_get_task_submitter "$task_id" "$db")
+
+    # Skip check for unknown submitters (legacy tasks without metadata)
+    if [[ -z "$submitter" || "$submitter" == "unknown" ]]; then
+        return 0
+    fi
+
+    local running_count
+    running_count=$(get_user_running_task_count "$submitter" "$db")
+
+    # SEC-010-2: Check against max running tasks per user
+    if [[ "$running_count" -ge "$MAX_RUNNING_TASKS_PER_USER" ]]; then
+        _pool_log "WARN" "SEC-010-2: User $submitter at running limit ($running_count >= $MAX_RUNNING_TASKS_PER_USER running tasks)"
+        return 1
+    fi
+
+    return 0
+}
+
+# Check if a user can submit more tasks (for queue submission)
+# Returns 0 if can submit, 1 if at limit
+# Usage: check_user_can_submit SUBMITTER [db_path]
+check_user_can_submit() {
+    local submitter="$1"
+    local db="${2:-$STATE_DB}"
+
+    # Skip check if per-user limits are disabled
+    if [[ "$PER_USER_LIMITS_ENABLED" != "true" ]]; then
+        return 0
+    fi
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        return 0  # Can't check, allow submit
+    fi
+
+    if [[ -z "$submitter" || "$submitter" == "unknown" ]]; then
+        return 0  # Can't identify user, allow submit
+    fi
+
+    local total_count
+    total_count=$(get_user_total_task_count "$submitter" "$db")
+
+    # SEC-010-2: Check against max total tasks per user
+    if [[ "$total_count" -ge "$MAX_TASKS_PER_USER" ]]; then
+        _pool_log "WARN" "SEC-010-2: User $submitter at total task limit ($total_count >= $MAX_TASKS_PER_USER total tasks)"
+        return 1
+    fi
+
+    return 0
+}
+
+# Get per-user task limit status (for monitoring)
+# Usage: get_user_task_limit_status SUBMITTER [db_path]
+get_user_task_limit_status() {
+    local submitter="$1"
+    local db="${2:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo '{"enabled":false,"reason":"no_sqlite"}'
+        return 0
+    fi
+
+    local running_count total_count
+    running_count=$(get_user_running_task_count "$submitter" "$db")
+    total_count=$(get_user_total_task_count "$submitter" "$db")
+
+    local can_submit="true"
+    local can_run_more="true"
+    local reason="ok"
+
+    if [[ "$running_count" -ge "$MAX_RUNNING_TASKS_PER_USER" ]]; then
+        can_run_more="false"
+        reason="max_running_limit"
+    fi
+
+    if [[ "$total_count" -ge "$MAX_TASKS_PER_USER" ]]; then
+        can_submit="false"
+        reason="max_total_limit"
+    fi
+
+    cat <<EOF
+{
+    "submitter": "$submitter",
+    "running_tasks": $running_count,
+    "total_tasks": $total_count,
+    "max_running": $MAX_RUNNING_TASKS_PER_USER,
+    "max_total": $MAX_TASKS_PER_USER,
+    "can_submit": $can_submit,
+    "can_run_more": $can_run_more,
+    "reason": "$reason",
+    "per_user_limits_enabled": $PER_USER_LIMITS_ENABLED
+}
+EOF
+}
+
+# Get per-user queue statistics across all users
+# Usage: get_per_user_queue_stats [db_path]
+get_per_user_queue_stats() {
+    local db="${1:-$STATE_DB}"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo '{"error":"no_sqlite"}'
+        return 1
+    fi
+
+    sqlite3 -json "$db" <<SQL 2>/dev/null || echo '[]'
+SELECT
+    COALESCE(
+        json_extract(metadata, '$.submitter'),
+        json_extract(metadata, '$.user_id'),
+        json_extract(metadata, '$.submitted_by'),
+        SUBSTR(trace_id, 1, INSTR(trace_id || '-', '-') - 1),
+        'unknown'
+    ) as submitter,
+    SUM(CASE WHEN state = 'RUNNING' THEN 1 ELSE 0 END) as running_tasks,
+    SUM(CASE WHEN state = 'QUEUED' THEN 1 ELSE 0 END) as queued_tasks,
+    COUNT(*) as total_active_tasks,
+    $MAX_RUNNING_TASKS_PER_USER as max_running,
+    $MAX_TASKS_PER_USER as max_total,
+    CASE
+        WHEN COUNT(*) >= $MAX_TASKS_PER_USER THEN 'AT_TOTAL_LIMIT'
+        WHEN SUM(CASE WHEN state = 'RUNNING' THEN 1 ELSE 0 END) >= $MAX_RUNNING_TASKS_PER_USER THEN 'AT_RUNNING_LIMIT'
+        WHEN COUNT(*) >= ($MAX_TASKS_PER_USER - 5) THEN 'NEAR_LIMIT'
+        ELSE 'OK'
+    END as status
+FROM tasks
+WHERE state IN ('RUNNING', 'QUEUED')
+GROUP BY submitter
+ORDER BY total_active_tasks DESC;
+SQL
+}
+
+# Export per-user task limit functions
+export -f _get_task_submitter
+export -f get_user_running_task_count
+export -f get_user_total_task_count
+export -f check_user_task_limit
+export -f check_user_can_submit
+export -f get_user_task_limit_status
+export -f get_per_user_queue_stats
+
 _pool_require_sqlite() {
     if declare -F _sqlite_require >/dev/null 2>&1; then
         _sqlite_require
@@ -408,6 +841,13 @@ claim_task_for_shard() {
 
     _pool_require_sqlite
 
+    # SEC-009-5: Check anti-starvation limit before attempting claim
+    if ! check_worker_can_claim "$worker_id" "$STATE_DB"; then
+        _pool_log "INFO" "SEC-009-5: Worker $worker_id cannot claim (anti-starvation limit)"
+        apply_anti_starvation_backoff "$worker_id"
+        return 0  # Return empty (no task claimed) but not an error
+    fi
+
     # Normalize shard ID
     local normalized_shard=""
     if [[ -n "$shard" ]]; then
@@ -445,7 +885,92 @@ claim_task_for_shard() {
         model_filter=" AND (assigned_model IS NULL OR assigned_model='${esc_model}')"
     fi
 
-    # Execute atomic claim
+    # ==========================================================================
+    # SEC-010-2: Per-User Task Limit Check (Pre-Claim)
+    # ==========================================================================
+    # Before claiming, find candidate tasks and check per-user limits.
+    # Skip tasks from users who are already at their running task limit.
+    # This prevents queue flooding by a single user.
+    # ==========================================================================
+    if [[ "$PER_USER_LIMITS_ENABLED" == "true" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        local max_candidates=10  # Check up to 10 candidate tasks
+        local candidate_found="false"
+        local final_task_id=""
+
+        # Get candidate task IDs ordered by priority
+        local candidates
+        candidates=$(sqlite3 "$STATE_DB" <<SQL 2>/dev/null || true
+SELECT id FROM tasks
+WHERE state='QUEUED'${type_filter}${shard_filter}${model_filter}
+ORDER BY priority ASC, created_at ASC
+LIMIT ${max_candidates};
+SQL
+)
+
+        # Check each candidate against per-user limits
+        while IFS= read -r candidate_id; do
+            [[ -z "$candidate_id" ]] && continue
+
+            # Get submitter for this task
+            local submitter
+            submitter=$(_get_task_submitter "$candidate_id" "$STATE_DB")
+
+            # Check per-user running task limit
+            if check_user_task_limit "$candidate_id" "$STATE_DB"; then
+                # User is within limits, use this task
+                final_task_id="$candidate_id"
+                candidate_found="true"
+                _pool_log "DEBUG" "SEC-010-2: Task $candidate_id from user '$submitter' passed per-user limit check"
+                break
+            else
+                # User at limit, skip this task
+                _pool_log "INFO" "SEC-010-2: Skipping task $candidate_id - user '$submitter' at running task limit"
+            fi
+        done <<< "$candidates"
+
+        # If no candidate passed per-user limits, return empty
+        if [[ "$candidate_found" != "true" ]]; then
+            if [[ -n "$candidates" ]]; then
+                _pool_log "INFO" "SEC-010-2: All $max_candidates candidate tasks from users at per-user limit"
+            fi
+            return 0  # Return empty, no task claimed
+        fi
+
+        # Proceed to claim the specific task that passed per-user limits
+        local esc_task_id
+        esc_task_id=$(_sql_escape "$final_task_id")
+
+        local result
+        result=$(sqlite3 "$STATE_DB" <<SQL
+BEGIN IMMEDIATE;
+-- SEC-010-2: Claim specific task that passed per-user limit check
+UPDATE tasks
+SET state='RUNNING',
+    worker_id='${esc_worker}',
+    started_at=datetime('now'),
+    updated_at=datetime('now'),
+    heartbeat_at=datetime('now'),
+    last_activity_at=datetime('now')
+WHERE id='${esc_task_id}' AND state='QUEUED';
+-- Return task ID only if claim succeeded
+SELECT CASE WHEN changes() > 0
+    THEN '${esc_task_id}'
+    ELSE NULL
+END;
+COMMIT;
+SQL
+)
+
+        if [[ -n "$result" && "$result" != "NULL" && "$result" != "" ]]; then
+            echo "$result"
+        fi
+        return 0
+    fi
+    # ==========================================================================
+    # End SEC-010-2: Per-User Task Limit Check
+    # ==========================================================================
+
+    # Execute atomic claim (original flow when per-user limits disabled)
     if command -v sqlite3 >/dev/null 2>&1; then
         local result
         result=$(sqlite3 "$STATE_DB" <<SQL
@@ -1348,5 +1873,49 @@ shard_status() {
         echo "$orphaned" | while read -r shard; do
             echo "  - $shard (no workers, has queued tasks)"
         done
+    fi
+    echo ""
+
+    # SEC-010-2: Per-User Task Limits Status
+    echo "=============================================="
+    echo "Per-User Task Limits Status (SEC-010-2)"
+    echo "=============================================="
+    echo ""
+    echo "Configuration:"
+    echo "  PER_USER_LIMITS_ENABLED: $PER_USER_LIMITS_ENABLED"
+    echo "  MAX_RUNNING_TASKS_PER_USER: $MAX_RUNNING_TASKS_PER_USER"
+    echo "  MAX_TASKS_PER_USER: $MAX_TASKS_PER_USER"
+    echo "  PER_USER_LIMIT_BACKOFF_SEC: ${PER_USER_LIMIT_BACKOFF_SEC}s"
+    echo ""
+
+    if [[ "$PER_USER_LIMITS_ENABLED" == "true" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        echo "Per-User Queue Statistics:"
+        echo "=========================="
+        sqlite3 -header -column "$STATE_DB" <<SQL 2>/dev/null || echo "  (no data available)"
+SELECT
+    COALESCE(
+        json_extract(metadata, '$.submitter'),
+        json_extract(metadata, '$.user_id'),
+        json_extract(metadata, '$.submitted_by'),
+        SUBSTR(trace_id, 1, INSTR(trace_id || '-', '-') - 1),
+        'unknown'
+    ) as submitter,
+    SUM(CASE WHEN state = 'RUNNING' THEN 1 ELSE 0 END) as running,
+    SUM(CASE WHEN state = 'QUEUED' THEN 1 ELSE 0 END) as queued,
+    COUNT(*) as total,
+    CASE
+        WHEN COUNT(*) >= $MAX_TASKS_PER_USER THEN 'AT_LIMIT'
+        WHEN SUM(CASE WHEN state = 'RUNNING' THEN 1 ELSE 0 END) >= $MAX_RUNNING_TASKS_PER_USER THEN 'RUN_LIMIT'
+        WHEN COUNT(*) >= ($MAX_TASKS_PER_USER - 5) THEN 'NEAR_LIM'
+        ELSE 'OK'
+    END as status
+FROM tasks
+WHERE state IN ('RUNNING', 'QUEUED')
+GROUP BY submitter
+ORDER BY total DESC
+LIMIT 20;
+SQL
+    else
+        echo "  Per-user limits disabled or sqlite3 not available"
     fi
 }

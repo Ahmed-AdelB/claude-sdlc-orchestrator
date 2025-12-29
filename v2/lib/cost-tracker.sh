@@ -179,6 +179,26 @@ _sanitize_numeric() {
     return 1
 }
 
+# SEC-006-5: JSON escape for log injection prevention
+# Escapes string values for safe inclusion in JSON/JSONL output
+# Usage: escaped=$(_cost_json_escape_value "string")
+# Returns: JSON-escaped string WITHOUT surrounding quotes
+_cost_json_escape_value() {
+    local value="$1"
+
+    # Use jq for proper JSON escaping if available
+    if command -v jq &>/dev/null; then
+        # jq -Rs outputs "escaped_string", we strip the surrounding quotes
+        printf '%s' "$value" | jq -Rs '.' 2>/dev/null | sed 's/^"//;s/"$//' || {
+            # Fallback to sed-based escaping if jq fails
+            printf '%s' "$value" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e ':a;N;$!ba;s/\n/\\n/g'
+        }
+    else
+        # Fallback: sed-based escaping for backslash, quotes, tabs, and newlines
+        printf '%s' "$value" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e ':a;N;$!ba;s/\n/\\n/g'
+    fi
+}
+
 # Record a request for a model
 # Usage: record_request MODEL [INPUT_TOKENS] [OUTPUT_TOKENS] [DURATION_MS] [TASK_TYPE]
 record_request() {
@@ -204,12 +224,16 @@ record_request() {
         codex|gpt)     model="codex" ;;
     esac
 
-    # Create cost log entry (JSONL)
+    # SEC-006-5: Escape string values for log injection prevention
+    local esc_timestamp esc_trace_id esc_model esc_task_type
+    esc_timestamp=$(_cost_json_escape_value "$timestamp")
+    esc_trace_id=$(_cost_json_escape_value "${TRACE_ID:-unknown}")
+    esc_model=$(_cost_json_escape_value "$model")
+    esc_task_type=$(_cost_json_escape_value "$task_type")
+
+    # Create cost log entry (JSONL) with sanitized values
     local log_entry
-    log_entry=$(cat <<EOF
-{"timestamp":"${timestamp}","trace_id":"${TRACE_ID}","model":"${model}","input_tokens":${input_tokens},"output_tokens":${output_tokens},"duration_ms":${duration_ms},"task_type":"${task_type}"}
-EOF
-)
+    log_entry="{\"timestamp\":\"${esc_timestamp}\",\"trace_id\":\"${esc_trace_id}\",\"model\":\"${esc_model}\",\"input_tokens\":${input_tokens},\"output_tokens\":${output_tokens},\"duration_ms\":${duration_ms},\"task_type\":\"${esc_task_type}\"}"
 
     # Append to daily cost log
     local cost_log="${COST_LOG_DIR}/${date_str}.jsonl"

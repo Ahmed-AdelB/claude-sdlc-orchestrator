@@ -45,6 +45,12 @@ LOG_DIR="${AUTONOMOUS_ROOT}/logs/supervision"
 STATE_DIR="${AUTONOMOUS_ROOT}/state"
 SUPERVISOR_APPROVER="${AUTONOMOUS_ROOT}/lib/supervisor-approver.sh"
 
+# DEP_REQUEST configuration (P0-5: Dependency Deadlock Resolution)
+SUPERVISOR_INBOX="${STATE_DIR}/comms/supervisor/inbox"
+WORKER_COMMS_DIR="${STATE_DIR}/comms/worker"
+DEP_INSTALL_TIMEOUT="${DEP_INSTALL_TIMEOUT:-120}"
+DEP_ALLOWED_TYPES=("npm" "pip" "pip3" "apt" "apt-get" "cargo")
+
 # M2-011: Heartbeat and state files
 HEARTBEAT_FILE="${STATE_DIR}/supervisor-heartbeat"
 PID_FILE="${STATE_DIR}/supervisor.pid"
@@ -80,7 +86,7 @@ SHUTDOWN_REQUESTED=false
 SUPERVISOR_STATE="starting"
 
 # Ensure directories exist
-mkdir -p "$REVIEW_DIR" "$APPROVED_DIR" "$REJECTED_DIR" "$FAILED_DIR" "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
+mkdir -p "$REVIEW_DIR" "$APPROVED_DIR" "$REJECTED_DIR" "$FAILED_DIR" "$LOG_DIR" "$STATE_DIR" "$SUPERVISOR_INBOX" 2>/dev/null || true
 
 # =============================================================================
 # LOGGING
@@ -93,6 +99,268 @@ log_supervisor() {
 
     echo "[${timestamp}] [SUPERVISOR] [${level}] ${message}" >&2
     echo "[${timestamp}] [SUPERVISOR] [${level}] ${message}" >> "${LOG_DIR}/supervisor.log" 2>/dev/null || true
+}
+
+# =============================================================================
+# P0-5: DEPENDENCY REQUEST HANDLING
+# =============================================================================
+# Handles DEP_REQUEST messages from workers requesting dependency installation.
+# This prevents deadlocks where tasks fail repeatedly due to missing dependencies.
+#
+# Message Format (DEP_REQUEST):
+#   {
+#     "type": "DEP_REQUEST",
+#     "request_id": "depreq_<task_id>_<timestamp>",
+#     "task_id": "<task_id>",
+#     "worker_id": "<worker_id>",
+#     "dependency": {"type": "pip|npm|apt|cargo", "name": "<package>"},
+#     "timestamp": "<ISO timestamp>",
+#     "timeout_sec": <timeout>
+#   }
+#
+# Response Format (DEP_RESPONSE):
+#   {
+#     "type": "DEP_RESPONSE",
+#     "request_id": "<request_id>",
+#     "status": "installed|failed",
+#     "reason": "<reason if failed>",
+#     "timestamp": "<ISO timestamp>"
+#   }
+# =============================================================================
+
+# Validate dependency type is allowed
+validate_dep_type() {
+    local dep_type="$1"
+
+    for allowed in "${DEP_ALLOWED_TYPES[@]}"; do
+        if [[ "$dep_type" == "$allowed" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Sanitize package name to prevent command injection
+sanitize_package_name() {
+    local name="$1"
+    # Remove any characters that could be used for injection
+    # Only allow alphanumeric, dash, underscore, dot, and @ (for scoped npm packages)
+    echo "$name" | sed 's/[^a-zA-Z0-9._@/-]//g'
+}
+
+# Install a dependency using the appropriate package manager
+install_dependency() {
+    local dep_type="$1"
+    local dep_name="$2"
+    local timeout="${3:-$DEP_INSTALL_TIMEOUT}"
+
+    # Sanitize package name
+    local safe_name
+    safe_name=$(sanitize_package_name "$dep_name")
+
+    if [[ -z "$safe_name" ]]; then
+        log_supervisor "ERROR" "Invalid package name after sanitization: $dep_name"
+        return 1
+    fi
+
+    if [[ "$safe_name" != "$dep_name" ]]; then
+        log_supervisor "WARN" "Package name sanitized: '$dep_name' -> '$safe_name'"
+    fi
+
+    log_supervisor "INFO" "Installing $dep_type package: $safe_name (timeout: ${timeout}s)"
+
+    local install_cmd=""
+    local result=0
+
+    case "$dep_type" in
+        npm)
+            install_cmd="npm install -g $safe_name"
+            ;;
+        pip|pip3)
+            install_cmd="$dep_type install --user $safe_name"
+            ;;
+        apt|apt-get)
+            # apt requires sudo typically
+            if command -v sudo &>/dev/null; then
+                install_cmd="sudo $dep_type install -y $safe_name"
+            else
+                install_cmd="$dep_type install -y $safe_name"
+            fi
+            ;;
+        cargo)
+            install_cmd="cargo install $safe_name"
+            ;;
+        *)
+            log_supervisor "ERROR" "Unknown dependency type: $dep_type"
+            return 1
+            ;;
+    esac
+
+    log_supervisor "DEBUG" "Running: $install_cmd"
+
+    # Run with timeout
+    if command -v timeout &>/dev/null; then
+        if timeout "$timeout" bash -c "$install_cmd" >> "${LOG_DIR}/dep-install.log" 2>&1; then
+            log_supervisor "INFO" "Successfully installed: $safe_name"
+            return 0
+        else
+            result=$?
+            if [[ $result -eq 124 ]]; then
+                log_supervisor "ERROR" "Installation timed out after ${timeout}s: $safe_name"
+            else
+                log_supervisor "ERROR" "Installation failed (exit $result): $safe_name"
+            fi
+            return 1
+        fi
+    else
+        # No timeout command, run directly
+        if bash -c "$install_cmd" >> "${LOG_DIR}/dep-install.log" 2>&1; then
+            log_supervisor "INFO" "Successfully installed: $safe_name"
+            return 0
+        else
+            log_supervisor "ERROR" "Installation failed: $safe_name"
+            return 1
+        fi
+    fi
+}
+
+# Send DEP_RESPONSE back to worker
+send_dep_response() {
+    local worker_id="$1"
+    local request_id="$2"
+    local status="$3"
+    local reason="${4:-}"
+
+    local response_dir="${WORKER_COMMS_DIR}/${worker_id}/inbox"
+    local response_file="${response_dir}/${request_id}_response.json"
+
+    mkdir -p "$response_dir" 2>/dev/null || true
+
+    local timestamp
+    timestamp=$(date -Iseconds)
+
+    cat > "$response_file" <<EOF
+{
+    "type": "DEP_RESPONSE",
+    "request_id": "$request_id",
+    "status": "$status",
+    "reason": "$reason",
+    "timestamp": "$timestamp"
+}
+EOF
+
+    log_supervisor "INFO" "DEP_RESPONSE sent to $worker_id: $status (request: $request_id)"
+}
+
+# Handle a single DEP_REQUEST
+handle_dep_request() {
+    local request_file="$1"
+
+    if [[ ! -f "$request_file" ]]; then
+        log_supervisor "WARN" "DEP_REQUEST file not found: $request_file"
+        return 1
+    fi
+
+    # Parse the request JSON
+    local request_id worker_id task_id dep_type dep_name timeout_sec
+
+    if ! command -v jq &>/dev/null; then
+        log_supervisor "ERROR" "jq not available for parsing DEP_REQUEST"
+        rm -f "$request_file"
+        return 1
+    fi
+
+    request_id=$(jq -r '.request_id // ""' "$request_file" 2>/dev/null)
+    worker_id=$(jq -r '.worker_id // ""' "$request_file" 2>/dev/null)
+    task_id=$(jq -r '.task_id // ""' "$request_file" 2>/dev/null)
+    dep_type=$(jq -r '.dependency.type // ""' "$request_file" 2>/dev/null)
+    dep_name=$(jq -r '.dependency.name // ""' "$request_file" 2>/dev/null)
+    timeout_sec=$(jq -r '.timeout_sec // 120' "$request_file" 2>/dev/null)
+
+    log_supervisor "INFO" "Processing DEP_REQUEST: $request_id (worker: $worker_id, type: $dep_type, name: $dep_name)"
+
+    # Validate required fields
+    if [[ -z "$request_id" || -z "$worker_id" || -z "$dep_type" || -z "$dep_name" ]]; then
+        log_supervisor "ERROR" "Invalid DEP_REQUEST: missing required fields"
+        if [[ -n "$worker_id" && -n "$request_id" ]]; then
+            send_dep_response "$worker_id" "$request_id" "failed" "Invalid request: missing required fields"
+        fi
+        rm -f "$request_file"
+        return 1
+    fi
+
+    # Validate dependency type
+    if ! validate_dep_type "$dep_type"; then
+        log_supervisor "ERROR" "Disallowed dependency type: $dep_type"
+        send_dep_response "$worker_id" "$request_id" "failed" "Disallowed dependency type: $dep_type"
+        rm -f "$request_file"
+        return 1
+    fi
+
+    # Attempt installation
+    local status="failed"
+    local reason=""
+
+    if install_dependency "$dep_type" "$dep_name" "$timeout_sec"; then
+        status="installed"
+        reason="Successfully installed $dep_name"
+    else
+        reason="Failed to install $dep_name via $dep_type"
+    fi
+
+    # Send response to worker
+    send_dep_response "$worker_id" "$request_id" "$status" "$reason"
+
+    # Remove the processed request
+    rm -f "$request_file"
+
+    if [[ "$status" == "installed" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Check for and process pending DEP_REQUESTs
+check_dep_requests() {
+    local count=0
+    local processed=0
+
+    # Ensure inbox exists
+    [[ -d "$SUPERVISOR_INBOX" ]] || return 0
+
+    # Process all pending DEP_REQUEST files
+    for request_file in "${SUPERVISOR_INBOX}"/*.json; do
+        [[ -f "$request_file" ]] || continue
+
+        # Check if this is a DEP_REQUEST
+        local msg_type
+        msg_type=$(jq -r '.type // ""' "$request_file" 2>/dev/null || echo "")
+
+        if [[ "$msg_type" != "DEP_REQUEST" ]]; then
+            [[ "$VERBOSE" == "true" ]] && log_supervisor "DEBUG" "Skipping non-DEP_REQUEST: $request_file"
+            continue
+        fi
+
+        ((count++))
+
+        # Check for shutdown between requests
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            log_supervisor "INFO" "Shutdown requested, stopping DEP_REQUEST processing"
+            break
+        fi
+
+        if handle_dep_request "$request_file"; then
+            ((processed++))
+        fi
+    done
+
+    if (( count > 0 )); then
+        log_supervisor "INFO" "DEP_REQUEST: processed $processed/$count dependency requests"
+    fi
+
+    return 0
 }
 
 # =============================================================================
@@ -518,6 +786,7 @@ run_daemon() {
     log_supervisor "INFO" "Review directory: $REVIEW_DIR"
     log_supervisor "INFO" "Heartbeat interval: ${HEARTBEAT_INTERVAL}s"
     log_supervisor "INFO" "Max backoff: ${MAX_BACKOFF}s"
+    log_supervisor "INFO" "DEP_REQUEST enabled: inbox=$SUPERVISOR_INBOX"
 
     update_state "running"
     send_heartbeat
@@ -536,6 +805,14 @@ run_daemon() {
         local cycle_success=true
 
         [[ "$VERBOSE" == "true" ]] && log_supervisor "DEBUG" "Starting cycle $CYCLE_COUNT"
+
+        # P0-5: Check for DEP_REQUESTs from workers first
+        # This allows workers to retry tasks after dependencies are installed
+        {
+            check_dep_requests
+        } || {
+            log_supervisor "WARN" "DEP_REQUEST processing failed (non-fatal)"
+        }
 
         # Run check_reviews with comprehensive error handling
         # This is the core of the crash-resistant design
@@ -622,6 +899,7 @@ main() {
             START_TIME=$(date +%s)
             log_supervisor "INFO" "Running single check cycle"
             SINGLE_RUN=true
+            check_dep_requests || true  # Process DEP_REQUESTs first
             check_reviews || true  # Don't exit on error in once mode
             print_status
             ;;
@@ -675,7 +953,7 @@ main() {
             ;;
 
         help|--help|-h)
-            echo "tri-agent-supervisor v2.2.0 (M2-010 Unified + M2-011 Crash-Resistant)"
+            echo "tri-agent-supervisor v2.3.0 (M2-010 Unified + M2-011 Crash-Resistant + P0-5 DEP_REQUEST)"
             echo ""
             echo "Usage: $0 [command]"
             echo ""
@@ -701,11 +979,18 @@ main() {
             echo "  MAX_CONSECUTIVE_FAILURES Max failures before degraded mode (default: 10)"
             echo "  COMPONENT_RESTART_DELAY  Delay before component restart (default: 5)"
             echo ""
+            echo "P0-5 Dependency Request Options:"
+            echo "  DEP_INSTALL_TIMEOUT      Dependency install timeout seconds (default: 120)"
+            echo ""
+            echo "Supported Dependency Types: npm, pip, pip3, apt, apt-get, cargo"
+            echo ""
             echo "Files:"
             echo "  ${PID_FILE}              PID file"
             echo "  ${HEARTBEAT_FILE}        Heartbeat file (JSON)"
             echo "  ${STATE_FILE}            State file (JSON)"
+            echo "  ${SUPERVISOR_INBOX}      DEP_REQUEST inbox"
             echo "  ${LOG_DIR}/supervisor.log    Log file"
+            echo "  ${LOG_DIR}/dep-install.log   Dependency install log"
             echo ""
             ;;
 

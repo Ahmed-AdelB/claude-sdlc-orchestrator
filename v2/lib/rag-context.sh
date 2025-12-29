@@ -242,3 +242,502 @@ rag_stats() {
     rag_init || return 1
     sqlite3 "$RAG_DB_PATH" "SELECT COUNT(*) FROM contexts;"
 }
+
+# =============================================================================
+# RAG Ingestion Pipeline - Directory Walker and Indexing
+# =============================================================================
+
+# Default file extensions to index
+RAG_INDEX_EXTENSIONS="${RAG_INDEX_EXTENSIONS:-sh,py,js,ts,jsx,tsx,md,txt,json,yaml,yml,toml,cfg,conf,ini,html,css,sql,go,rs,rb,java,c,cpp,h,hpp}"
+
+# Maximum file size to index (default 1MB)
+RAG_MAX_FILE_SIZE="${RAG_MAX_FILE_SIZE:-1048576}"
+
+# Cron schedule file location
+RAG_CRON_FILE="${RAG_CRON_FILE:-${STATE_DIR}/rag/cron_schedule}"
+
+# Initialize file tracking table for change detection
+rag_init_files_table() {
+    rag_init || return 1
+
+    sqlite3 "$RAG_DB_PATH" <<'SQL'
+CREATE TABLE IF NOT EXISTS indexed_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filepath TEXT UNIQUE NOT NULL,
+    content_hash TEXT NOT NULL,
+    file_size INTEGER,
+    context_id INTEGER,
+    indexed_at TEXT NOT NULL,
+    FOREIGN KEY (context_id) REFERENCES contexts(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_indexed_files_filepath ON indexed_files(filepath);
+CREATE INDEX IF NOT EXISTS idx_indexed_files_hash ON indexed_files(content_hash);
+SQL
+}
+
+# Compute SHA256 hash of file content
+rag_file_hash() {
+    local filepath="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$filepath" 2>/dev/null | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$filepath" 2>/dev/null | cut -d' ' -f1
+    else
+        # Fallback: use md5sum if available
+        if command -v md5sum >/dev/null 2>&1; then
+            md5sum "$filepath" 2>/dev/null | cut -d' ' -f1
+        else
+            _rag_log WARN "No hash utility found, using file mtime as hash"
+            stat -c %Y "$filepath" 2>/dev/null || stat -f %m "$filepath" 2>/dev/null
+        fi
+    fi
+}
+
+# Check if file should be indexed based on extension
+rag_should_index_file() {
+    local filepath="$1"
+    local filename
+    filename=$(basename "$filepath")
+    local ext="${filename##*.}"
+
+    # Handle files without extension
+    if [[ "$ext" == "$filename" ]]; then
+        # Check for common extensionless files
+        case "$filename" in
+            Makefile|Dockerfile|Vagrantfile|Gemfile|Rakefile|Procfile)
+                return 0
+                ;;
+            .bashrc|.zshrc|.profile|.gitignore|.dockerignore|.env.example)
+                return 0
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    fi
+
+    # Convert extension list to pattern and check
+    local ext_lower
+    ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+    local pattern
+    pattern=$(echo "$RAG_INDEX_EXTENSIONS" | tr ',' '|')
+
+    if echo "$ext_lower" | grep -qE "^($pattern)$"; then
+        return 0
+    fi
+    return 1
+}
+
+# Check if file has changed since last indexing
+rag_file_changed() {
+    local filepath="$1"
+    local current_hash="$2"
+
+    rag_init_files_table || return 0
+
+    local filepath_esc
+    filepath_esc=$(rag_sql_escape "$filepath")
+
+    local stored_hash
+    stored_hash=$(sqlite3 "$RAG_DB_PATH" "SELECT content_hash FROM indexed_files WHERE filepath='$filepath_esc';")
+
+    if [[ -z "$stored_hash" ]]; then
+        # File not indexed yet
+        return 0
+    fi
+
+    if [[ "$stored_hash" != "$current_hash" ]]; then
+        # Hash changed
+        return 0
+    fi
+
+    # File unchanged
+    return 1
+}
+
+# Extract tags from filepath (directory structure and file type)
+rag_extract_tags() {
+    local filepath="$1"
+    local base_dir="$2"
+
+    local relative_path="${filepath#$base_dir/}"
+    local dir_path
+    dir_path=$(dirname "$relative_path")
+    local filename
+    filename=$(basename "$filepath")
+    local ext="${filename##*.}"
+
+    local tags=""
+
+    # Add extension as tag
+    if [[ "$ext" != "$filename" ]]; then
+        tags="$ext"
+    fi
+
+    # Add directory components as tags (limit to 3 levels)
+    if [[ "$dir_path" != "." ]]; then
+        local dir_tags
+        dir_tags=$(echo "$dir_path" | tr '/' ',' | cut -d',' -f1-3)
+        if [[ -n "$tags" ]]; then
+            tags="$tags,$dir_tags"
+        else
+            tags="$dir_tags"
+        fi
+    fi
+
+    printf '%s' "$tags"
+}
+
+# Index a single file
+rag_index_file() {
+    local filepath="$1"
+    local base_dir="${2:-.}"
+    local force="${3:-0}"
+
+    # Validate file exists and is readable
+    if [[ ! -f "$filepath" ]] || [[ ! -r "$filepath" ]]; then
+        _rag_log WARN "Cannot read file: $filepath"
+        return 1
+    fi
+
+    # Check file size
+    local file_size
+    file_size=$(stat -c %s "$filepath" 2>/dev/null || stat -f %z "$filepath" 2>/dev/null || echo 0)
+    if [[ "$file_size" -gt "$RAG_MAX_FILE_SIZE" ]]; then
+        _rag_log WARN "File too large to index ($file_size bytes): $filepath"
+        return 1
+    fi
+
+    # Skip empty files
+    if [[ "$file_size" -eq 0 ]]; then
+        return 0
+    fi
+
+    # Compute hash
+    local content_hash
+    content_hash=$(rag_file_hash "$filepath")
+    if [[ -z "$content_hash" ]]; then
+        _rag_log WARN "Failed to compute hash for: $filepath"
+        return 1
+    fi
+
+    # Check if file changed
+    if [[ "$force" != "1" ]] && ! rag_file_changed "$filepath" "$content_hash"; then
+        _rag_log INFO "Skipping unchanged file: $filepath"
+        return 0
+    fi
+
+    # Read file content
+    local content
+    content=$(cat "$filepath" 2>/dev/null)
+    if [[ -z "$content" ]]; then
+        return 0
+    fi
+
+    # Extract tags
+    local tags
+    tags=$(rag_extract_tags "$filepath" "$base_dir")
+
+    local now
+    now=$(date -Iseconds)
+    local filepath_esc content_hash_esc
+    filepath_esc=$(rag_sql_escape "$filepath")
+    content_hash_esc=$(rag_sql_escape "$content_hash")
+
+    # Check if file was previously indexed
+    local existing_context_id
+    existing_context_id=$(sqlite3 "$RAG_DB_PATH" "SELECT context_id FROM indexed_files WHERE filepath='$filepath_esc';")
+
+    local context_id
+    if [[ -n "$existing_context_id" ]]; then
+        # Update existing context
+        rag_update_context "$existing_context_id" "$content" "$tags"
+        context_id="$existing_context_id"
+
+        # Update file record
+        sqlite3 "$RAG_DB_PATH" "UPDATE indexed_files SET content_hash='$content_hash_esc', file_size=$file_size, indexed_at='$now' WHERE filepath='$filepath_esc';"
+        _rag_log INFO "Updated indexed file: $filepath"
+    else
+        # Add new context
+        context_id=$(rag_add_context "$filepath" "$content" "$tags")
+
+        # Record file in tracking table
+        sqlite3 "$RAG_DB_PATH" "INSERT INTO indexed_files (filepath, content_hash, file_size, context_id, indexed_at) VALUES ('$filepath_esc', '$content_hash_esc', $file_size, $context_id, '$now');"
+        _rag_log INFO "Indexed new file: $filepath"
+    fi
+
+    echo "$context_id"
+}
+
+# Walk directory recursively and index files
+# Usage: rag_ingest_directory <directory> [force=0] [max_files=1000]
+rag_ingest_directory() {
+    local directory="${1:-.}"
+    local force="${2:-0}"
+    local max_files="${3:-1000}"
+
+    # Validate directory
+    if [[ ! -d "$directory" ]]; then
+        _rag_log ERROR "Directory does not exist: $directory"
+        return 1
+    fi
+
+    # Get absolute path
+    local abs_dir
+    abs_dir=$(cd "$directory" && pwd)
+
+    rag_init_files_table || return 1
+
+    _rag_log INFO "Starting directory ingestion: $abs_dir (force=$force, max=$max_files)"
+
+    local indexed_count=0
+    local skipped_count=0
+    local error_count=0
+
+    # Build find command with extension filters
+    local find_args=()
+    find_args+=("$abs_dir")
+    find_args+=("-type" "f")
+    find_args+=("-size" "-${RAG_MAX_FILE_SIZE}c")
+
+    # Exclude common non-code directories
+    find_args+=("-not" "-path" "*/.git/*")
+    find_args+=("-not" "-path" "*/node_modules/*")
+    find_args+=("-not" "-path" "*/__pycache__/*")
+    find_args+=("-not" "-path" "*/.venv/*")
+    find_args+=("-not" "-path" "*/venv/*")
+    find_args+=("-not" "-path" "*/.cache/*")
+    find_args+=("-not" "-path" "*/dist/*")
+    find_args+=("-not" "-path" "*/build/*")
+    find_args+=("-not" "-path" "*/.tox/*")
+    find_args+=("-not" "-path" "*/.eggs/*")
+    find_args+=("-not" "-path" "*/*.egg-info/*")
+
+    while IFS= read -r filepath; do
+        # Check max files limit
+        if [[ "$indexed_count" -ge "$max_files" ]]; then
+            _rag_log WARN "Reached max files limit ($max_files), stopping"
+            break
+        fi
+
+        # Check if file should be indexed
+        if ! rag_should_index_file "$filepath"; then
+            ((skipped_count++)) || true
+            continue
+        fi
+
+        # Index the file
+        if rag_index_file "$filepath" "$abs_dir" "$force" >/dev/null 2>&1; then
+            ((indexed_count++)) || true
+        else
+            ((error_count++)) || true
+        fi
+
+    done < <(find "${find_args[@]}" 2>/dev/null | sort)
+
+    _rag_log INFO "Ingestion complete: indexed=$indexed_count, skipped=$skipped_count, errors=$error_count"
+
+    # Return stats as JSON
+    printf '{"indexed": %d, "skipped": %d, "errors": %d, "directory": "%s"}\n' \
+        "$indexed_count" "$skipped_count" "$error_count" "$abs_dir"
+}
+
+# Remove orphaned entries (files that no longer exist)
+rag_cleanup_orphans() {
+    rag_init_files_table || return 1
+
+    local removed_count=0
+
+    while IFS=$'\t' read -r id filepath context_id; do
+        [[ -n "$id" ]] || continue
+
+        if [[ ! -f "$filepath" ]]; then
+            # Remove from indexed_files
+            sqlite3 "$RAG_DB_PATH" "DELETE FROM indexed_files WHERE id=$id;"
+
+            # Remove associated context if exists
+            if [[ -n "$context_id" ]]; then
+                sqlite3 "$RAG_DB_PATH" "DELETE FROM contexts WHERE id=$context_id;"
+            fi
+
+            _rag_log INFO "Removed orphan: $filepath"
+            ((removed_count++)) || true
+        fi
+    done < <(sqlite3 -separator $'\t' "$RAG_DB_PATH" "SELECT id, filepath, context_id FROM indexed_files;")
+
+    _rag_log INFO "Cleanup complete: removed $removed_count orphan(s)"
+    echo "$removed_count"
+}
+
+# Get list of indexed files
+rag_list_indexed() {
+    local limit="${1:-100}"
+    rag_init_files_table || return 1
+    sqlite3 -separator $'\t' "$RAG_DB_PATH" "SELECT filepath, content_hash, file_size, indexed_at FROM indexed_files ORDER BY indexed_at DESC LIMIT $limit;"
+}
+
+# Schedule periodic indexing via cron
+# Usage: rag_schedule_indexing <directory> [interval_minutes=60]
+rag_schedule_indexing() {
+    local directory="${1:-.}"
+    local interval="${2:-60}"
+
+    # Validate directory
+    if [[ ! -d "$directory" ]]; then
+        _rag_log ERROR "Directory does not exist: $directory"
+        return 1
+    fi
+
+    local abs_dir
+    abs_dir=$(cd "$directory" && pwd)
+
+    # Ensure cron directory exists
+    local cron_dir
+    cron_dir=$(dirname "$RAG_CRON_FILE")
+    _rag_ensure_dir "$cron_dir"
+
+    # Determine script path for cron job
+    local script_path="${BASH_SOURCE[0]}"
+    if [[ ! "$script_path" = /* ]]; then
+        script_path="$(cd "$(dirname "$script_path")" && pwd)/$(basename "$script_path")"
+    fi
+
+    # Create wrapper script for cron execution
+    local wrapper_script="${cron_dir}/rag_cron_ingest.sh"
+    cat > "$wrapper_script" <<EOF
+#!/bin/bash
+# Auto-generated RAG ingestion cron script
+# Generated: $(date -Iseconds)
+
+export AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT}"
+export STATE_DIR="${STATE_DIR}"
+export RAG_DB_PATH="${RAG_DB_PATH}"
+export RAG_INDEX_EXTENSIONS="${RAG_INDEX_EXTENSIONS}"
+export RAG_MAX_FILE_SIZE="${RAG_MAX_FILE_SIZE}"
+
+source "$script_path"
+
+# Run ingestion
+rag_ingest_directory "$abs_dir" 0 1000
+
+# Cleanup orphans
+rag_cleanup_orphans
+EOF
+    chmod +x "$wrapper_script"
+
+    # Calculate cron schedule
+    local cron_schedule
+    if [[ "$interval" -lt 60 ]]; then
+        # Run every N minutes
+        cron_schedule="*/$interval * * * *"
+    elif [[ "$interval" -eq 60 ]]; then
+        # Run every hour
+        cron_schedule="0 * * * *"
+    elif [[ "$interval" -lt 1440 ]]; then
+        # Run every N hours
+        local hours=$((interval / 60))
+        cron_schedule="0 */$hours * * *"
+    else
+        # Run daily
+        cron_schedule="0 0 * * *"
+    fi
+
+    local cron_entry="$cron_schedule $wrapper_script >> ${cron_dir}/rag_ingest.log 2>&1"
+
+    # Save schedule info
+    cat > "$RAG_CRON_FILE" <<EOF
+# RAG Indexing Schedule
+# Directory: $abs_dir
+# Interval: $interval minutes
+# Created: $(date -Iseconds)
+
+CRON_ENTRY=$cron_entry
+WRAPPER_SCRIPT=$wrapper_script
+DIRECTORY=$abs_dir
+INTERVAL=$interval
+EOF
+
+    _rag_log INFO "Created cron schedule file: $RAG_CRON_FILE"
+    _rag_log INFO "Cron entry: $cron_entry"
+
+    # Attempt to install crontab entry (non-destructive)
+    if command -v crontab >/dev/null 2>&1; then
+        # Check if entry already exists
+        local current_crontab
+        current_crontab=$(crontab -l 2>/dev/null || true)
+
+        if echo "$current_crontab" | grep -qF "$wrapper_script"; then
+            _rag_log INFO "Cron entry already exists"
+        else
+            # Add to crontab
+            {
+                echo "$current_crontab"
+                echo "# RAG Auto-Indexing for $abs_dir"
+                echo "$cron_entry"
+            } | crontab -
+            _rag_log INFO "Installed cron entry"
+        fi
+    else
+        _rag_log WARN "crontab not available, manual installation required"
+        _rag_log INFO "Add this to your crontab: $cron_entry"
+    fi
+
+    printf '{"schedule": "%s", "directory": "%s", "interval_minutes": %d, "wrapper": "%s"}\n' \
+        "$cron_schedule" "$abs_dir" "$interval" "$wrapper_script"
+}
+
+# Remove scheduled indexing
+rag_unschedule_indexing() {
+    if [[ ! -f "$RAG_CRON_FILE" ]]; then
+        _rag_log WARN "No scheduled indexing found"
+        return 0
+    fi
+
+    # Read wrapper script path
+    local wrapper_script
+    wrapper_script=$(grep "^WRAPPER_SCRIPT=" "$RAG_CRON_FILE" | cut -d= -f2)
+
+    if [[ -n "$wrapper_script" ]] && command -v crontab >/dev/null 2>&1; then
+        # Remove from crontab
+        local new_crontab
+        new_crontab=$(crontab -l 2>/dev/null | grep -vF "$wrapper_script" || true)
+        echo "$new_crontab" | crontab -
+        _rag_log INFO "Removed cron entry"
+    fi
+
+    # Remove files
+    if [[ -f "$wrapper_script" ]]; then
+        rm -f "$wrapper_script"
+    fi
+    rm -f "$RAG_CRON_FILE"
+
+    _rag_log INFO "Unscheduled indexing"
+}
+
+# Show indexing schedule status
+rag_schedule_status() {
+    if [[ ! -f "$RAG_CRON_FILE" ]]; then
+        echo "No scheduled indexing configured"
+        return 0
+    fi
+
+    cat "$RAG_CRON_FILE"
+
+    echo ""
+    echo "Current crontab entries:"
+    crontab -l 2>/dev/null | grep -i "rag" || echo "(none)"
+}
+
+# Quick stats including file counts
+rag_full_stats() {
+    rag_init_files_table || return 1
+
+    local context_count file_count total_size
+    context_count=$(sqlite3 "$RAG_DB_PATH" "SELECT COUNT(*) FROM contexts;")
+    file_count=$(sqlite3 "$RAG_DB_PATH" "SELECT COUNT(*) FROM indexed_files;")
+    total_size=$(sqlite3 "$RAG_DB_PATH" "SELECT COALESCE(SUM(file_size), 0) FROM indexed_files;")
+
+    printf '{"contexts": %d, "indexed_files": %d, "total_size_bytes": %d}\n' \
+        "$context_count" "$file_count" "$total_size"
+}

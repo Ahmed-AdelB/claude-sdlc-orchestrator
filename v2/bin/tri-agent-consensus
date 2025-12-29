@@ -226,6 +226,42 @@ WEIGHT_CODEX=0.3
 VETO_HOLDER="claude"
 declare -a VETO_CATEGORIES=("security" "architecture")
 
+# =============================================================================
+# SEC-002-1: Minimum Voting Window (Anti-Timing Attack)
+# =============================================================================
+# Prevents timing attacks where an attacker could manipulate consensus by
+# exploiting fast response times. All votes must wait at least MIN_VOTING_WINDOW_SEC
+# seconds before being accepted, ensuring consistent timing regardless of
+# actual model response times.
+# =============================================================================
+MIN_VOTING_WINDOW_SEC="${MIN_VOTING_WINDOW_SEC:-30}"
+VOTING_WINDOW_ENABLED="${VOTING_WINDOW_ENABLED:-true}"
+
+# Wait for minimum voting window to elapse
+# Usage: wait_for_voting_window START_TIME
+# Returns: 0 when window has elapsed
+wait_for_voting_window() {
+    local start_time="$1"
+    local current_time
+    current_time=$(date +%s)
+    local elapsed=$((current_time - start_time))
+
+    if [[ "$VOTING_WINDOW_ENABLED" != "true" ]]; then
+        log_debug "Voting window disabled, skipping wait"
+        return 0
+    fi
+
+    if [[ $elapsed -lt $MIN_VOTING_WINDOW_SEC ]]; then
+        local wait_time=$((MIN_VOTING_WINDOW_SEC - elapsed))
+        log_info "SEC-002-1: Waiting ${wait_time}s for minimum voting window (${MIN_VOTING_WINDOW_SEC}s)"
+        sleep "$wait_time"
+    else
+        log_debug "SEC-002-1: Voting window already satisfied (${elapsed}s >= ${MIN_VOTING_WINDOW_SEC}s)"
+    fi
+
+    return 0
+}
+
 #===============================================================================
 # Load Configuration from YAML
 #===============================================================================
@@ -773,9 +809,14 @@ main() {
     local prompt
     prompt=$(build_consensus_prompt "$QUESTION" "${CATEGORY:-general}")
 
+    # Record voting start time for SEC-002-1 minimum window
+    local voting_start_time
+    voting_start_time=$(date +%s)
+
     # Query all three models in parallel
     if [[ "$JSON_ONLY" != "true" ]]; then
         log_info "Querying Claude, Gemini, and Codex in parallel..."
+        log_info "SEC-002-1: Minimum voting window: ${MIN_VOTING_WINDOW_SEC}s"
     fi
 
     local claude_pid="" gemini_pid="" codex_pid=""
@@ -947,6 +988,10 @@ main() {
         log_info "Gemini: $gemini_verdict (confidence: $gemini_conf)"
         log_info "Codex: $codex_verdict (confidence: $codex_conf)"
     fi
+
+    # SEC-002-1: Wait for minimum voting window before accepting votes
+    # This prevents timing attacks where fast responses could be manipulated
+    wait_for_voting_window "$voting_start_time"
 
     # Apply voting rules based on mode
     local decision confidence reasoning

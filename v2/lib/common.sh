@@ -489,8 +489,13 @@ safe_env_exec() {
     }
 
     # Clear dangerous env vars that could be used for code injection
+    # SEC-P1-12: Python env vars (dependency hijacking prevention)
+    # - PYTHONPATH: Controls module search path
+    # - PYTHONHOME: Controls Python installation location
+    # - PYTHONSTARTUP: Script executed on interpreter startup
     env -u PYTHONPATH \
         -u PYTHONHOME \
+        -u PYTHONSTARTUP \
         -u LD_PRELOAD \
         -u LD_LIBRARY_PATH \
         -u NODE_OPTIONS \
@@ -786,6 +791,8 @@ source_if_exists() {
 
 # Source libraries in dependency order
 # Note: These will be created in subsequent implementation steps
+# Security library MUST be sourced first for verify_integrity and other security functions
+source_if_exists "${LIB_DIR}/security.sh"
 source_if_exists "${LIB_DIR}/state.sh"
 source_if_exists "${LIB_DIR}/logging.sh"
 source_if_exists "${LIB_DIR}/circuit-breaker.sh"
@@ -805,6 +812,142 @@ ensure_all_dirs
 
 # Log trace ID for debugging
 log_debug "Trace ID: ${TRACE_ID}"
+
+# =============================================================================
+# SEC-P1-10: Critical Binary Integrity Verification
+# =============================================================================
+# Verifies critical binaries (sqlite3, python3, jq) are in trusted paths at startup.
+# Uses verify_integrity() from security.sh if hash baselines exist, otherwise
+# validates binaries are in trusted directories using secure_which().
+# Logs warnings but does not crash on verification failure to allow graceful degradation.
+# =============================================================================
+
+# File to store binary hash baselines (created on first run)
+BINARY_HASH_BASELINE="${STATE_DIR}/binary-hashes.baseline"
+
+# Verify a critical binary and optionally check its hash
+# Usage: _verify_critical_binary "binary_name"
+# Returns: 0 if verified, 1 if verification failed (but logs warning, doesn't crash)
+_verify_critical_binary() {
+    local binary="$1"
+    local binary_path=""
+    local verification_status="unknown"
+
+    # Step 1: Resolve binary to trusted path using secure_which
+    binary_path=$(secure_which "$binary" 2>/dev/null) || {
+        log_warn "SEC-P1-10: Critical binary '$binary' not found in trusted paths"
+        log_security_event "BINARY_NOT_FOUND" "Critical binary $binary not in trusted paths" "WARN"
+        return 1
+    }
+
+    # Step 2: Verify the path is in a trusted directory
+    if ! is_trusted_binary_path "$binary_path"; then
+        log_warn "SEC-P1-10: Binary '$binary' at '$binary_path' is not in a trusted directory"
+        log_security_event "BINARY_UNTRUSTED_PATH" "Binary $binary at $binary_path is not in trusted directory" "WARN"
+        return 1
+    fi
+
+    # Step 3: Hash-based verification if security.sh verify_integrity is available
+    # and baseline exists
+    if declare -F verify_integrity >/dev/null 2>&1 && [[ -f "$BINARY_HASH_BASELINE" ]]; then
+        local expected_hash=""
+        expected_hash=$(grep "^${binary}:" "$BINARY_HASH_BASELINE" 2>/dev/null | cut -d: -f2)
+
+        if [[ -n "$expected_hash" ]]; then
+            if verify_integrity "$binary_path" "$expected_hash"; then
+                verification_status="hash_verified"
+                log_debug "SEC-P1-10: Binary '$binary' hash verified successfully"
+            else
+                log_warn "SEC-P1-10: Binary '$binary' hash mismatch - possible tampering or update"
+                log_security_event "BINARY_HASH_MISMATCH" "Binary $binary at $binary_path hash mismatch" "WARN"
+                verification_status="hash_mismatch"
+                # Don't fail - binary may have been legitimately updated
+            fi
+        else
+            verification_status="path_verified"
+            log_debug "SEC-P1-10: Binary '$binary' verified in trusted path (no baseline hash)"
+        fi
+    else
+        verification_status="path_verified"
+        log_debug "SEC-P1-10: Binary '$binary' verified in trusted path"
+    fi
+
+    return 0
+}
+
+# Initialize or update binary hash baseline
+# Usage: _init_binary_hash_baseline
+# Creates baseline file with hashes of critical binaries on first run
+_init_binary_hash_baseline() {
+    local critical_binaries=("sqlite3" "python3" "jq")
+    local needs_update=false
+
+    # Only initialize if baseline doesn't exist
+    if [[ ! -f "$BINARY_HASH_BASELINE" ]]; then
+        needs_update=true
+        log_info "SEC-P1-10: Initializing binary hash baseline"
+    fi
+
+    if [[ "$needs_update" == "true" ]]; then
+        ensure_dir "$(dirname "$BINARY_HASH_BASELINE")"
+
+        for binary in "${critical_binaries[@]}"; do
+            local binary_path=""
+            binary_path=$(secure_which "$binary" 2>/dev/null) || continue
+
+            if [[ -x "$binary_path" ]]; then
+                local hash=""
+                hash=$(sha256sum "$binary_path" 2>/dev/null | cut -d' ' -f1) || continue
+                echo "${binary}:${hash}" >> "$BINARY_HASH_BASELINE"
+                log_debug "SEC-P1-10: Recorded baseline hash for $binary"
+            fi
+        done
+
+        # Set restrictive permissions on baseline file
+        chmod 600 "$BINARY_HASH_BASELINE" 2>/dev/null || true
+        log_info "SEC-P1-10: Binary hash baseline created at $BINARY_HASH_BASELINE"
+    fi
+}
+
+# Verify all critical binaries at startup
+# Called during common.sh initialization
+# Logs warnings but does not exit on failure
+_verify_critical_binaries_at_startup() {
+    local critical_binaries=("sqlite3" "python3" "jq")
+    local failed_count=0
+    local verified_count=0
+
+    # Skip verification if explicitly disabled
+    if [[ "${SKIP_BINARY_VERIFICATION:-0}" == "1" ]]; then
+        log_debug "SEC-P1-10: Binary verification skipped (SKIP_BINARY_VERIFICATION=1)"
+        return 0
+    fi
+
+    # Initialize baseline if needed (first run)
+    _init_binary_hash_baseline
+
+    # Verify each critical binary
+    for binary in "${critical_binaries[@]}"; do
+        if _verify_critical_binary "$binary"; then
+            ((verified_count++)) || true
+        else
+            ((failed_count++)) || true
+        fi
+    done
+
+    # Log summary
+    if [[ $failed_count -gt 0 ]]; then
+        log_warn "SEC-P1-10: Binary verification completed with $failed_count warning(s), $verified_count verified"
+    else
+        log_debug "SEC-P1-10: All $verified_count critical binaries verified successfully"
+    fi
+
+    # Return success even if some verifications failed (graceful degradation)
+    return 0
+}
+
+# Run verification at startup (non-blocking)
+_verify_critical_binaries_at_startup || true
 
 # =============================================================================
 # JSON Envelope Parsing (#84 fix)
@@ -1424,6 +1567,11 @@ export -f release_lock
 export -f with_lock
 export -f atomic_append
 export -f atomic_read
+
+# SEC-P1-10: Export binary verification functions
+export -f _verify_critical_binary
+export -f _init_binary_hash_baseline
+export -f _verify_critical_binaries_at_startup
 
 # =============================================================================
 # Performance: Mark Initialization Complete (#performance)

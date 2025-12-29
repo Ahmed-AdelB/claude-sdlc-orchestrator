@@ -5,6 +5,7 @@
 # Features:
 # - M1-001: SQLite canonical task claiming with BEGIN IMMEDIATE transaction
 # - M1-004: Signal-based worker pause/resume with graceful shutdown
+# - P1-8:   Docker sandbox enforcement for delegate execution isolation
 # - Atomic task claiming via sqlite_claim_task() (verified success)
 # - Active governance via signals (SIGUSR1/SIGUSR2/SIGTERM/SIGINT)
 # - Filesystem queue bridge (compatibility)
@@ -34,6 +35,14 @@
 # - Budget watchdog sends SIGUSR1 when threshold exceeded
 # - Workers complete current task and pause
 # - Budget watchdog sends SIGUSR2 when budget replenished
+#
+# Docker Sandbox (P1-8):
+# - Delegate execution runs in Docker container for isolation
+# - Prevents untrusted task code from accessing host system
+# - Configurable via DOCKER_SANDBOX_ENABLED (default: true)
+# - Uses claude-sandbox:latest image (build from Dockerfile)
+# - Security: no-new-privileges, cap-drop ALL, readonly root, network=none
+# - Fallback: Bare metal execution if Docker unavailable
 #===============================================================================
 
 set -euo pipefail
@@ -64,6 +73,14 @@ if [[ -f "${AUTONOMOUS_ROOT}/lib/heartbeat.sh" ]]; then
     source "${AUTONOMOUS_ROOT}/lib/heartbeat.sh"
 fi
 
+# Priority queue with anti-starvation (P1-11)
+if [[ -f "${AUTONOMOUS_ROOT}/lib/priority-queue.sh" ]]; then
+    source "${AUTONOMOUS_ROOT}/lib/priority-queue.sh"
+    PRIORITY_QUEUE_ENABLED=true
+else
+    PRIORITY_QUEUE_ENABLED=false
+fi
+
 # Config
 WORKER_ID="${WORKER_ID:-worker-$$-$(date +%s)}"
 WORKER_PID=$$
@@ -89,6 +106,205 @@ BUDGET_WATCHDOG_PID=""
 
 # Legacy compatibility
 WORKER_PAUSED=false
+
+#===============================================================================
+# Docker Sandbox Configuration (P1-8: Docker Sandbox Enforcement)
+#===============================================================================
+# When enabled, delegate execution runs inside a Docker container for isolation.
+# This prevents untrusted task code from accessing the host system directly.
+#
+# Environment Variables:
+#   DOCKER_SANDBOX_ENABLED - Enable/disable sandbox (default: true)
+#   DOCKER_SANDBOX_IMAGE   - Docker image to use (default: claude-sandbox:latest)
+#   DOCKER_SANDBOX_TIMEOUT - Max execution time in seconds (default: 3600)
+#   DOCKER_SANDBOX_MEMORY  - Memory limit (default: 4g)
+#   DOCKER_SANDBOX_CPUS    - CPU limit (default: 2)
+#   DOCKER_SANDBOX_NETWORK - Network mode (default: none for isolation)
+#   DOCKER_SANDBOX_READONLY- Mount workspace as readonly (default: false)
+#   DOCKER_SANDBOX_WORKSPACE - Container workspace path (default: /workspace)
+#===============================================================================
+
+DOCKER_SANDBOX_ENABLED="${DOCKER_SANDBOX_ENABLED:-true}"
+DOCKER_SANDBOX_IMAGE="${DOCKER_SANDBOX_IMAGE:-claude-sandbox:latest}"
+DOCKER_SANDBOX_TIMEOUT="${DOCKER_SANDBOX_TIMEOUT:-3600}"
+DOCKER_SANDBOX_MEMORY="${DOCKER_SANDBOX_MEMORY:-4g}"
+DOCKER_SANDBOX_CPUS="${DOCKER_SANDBOX_CPUS:-2}"
+DOCKER_SANDBOX_NETWORK="${DOCKER_SANDBOX_NETWORK:-none}"
+DOCKER_SANDBOX_READONLY="${DOCKER_SANDBOX_READONLY:-false}"
+DOCKER_SANDBOX_WORKSPACE="${DOCKER_SANDBOX_WORKSPACE:-/workspace}"
+
+#===============================================================================
+# Dependency Deadlock Resolution (Gap Analysis P0-5)
+#===============================================================================
+# Allows workers to request dependency installation from supervisor instead of
+# just failing. This prevents deadlocks where tasks fail repeatedly due to
+# missing dependencies.
+#
+# Message Types:
+#   DEP_REQUEST  - Worker -> Supervisor: Request dependency installation
+#   DEP_RESPONSE - Supervisor -> Worker: Dependency installation result
+#
+# Supported dependency types:
+#   - npm (Node.js packages)
+#   - pip/pip3 (Python packages)
+#   - apt/apt-get (System packages)
+#   - cargo (Rust crates)
+#===============================================================================
+
+DEP_REQUEST_ENABLED="${DEP_REQUEST_ENABLED:-true}"
+DEP_REQUEST_MAX_RETRIES="${DEP_REQUEST_MAX_RETRIES:-2}"
+DEP_REQUEST_TIMEOUT="${DEP_REQUEST_TIMEOUT:-120}"
+SUPERVISOR_INBOX="${AUTONOMOUS_ROOT}/state/comms/supervisor/inbox"
+
+# Common dependency failure patterns
+DEP_FAILURE_PATTERNS=(
+    "ModuleNotFoundError:"
+    "ImportError:"
+    "Cannot find module"
+    "Module not found:"
+    "No module named"
+    "npm ERR! missing:"
+    "pip.*No matching distribution"
+    "cargo.*could not find.*crate"
+    "error: unresolved import"
+    "Package .* is not installed"
+    "command not found:"
+    "bash:.*not found"
+)
+
+# Detect if failure is due to missing dependencies
+detect_dependency_failure() {
+    local output_file="$1"
+
+    if [[ ! -f "$output_file" ]]; then
+        return 1
+    fi
+
+    for pattern in "${DEP_FAILURE_PATTERNS[@]}"; do
+        if grep -q "$pattern" "$output_file" 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Extract dependency info from failure output
+extract_dependency_info() {
+    local output_file="$1"
+    local dep_type=""
+    local dep_name=""
+
+    # Try to extract Python module name
+    if grep -qE "ModuleNotFoundError|No module named" "$output_file" 2>/dev/null; then
+        dep_type="pip"
+        dep_name=$(grep -oE "(ModuleNotFoundError|No module named).*'[^']+'" "$output_file" 2>/dev/null | head -1 | grep -oE "'[^']+'" | tr -d "'")
+    # Try to extract npm module
+    elif grep -qE "Cannot find module|Module not found:" "$output_file" 2>/dev/null; then
+        dep_type="npm"
+        dep_name=$(grep -oE "(Cannot find module|Module not found:).*'[^']+'" "$output_file" 2>/dev/null | head -1 | grep -oE "'[^']+'" | tr -d "'")
+    # Try to extract command not found
+    elif grep -qE "command not found:" "$output_file" 2>/dev/null; then
+        dep_type="apt"
+        dep_name=$(grep -oE "[^: ]+: command not found" "$output_file" 2>/dev/null | head -1 | cut -d: -f1)
+    fi
+
+    if [[ -n "$dep_type" && -n "$dep_name" ]]; then
+        echo "{\"type\":\"$dep_type\",\"name\":\"$dep_name\"}"
+        return 0
+    fi
+
+    return 1
+}
+
+# Request dependency installation from supervisor
+request_dependency_install() {
+    local task_id="$1"
+    local dep_info="$2"
+
+    if [[ "$DEP_REQUEST_ENABLED" != "true" ]]; then
+        log_warn "DEP_REQUEST disabled, cannot request installation"
+        return 1
+    fi
+
+    log_info "Requesting dependency installation: $dep_info"
+
+    # Create request message
+    local request_id="depreq_${task_id}_$(date +%s)"
+    local request_file="${SUPERVISOR_INBOX}/${request_id}.json"
+
+    mkdir -p "$SUPERVISOR_INBOX"
+
+    cat > "$request_file" <<EOF
+{
+    "type": "DEP_REQUEST",
+    "request_id": "$request_id",
+    "task_id": "$task_id",
+    "worker_id": "$WORKER_ID",
+    "dependency": $dep_info,
+    "timestamp": "$(date -Iseconds)",
+    "timeout_sec": $DEP_REQUEST_TIMEOUT
+}
+EOF
+
+    log_info "DEP_REQUEST submitted: $request_id"
+
+    # Wait for response (polling)
+    local response_file="${AUTONOMOUS_ROOT}/state/comms/worker/${WORKER_ID}/inbox/${request_id}_response.json"
+    local wait_start=$(date +%s)
+    local wait_end=$((wait_start + DEP_REQUEST_TIMEOUT))
+
+    while (( $(date +%s) < wait_end )); do
+        if [[ -f "$response_file" ]]; then
+            local status
+            status=$(jq -r '.status // "unknown"' "$response_file" 2>/dev/null || echo "unknown")
+
+            if [[ "$status" == "installed" ]]; then
+                log_info "DEP_REQUEST fulfilled: dependency installed"
+                rm -f "$response_file"
+                return 0
+            elif [[ "$status" == "failed" ]]; then
+                local reason
+                reason=$(jq -r '.reason // "unknown"' "$response_file" 2>/dev/null || echo "unknown")
+                log_error "DEP_REQUEST failed: $reason"
+                rm -f "$response_file"
+                return 1
+            fi
+        fi
+        sleep 5
+    done
+
+    log_warn "DEP_REQUEST timeout after ${DEP_REQUEST_TIMEOUT}s"
+    return 1
+}
+
+# Handle dependency failure with retry
+handle_dependency_failure() {
+    local task_id="$1"
+    local output_file="$2"
+    local retry_count="${3:-0}"
+
+    if [[ "$DEP_REQUEST_ENABLED" != "true" ]]; then
+        return 1
+    fi
+
+    if (( retry_count >= DEP_REQUEST_MAX_RETRIES )); then
+        log_warn "Max dependency retries ($DEP_REQUEST_MAX_RETRIES) reached for $task_id"
+        return 1
+    fi
+
+    local dep_info
+    if dep_info=$(extract_dependency_info "$output_file"); then
+        log_info "Detected dependency failure in $task_id: $dep_info"
+
+        if request_dependency_install "$task_id" "$dep_info"; then
+            log_info "Dependency installed, will retry task"
+            return 0  # Retry the task
+        fi
+    fi
+
+    return 1
+}
 
 #===============================================================================
 # Governance & Signals (M1-004: Signal-based Worker Control)
@@ -516,6 +732,137 @@ acquire_task_lock() {
 }
 
 #===============================================================================
+# Docker Sandbox Execution (P1-8: Docker Sandbox Enforcement)
+#===============================================================================
+# Wraps delegate execution in a Docker container for security isolation.
+# Prevents untrusted task code from accessing host system directly.
+#===============================================================================
+
+# Check if Docker is available and sandbox image exists
+check_docker_sandbox_available() {
+    if ! command -v docker &>/dev/null; then
+        log_warn "Docker not found - sandbox disabled"
+        return 1
+    fi
+
+    # Check if image exists (don't pull automatically for security)
+    if ! docker image inspect "$DOCKER_SANDBOX_IMAGE" &>/dev/null; then
+        log_warn "Docker sandbox image '$DOCKER_SANDBOX_IMAGE' not found - build with: docker build -t $DOCKER_SANDBOX_IMAGE ."
+        return 1
+    fi
+
+    return 0
+}
+
+# Run a command inside Docker sandbox
+# Usage: run_in_sandbox <delegate_path> <content> <output_file> <exec_dir>
+run_in_sandbox() {
+    local delegate_path="$1"
+    local content="$2"
+    local output_file="$3"
+    local exec_dir="$4"
+
+    local delegate_name
+    delegate_name=$(basename "$delegate_path")
+
+    log_info "P1-8: Running delegate '$delegate_name' in Docker sandbox"
+
+    # Build docker run command with security constraints
+    local docker_args=(
+        "run"
+        "--rm"                                          # Remove container after exit
+        "--name" "sandbox-${WORKER_ID}-$$"              # Unique container name
+        "--memory" "$DOCKER_SANDBOX_MEMORY"             # Memory limit
+        "--cpus" "$DOCKER_SANDBOX_CPUS"                 # CPU limit
+        "--network" "$DOCKER_SANDBOX_NETWORK"           # Network isolation
+        "--security-opt" "no-new-privileges:true"       # Prevent privilege escalation
+        "--read-only"                                   # Read-only root filesystem
+        "--tmpfs" "/tmp:rw,noexec,nosuid,size=512m"     # Writable tmp with size limit
+        "--tmpfs" "/run:rw,noexec,nosuid,size=64m"      # Writable run
+        "--user" "1000:1000"                            # Run as non-root user
+        "--cap-drop" "ALL"                              # Drop all capabilities
+        "--pids-limit" "256"                            # Limit process count
+    )
+
+    # Mount workspace (readonly or rw based on config)
+    if [[ "$DOCKER_SANDBOX_READONLY" == "true" ]]; then
+        docker_args+=("-v" "${AUTONOMOUS_ROOT}:${DOCKER_SANDBOX_WORKSPACE}:ro")
+    else
+        docker_args+=("-v" "${AUTONOMOUS_ROOT}:${DOCKER_SANDBOX_WORKSPACE}:rw")
+    fi
+
+    # Mount execution output directory for results
+    docker_args+=("-v" "${exec_dir}:/output:rw")
+
+    # Mount delegate script (readonly)
+    docker_args+=("-v" "${delegate_path}:${DOCKER_SANDBOX_WORKSPACE}/bin/${delegate_name}:ro")
+
+    # Environment variables
+    docker_args+=("-e" "AUTONOMOUS_ROOT=${DOCKER_SANDBOX_WORKSPACE}")
+    docker_args+=("-e" "WORKER_ID=${WORKER_ID}")
+    docker_args+=("-e" "TASK_ID=${CURRENT_TASK}")
+    docker_args+=("-e" "HOME=/tmp")
+
+    # Add the image
+    docker_args+=("$DOCKER_SANDBOX_IMAGE")
+
+    # Command to run inside container
+    # We use a wrapper to handle content safely via stdin
+    docker_args+=("/bin/bash" "-c" "cat > /tmp/task_content.txt && ${DOCKER_SANDBOX_WORKSPACE}/bin/${delegate_name} < /tmp/task_content.txt > /output/output.txt 2>&1")
+
+    # Execute with timeout
+    local exit_code=0
+    if timeout "${DOCKER_SANDBOX_TIMEOUT}s" docker "${docker_args[@]}" <<< "$content"; then
+        exit_code=0
+        log_info "P1-8: Sandbox execution completed successfully"
+    else
+        exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            log_error "P1-8: Sandbox execution timed out after ${DOCKER_SANDBOX_TIMEOUT}s"
+            echo "ERROR: Sandbox execution timed out after ${DOCKER_SANDBOX_TIMEOUT}s" >> "$output_file"
+        else
+            log_warn "P1-8: Sandbox execution failed with exit code $exit_code"
+        fi
+    fi
+
+    # Copy output from exec_dir if needed (already written to /output/output.txt -> $exec_dir/output.txt)
+    if [[ -f "${exec_dir}/output.txt" ]]; then
+        cp "${exec_dir}/output.txt" "$output_file" 2>/dev/null || true
+    fi
+
+    return $exit_code
+}
+
+# Execute delegate with optional sandbox wrapping
+# Usage: execute_delegate <delegate_path> <content> <output_file> <exec_dir>
+execute_delegate() {
+    local delegate_path="$1"
+    local content="$2"
+    local output_file="$3"
+    local exec_dir="$4"
+
+    # Check if sandbox is enabled and available
+    if [[ "$DOCKER_SANDBOX_ENABLED" == "true" ]]; then
+        if check_docker_sandbox_available; then
+            # Run in sandbox
+            run_in_sandbox "$delegate_path" "$content" "$output_file" "$exec_dir"
+            return $?
+        else
+            log_warn "P1-8: Docker sandbox requested but unavailable - falling back to bare metal execution"
+            log_warn "P1-8: Set DOCKER_SANDBOX_ENABLED=false to suppress this warning"
+        fi
+    fi
+
+    # Bare metal execution (fallback or sandbox disabled)
+    log_debug "Executing delegate directly (bare metal): $delegate_path"
+    if "$delegate_path" <<< "$content" > "$output_file" 2>&1; then
+        return 0
+    else
+        return $?
+    fi
+}
+
+#===============================================================================
 # Task Execution
 #===============================================================================
 
@@ -588,17 +935,22 @@ process_task() {
 
     log_info "Routing task $task_id to model $model"
 
-    # Execute Delegate
+    # Execute Delegate (P1-8: Optionally in Docker sandbox)
     local result=""
     local exit_code=0
+    local delegate_path="${AUTONOMOUS_ROOT}/bin/${model}-delegate"
 
-    if [[ -x "${AUTONOMOUS_ROOT}/bin/${model}-delegate" ]]; then
-        # Check circuit breaker (if integrated)
-        if "${AUTONOMOUS_ROOT}/bin/${model}-delegate" "$content" > "${exec_dir}/output.txt" 2>&1; then
+    if [[ -x "$delegate_path" ]]; then
+        # P1-8: Execute delegate with optional Docker sandbox
+        # The execute_delegate function handles sandbox vs bare metal execution
+        # based on DOCKER_SANDBOX_ENABLED configuration
+        if execute_delegate "$delegate_path" "$content" "${exec_dir}/output.txt" "$exec_dir"; then
             result="SUCCESS"
+            log_debug "Delegate execution completed successfully (sandbox=${DOCKER_SANDBOX_ENABLED})"
         else
             result="FAILURE"
             exit_code=1
+            log_warn "Delegate execution failed (sandbox=${DOCKER_SANDBOX_ENABLED})"
         fi
     else
         log_warn "Delegate ${model}-delegate not found. Simulating success."
@@ -641,9 +993,58 @@ process_task() {
             transition_task "$task_id" "FAILED" "DB Transition Error" "$WORKER_ID" || true
         fi
     else
-        # Move to FAILED
+        # Check for dependency failure before marking as FAILED (P0-5)
+        local output_file="${exec_dir}/output.txt"
+        local dep_retry_count=0
+
+        # Try to get retry count from task metadata
+        if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+            local esc_task_id="${task_id//\'/\'\'}"
+            dep_retry_count=$(_sqlite_exec "$STATE_DB" "
+                SELECT COALESCE(json_extract(metadata, '$.dep_retry_count'), 0)
+                FROM tasks WHERE id='$esc_task_id';
+            " 2>/dev/null || echo "0")
+            dep_retry_count=${dep_retry_count:-0}
+        fi
+
+        # P0-5: Check if this is a dependency failure that can be resolved
+        if detect_dependency_failure "$output_file"; then
+            log_info "Detected dependency failure for task $task_id (retry $dep_retry_count)"
+
+            if handle_dependency_failure "$task_id" "$output_file" "$dep_retry_count"; then
+                # Dependency was installed, retry the task
+                log_info "Dependency installed, requeueing task $task_id for retry"
+
+                # Update retry count
+                local new_retry_count=$((dep_retry_count + 1))
+                if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+                    local esc_task_id="${task_id//\'/\'\'}"
+                    _sqlite_exec "$STATE_DB" "
+                        UPDATE tasks
+                        SET state='QUEUED',
+                            worker_id=NULL,
+                            metadata=json_set(COALESCE(metadata,'{}'), '$.dep_retry_count', $new_retry_count)
+                        WHERE id='$esc_task_id';
+                    " 2>/dev/null || true
+                fi
+
+                # Move file back to queue
+                mv "$running_file" "$QUEUE_DIR/$task_id.md"
+                log_info "Task $task_id requeued after dependency install"
+
+                # Clear task tracking and return (don't mark as failed)
+                CURRENT_TASK=""
+                TASK_START_TIME=""
+                if [[ "$WORKER_STATE" == "RUNNING" ]]; then
+                    update_worker_state "idle" "Task $task_id requeued for dep retry"
+                fi
+                return
+            fi
+        fi
+
+        # Move to FAILED (no dependency resolution possible)
         mkdir -p "$FAILED_DIR"
-        
+
         # M1-FIX: Update DB first
         if transition_task "$task_id" "FAILED" "Delegate execution failed" "$WORKER_ID"; then
             mv "$running_file" "$FAILED_DIR/$task_id.md"
@@ -755,6 +1156,11 @@ log_info "Worker $WORKER_ID started (PID: $WORKER_PID, State: $WORKER_STATE, Sha
 # Update status to running
 update_worker_state "idle" "Worker started and ready"
 
+# P1-11: Anti-starvation cycle counter
+# pq_escalate_waiting() is called every ANTI_STARVATION_INTERVAL cycles
+ANTI_STARVATION_INTERVAL="${ANTI_STARVATION_INTERVAL:-10}"
+ANTI_STARVATION_CYCLE_COUNT=0
+
 while true; do
     # 1. Check Worker State Machine (M1-004)
     case "$WORKER_STATE" in
@@ -795,6 +1201,19 @@ while true; do
             sleep 5
             continue
         fi
+    fi
+
+    # 3.5. P1-11: Anti-starvation - Periodic priority escalation
+    # Promotes long-waiting tasks to prevent starvation:
+    #   LOW -> MEDIUM after 1 hour
+    #   MEDIUM -> HIGH after 30 minutes
+    #   HIGH -> CRITICAL after 15 minutes
+    ANTI_STARVATION_CYCLE_COUNT=$((ANTI_STARVATION_CYCLE_COUNT + 1))
+    if [[ "$PRIORITY_QUEUE_ENABLED" == "true" ]] && \
+       (( ANTI_STARVATION_CYCLE_COUNT >= ANTI_STARVATION_INTERVAL )); then
+        log_debug "P1-11: Running anti-starvation escalation (cycle $ANTI_STARVATION_CYCLE_COUNT)"
+        pq_escalate_waiting 2>/dev/null || true
+        ANTI_STARVATION_CYCLE_COUNT=0
     fi
 
     # 4. Bridge Queue (Sync files to DB)

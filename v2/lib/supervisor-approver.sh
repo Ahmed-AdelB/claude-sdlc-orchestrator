@@ -550,6 +550,79 @@ enforce_threshold_floors() {
 # Call enforce_threshold_floors at initialization
 enforce_threshold_floors
 
+# =============================================================================
+# SEC-008-2: Coverage Report Validation (Anti-Manipulation)
+# =============================================================================
+# Validates that coverage percentages are within valid ranges and have not been
+# manipulated. Prevents attacks where coverage values are injected or modified
+# to bypass quality gates.
+#
+# Validation rules:
+# 1. Coverage must be a valid number (integer or decimal)
+# 2. Coverage must be between 0 and 100 (inclusive)
+# 3. Coverage cannot be negative or exceed 100%
+# 4. Coverage string must not contain shell/control characters
+# =============================================================================
+
+validate_coverage_report() {
+    local coverage_value="$1"
+    local source="${2:-unknown}"
+
+    # Strip whitespace
+    coverage_value=$(echo "$coverage_value" | tr -d '[:space:]')
+
+    # SEC-008-2: Check for empty value
+    if [[ -z "$coverage_value" ]]; then
+        log_warn "SEC-008-2: Empty coverage value from $source"
+        log_security_event "COVERAGE_VALIDATION_FAILED" "Empty coverage value from $source" "WARN" 2>/dev/null || true
+        return 1
+    fi
+
+    # SEC-008-2: Check for valid numeric format (integer or decimal)
+    # Must be digits with optional single decimal point
+    if ! [[ "$coverage_value" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "SEC-008-2: Invalid coverage format '$coverage_value' from $source (must be numeric)"
+        log_security_event "COVERAGE_VALIDATION_FAILED" "Invalid format: '$coverage_value' from $source" "CRITICAL" 2>/dev/null || true
+        return 1
+    fi
+
+    # SEC-008-2: Check for shell injection attempts (shouldn't reach here but defense in depth)
+    if [[ "$coverage_value" =~ [\$\`\;\|\&\<\>] ]]; then
+        log_error "SEC-008-2: Shell injection attempt in coverage value from $source"
+        log_security_event "COVERAGE_INJECTION_BLOCKED" "Shell chars in: '$coverage_value' from $source" "CRITICAL" 2>/dev/null || true
+        return 1
+    fi
+
+    # SEC-008-2: Check range (0-100%)
+    local awk_bin
+    awk_bin=$(_get_binary "awk" 2>/dev/null) || awk_bin="/usr/bin/awk"
+
+    # Check if coverage is negative (< 0)
+    if "$awk_bin" "BEGIN{exit !($coverage_value < 0)}"; then
+        log_error "SEC-008-2: Negative coverage value '$coverage_value' from $source"
+        log_security_event "COVERAGE_VALIDATION_FAILED" "Negative value: $coverage_value from $source" "CRITICAL" 2>/dev/null || true
+        return 1
+    fi
+
+    # Check if coverage exceeds 100%
+    if "$awk_bin" "BEGIN{exit !($coverage_value > 100)}"; then
+        log_error "SEC-008-2: Coverage exceeds 100%: '$coverage_value' from $source"
+        log_security_event "COVERAGE_VALIDATION_FAILED" "Value >100%: $coverage_value from $source" "CRITICAL" 2>/dev/null || true
+        return 1
+    fi
+
+    # SEC-008-2: Check for suspiciously round numbers that might indicate spoofing
+    # (e.g., exactly 100.0 or 80.0 without decimals after running real tests)
+    # This is a warning, not a failure
+    if [[ "$coverage_value" == "100" ]] || [[ "$coverage_value" == "100.0" ]]; then
+        log_warn "SEC-008-2: Perfect 100% coverage from $source - verify this is legitimate"
+        log_security_event "COVERAGE_PERFECT_SCORE" "100% coverage from $source - may warrant verification" "INFO" 2>/dev/null || true
+    fi
+
+    log_debug "SEC-008-2: Coverage validation passed for $coverage_value% from $source"
+    return 0
+}
+
 # Ensure directories exist
 for dir in "$QUEUE_DIR" "$REVIEW_DIR" "$APPROVED_DIR" "$REJECTED_DIR" \
            "$COMPLETED_DIR" "$FAILED_DIR" "$HISTORY_DIR" "$GATES_DIR" \
@@ -964,7 +1037,27 @@ EOF
         fi
     fi
 
-    # Coverage was successfully measured - enforce threshold
+    # SEC-008-2: Validate coverage value before using it
+    if ! validate_coverage_report "$coverage" "check_coverage/$workspace"; then
+        log_gate "ERROR" "SEC-008-2: Coverage validation failed - gate BLOCKED"
+        local json_result
+        json_result=$(cat <<EOF
+{
+    "check": "EXE-002",
+    "name": "Test Coverage",
+    "coverage": "INVALID",
+    "threshold": $COVERAGE_THRESHOLD,
+    "exit_code": 1,
+    "status": "FAIL",
+    "reason": "coverage_validation_failed"
+}
+EOF
+)
+        write_json_result "$output_file" "$json_result"
+        return 1
+    fi
+
+    # Coverage was successfully measured and validated - enforce threshold
     if "$awk_bin" "BEGIN{exit !($coverage >= $COVERAGE_THRESHOLD)}"; then
         exit_code=0
     else

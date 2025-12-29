@@ -15,6 +15,143 @@
 : "${STATE_DIR:=$HOME/.claude/autonomous/state}"
 : "${STATE_DB:=$STATE_DIR/tri-agent.db}"
 
+# =============================================================================
+# SEC-008-3: Security Score Validation (Anti-Manipulation)
+# =============================================================================
+# Validates that security/validation scores are within valid ranges and cannot
+# be manipulated. Prevents attacks where scores are injected to bypass gates.
+#
+# Validation rules:
+# 1. Score must be a valid number (integer or decimal)
+# 2. Score must be between 0 and 100 (inclusive)
+# 3. Score cannot be negative or exceed 100
+# 4. Score string must not contain shell/control characters
+# =============================================================================
+
+# Security score constraints (readonly)
+readonly MIN_VALID_SCORE=0
+readonly MAX_VALID_SCORE=100
+
+# Validate a security/validation score value
+validate_security_score() {
+    local score_value="$1"
+    local context="${2:-unknown}"
+
+    # Strip whitespace
+    score_value=$(echo "$score_value" | tr -d '[:space:]')
+
+    # SEC-008-3: Check for empty value
+    if [[ -z "$score_value" ]]; then
+        log_error "SEC-008-3: Empty security score from $context" 2>/dev/null || echo "[ERROR] SEC-008-3: Empty security score from $context" >&2
+        return 1
+    fi
+
+    # SEC-008-3: Check for valid numeric format (integer or decimal)
+    if ! [[ "$score_value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "SEC-008-3: Invalid score format '$score_value' from $context (must be numeric)" 2>/dev/null || \
+            echo "[ERROR] SEC-008-3: Invalid score format '$score_value' from $context (must be numeric)" >&2
+        return 1
+    fi
+
+    # SEC-008-3: Check for shell injection attempts (defense in depth)
+    if [[ "$score_value" =~ [\$\`\;\|\&\<\>] ]]; then
+        log_error "SEC-008-3: Shell injection attempt in score from $context" 2>/dev/null || \
+            echo "[ERROR] SEC-008-3: Shell injection attempt in score from $context" >&2
+        return 1
+    fi
+
+    # SEC-008-3: Use awk for numeric range validation
+    local awk_bin
+    awk_bin=$(command -v awk 2>/dev/null) || awk_bin="/usr/bin/awk"
+
+    # Check if score is below minimum (< 0)
+    if "$awk_bin" "BEGIN{exit !($score_value < $MIN_VALID_SCORE)}"; then
+        log_error "SEC-008-3: Negative security score '$score_value' from $context" 2>/dev/null || \
+            echo "[ERROR] SEC-008-3: Negative security score '$score_value' from $context" >&2
+        return 1
+    fi
+
+    # Check if score exceeds maximum (> 100)
+    if "$awk_bin" "BEGIN{exit !($score_value > $MAX_VALID_SCORE)}"; then
+        log_error "SEC-008-3: Security score exceeds 100: '$score_value' from $context" 2>/dev/null || \
+            echo "[ERROR] SEC-008-3: Security score exceeds 100: '$score_value' from $context" >&2
+        return 1
+    fi
+
+    # SEC-008-3: Warn on perfect scores (may indicate spoofing)
+    if [[ "$score_value" == "100" ]] || [[ "$score_value" == "100.0" ]]; then
+        log_warn "SEC-008-3: Perfect 100 score from $context - verify legitimacy" 2>/dev/null || \
+            echo "[WARN] SEC-008-3: Perfect 100 score from $context - verify legitimacy" >&2
+    fi
+
+    return 0
+}
+
+# Validate confidence score (same constraints as security score)
+validate_confidence_score() {
+    local confidence="$1"
+    local context="${2:-unknown}"
+
+    # Confidence is typically 0.0-1.0, but we also support 0-100%
+    local normalized="$confidence"
+
+    # If confidence is in 0-1 range, it's a probability - validate differently
+    local awk_bin
+    awk_bin=$(command -v awk 2>/dev/null) || awk_bin="/usr/bin/awk"
+
+    # Strip whitespace
+    confidence=$(echo "$confidence" | tr -d '[:space:]')
+
+    # Check for valid numeric format
+    if ! [[ "$confidence" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "SEC-008-3: Invalid confidence format '$confidence' from $context" 2>/dev/null || \
+            echo "[ERROR] SEC-008-3: Invalid confidence format '$confidence' from $context" >&2
+        return 1
+    fi
+
+    # Check if confidence appears to be a probability (0-1)
+    if "$awk_bin" "BEGIN{exit !($confidence >= 0 && $confidence <= 1)}"; then
+        # Valid probability range
+        return 0
+    fi
+
+    # Check if confidence appears to be a percentage (0-100)
+    if "$awk_bin" "BEGIN{exit !($confidence >= 0 && $confidence <= 100)}"; then
+        # Valid percentage range
+        return 0
+    fi
+
+    # Out of all valid ranges
+    log_error "SEC-008-3: Confidence '$confidence' out of valid range from $context" 2>/dev/null || \
+        echo "[ERROR] SEC-008-3: Confidence '$confidence' out of valid range from $context" >&2
+    return 1
+}
+
+# Wrapper to validate any score-like value with appropriate context
+validate_gate_score() {
+    local score="$1"
+    local score_type="${2:-generic}"
+    local context="${3:-unknown}"
+
+    case "$score_type" in
+        security|validation_score)
+            validate_security_score "$score" "$context"
+            ;;
+        confidence)
+            validate_confidence_score "$score" "$context"
+            ;;
+        *)
+            # Default to security score validation (0-100 range)
+            validate_security_score "$score" "$context"
+            ;;
+    esac
+}
+
+# Export validation functions
+export -f validate_security_score
+export -f validate_confidence_score
+export -f validate_gate_score
+
 # Phase definitions with required artifacts
 declare -A PHASE_CONFIG=(
     [BRAINSTORM]="order:1|next:DOCUMENT|artifacts:requirements.md,questions.md"
