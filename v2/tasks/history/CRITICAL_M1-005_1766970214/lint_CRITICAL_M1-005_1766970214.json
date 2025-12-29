@@ -1,0 +1,8 @@
+{
+  "check": "EXE-003",
+  "name": "Linting",
+  "errors": 0,
+  "warnings": 0,
+  "exit_code": 0,
+  "status": "PASS"
+}

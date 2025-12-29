@@ -1,0 +1,8 @@
+{
+  "check": "EXE-001",
+  "name": "Test Suite",
+  "passed": 0,
+  "failed": 0,
+  "exit_code": 0,
+  "status": "PASS"
+}

@@ -1,0 +1,570 @@
+#!/bin/bash
+# =============================================================================
+# tri-agent-admin - Administrative commands for tri-agent system
+# =============================================================================
+# Provides queue management, RAG context operations, event store utilities,
+# diversity checks, and process reaper controls.
+# =============================================================================
+
+set -euo pipefail
+
+# Resolve script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+
+# Source common utilities
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/common.sh"
+else
+    set -euo pipefail
+    AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-${HOME}/.claude/autonomous}"
+    LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+    BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+    log_info() { echo "[INFO] $*" >&2; }
+    log_warn() { echo "[WARN] $*" >&2; }
+    log_error() { echo "[ERROR] $*" >&2; }
+fi
+
+# Source libs
+[[ -f "${LIB_DIR}/priority-queue.sh" ]] && source "${LIB_DIR}/priority-queue.sh"
+[[ -f "${LIB_DIR}/rag-context.sh" ]] && source "${LIB_DIR}/rag-context.sh"
+[[ -f "${LIB_DIR}/event-store.sh" ]] && source "${LIB_DIR}/event-store.sh"
+[[ -f "${LIB_DIR}/model-diversity.sh" ]] && source "${LIB_DIR}/model-diversity.sh"
+
+COMPONENT="ADMIN"
+export COMPONENT
+
+usage() {
+    cat <<EOF
+tri-agent-admin - Administrative commands
+
+USAGE:
+    tri-agent-admin <command> [options]
+
+COMMANDS:
+    queue      Manage priority queue
+    rag        Manage RAG context store
+    events     Manage event store
+    diversity  Check model diversity
+    reaper     Process reaper controls
+    status     Show system summary
+
+Run "tri-agent-admin <command> --help" for command-specific help.
+EOF
+}
+
+queue_help() {
+    cat <<EOF
+tri-agent-admin queue
+
+USAGE:
+    tri-agent-admin queue add --priority HIGH --text "..."
+    tri-agent-admin queue add --priority HIGH --file task.md [--copy]
+    tri-agent-admin queue list
+    tri-agent-admin queue next
+    tri-agent-admin queue escalate
+    tri-agent-admin queue preempt --priority CRITICAL [--reason "..."]
+    tri-agent-admin queue current
+EOF
+}
+
+rag_help() {
+    cat <<EOF
+tri-agent-admin rag
+
+USAGE:
+    tri-agent-admin rag add --source "..." --text "..." [--tags "tag1,tag2"]
+    tri-agent-admin rag add --source "..." --file notes.txt [--tags "..."]
+    tri-agent-admin rag search "query" [--limit 5]
+    tri-agent-admin rag inject "query" [--limit 5] [--full]
+    tri-agent-admin rag rollup [--limit 20] [--max-chars 2000]
+EOF
+}
+
+events_help() {
+    cat <<EOF
+tri-agent-admin events
+
+USAGE:
+    tri-agent-admin events append --type TYPE --payload '{"key":"value"}'
+    tri-agent-admin events append --type TYPE --payload-file payload.json
+    tri-agent-admin events query [--since ISO] [--until ISO] [--type TYPE] [--limit N]
+    tri-agent-admin events rebuild --projection name [--handler count_by_type]
+EOF
+}
+
+diversity_help() {
+    cat <<EOF
+tri-agent-admin diversity
+
+USAGE:
+    tri-agent-admin diversity score [models...]
+    tri-agent-admin diversity select [count] [models...]
+    tri-agent-admin diversity report [count] [models...]
+EOF
+}
+
+reaper_help() {
+    cat <<EOF
+tri-agent-admin reaper
+
+USAGE:
+    tri-agent-admin reaper run [--once|--daemon]
+    tri-agent-admin reaper install-cron
+    tri-agent-admin reaper uninstall-cron
+    tri-agent-admin reaper status
+EOF
+}
+
+status_summary() {
+    echo "Queue:"
+    pq_list || true
+
+    echo "RAG entries: $(rag_stats 2>/dev/null || echo 0)"
+    echo "Events: $(event_store_stats 2>/dev/null || echo 0)"
+}
+
+require_arg() {
+    local arg="$1"
+    local name="$2"
+    if [[ -z "$arg" ]]; then
+        log_error "Missing value for $name"
+        exit 1
+    fi
+}
+
+cmd_queue() {
+    local sub="${1:-}"
+    shift || true
+
+    case "$sub" in
+        add)
+            local priority="MEDIUM"
+            local text=""
+            local file=""
+            local copy=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --priority|-p)
+                        priority="$2"
+                        shift 2
+                        ;;
+                    --text|-t)
+                        text="$2"
+                        shift 2
+                        ;;
+                    --file|-f)
+                        file="$2"
+                        shift 2
+                        ;;
+                    --copy)
+                        copy=true
+                        shift
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+
+            if [[ -n "$file" ]]; then
+                local mode="move"
+                [[ "$copy" == "true" ]] && mode="copy"
+                pq_enqueue_file "$priority" "$file" "$mode"
+            elif [[ -n "$text" ]]; then
+                pq_enqueue_text "$priority" "$text"
+            else
+                log_error "Provide --text or --file"
+                exit 1
+            fi
+            ;;
+        list)
+            pq_list
+            ;;
+        next)
+            pq_next_task || true
+            ;;
+        escalate)
+            pq_escalate_waiting
+            ;;
+        preempt)
+            local priority=""
+            local reason="preemption"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --priority|-p)
+                        priority="$2"
+                        shift 2
+                        ;;
+                    --reason)
+                        reason="$2"
+                        shift 2
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            require_arg "$priority" "--priority"
+            if pq_preempt_if_needed "$priority" "$reason"; then
+                echo "Preempted current task"
+            else
+                echo "No preemption performed"
+            fi
+            ;;
+        current)
+            local current
+            current=$(pq_get_current_path || true)
+            if [[ -n "$current" ]]; then
+                echo "$current"
+            else
+                echo "No current task"
+            fi
+            ;;
+        --help|-h|"")
+            queue_help
+            ;;
+        *)
+            log_error "Unknown queue subcommand: $sub"
+            queue_help
+            exit 1
+            ;;
+    esac
+}
+
+cmd_rag() {
+    local sub="${1:-}"
+    shift || true
+
+    case "$sub" in
+        add)
+            local source=""
+            local tags=""
+            local text=""
+            local file=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --source)
+                        source="$2"
+                        shift 2
+                        ;;
+                    --tags)
+                        tags="$2"
+                        shift 2
+                        ;;
+                    --text)
+                        text="$2"
+                        shift 2
+                        ;;
+                    --file)
+                        file="$2"
+                        shift 2
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            require_arg "$source" "--source"
+            if [[ -n "$file" ]]; then
+                text=$(cat "$file")
+            fi
+            require_arg "$text" "--text or --file"
+            rag_add_context "$source" "$text" "$tags"
+            ;;
+        search)
+            local query="${1:-}"
+            shift || true
+            local limit="5"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --limit)
+                        limit="$2"
+                        shift 2
+                        ;;
+                    *)
+                        shift
+                        ;;
+                esac
+            done
+            require_arg "$query" "query"
+            rag_search "$query" "$limit"
+            ;;
+        inject)
+            local query="${1:-}"
+            shift || true
+            local limit="5"
+            local full="0"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --limit)
+                        limit="$2"
+                        shift 2
+                        ;;
+                    --full)
+                        full="1"
+                        shift
+                        ;;
+                    *)
+                        shift
+                        ;;
+                esac
+            done
+            require_arg "$query" "query"
+            rag_inject_context "$query" "$limit" "$full"
+            ;;
+        rollup)
+            local limit="20"
+            local max_chars="2000"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --limit)
+                        limit="$2"
+                        shift 2
+                        ;;
+                    --max-chars)
+                        max_chars="$2"
+                        shift 2
+                        ;;
+                    *)
+                        shift
+                        ;;
+                esac
+            done
+            rag_memory_rollup "$limit" "$max_chars"
+            ;;
+        --help|-h|"")
+            rag_help
+            ;;
+        *)
+            log_error "Unknown rag subcommand: $sub"
+            rag_help
+            exit 1
+            ;;
+    esac
+}
+
+cmd_events() {
+    local sub="${1:-}"
+    shift || true
+
+    case "$sub" in
+        append)
+            local type=""
+            local payload="{}"
+            local payload_file=""
+            local metadata="{}"
+            local metadata_file=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --type)
+                        type="$2"
+                        shift 2
+                        ;;
+                    --payload)
+                        payload="$2"
+                        shift 2
+                        ;;
+                    --payload-file)
+                        payload_file="$2"
+                        shift 2
+                        ;;
+                    --metadata)
+                        metadata="$2"
+                        shift 2
+                        ;;
+                    --metadata-file)
+                        metadata_file="$2"
+                        shift 2
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            require_arg "$type" "--type"
+            if [[ -n "$payload_file" ]]; then
+                payload=$(cat "$payload_file")
+            fi
+            if [[ -n "$metadata_file" ]]; then
+                metadata=$(cat "$metadata_file")
+            fi
+            event_append "$type" "$payload" "$metadata"
+            ;;
+        query)
+            local since=""
+            local until=""
+            local type=""
+            local limit=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --since)
+                        since="$2"
+                        shift 2
+                        ;;
+                    --until)
+                        until="$2"
+                        shift 2
+                        ;;
+                    --type)
+                        type="$2"
+                        shift 2
+                        ;;
+                    --limit)
+                        limit="$2"
+                        shift 2
+                        ;;
+                    *)
+                        shift
+                        ;;
+                esac
+            done
+            event_store_query "$since" "$until" "$type" "$limit"
+            ;;
+        rebuild)
+            local projection=""
+            local handler="event_projection_handler_count_by_type"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --projection)
+                        projection="$2"
+                        shift 2
+                        ;;
+                    --handler)
+                        handler="$2"
+                        shift 2
+                        ;;
+                    *)
+                        shift
+                        ;;
+                esac
+            done
+            require_arg "$projection" "--projection"
+            case "$handler" in
+                count_by_type) handler="event_projection_handler_count_by_type" ;;
+            esac
+            event_projection_rebuild "$projection" "$handler"
+            ;;
+        --help|-h|"")
+            events_help
+            ;;
+        *)
+            log_error "Unknown events subcommand: $sub"
+            events_help
+            exit 1
+            ;;
+    esac
+}
+
+cmd_diversity() {
+    local sub="${1:-}"
+    shift || true
+
+    case "$sub" in
+        score)
+            diversity_score "$@"
+            ;;
+        select)
+            local count="${1:-3}"
+            shift || true
+            diversity_select "$count" "$@"
+            ;;
+        report)
+            local count="${1:-3}"
+            shift || true
+            diversity_report "$count" "$@"
+            echo ""
+            ;;
+        --help|-h|"")
+            diversity_help
+            ;;
+        *)
+            log_error "Unknown diversity subcommand: $sub"
+            diversity_help
+            exit 1
+            ;;
+    esac
+}
+
+cmd_reaper() {
+    local sub="${1:-}"
+    shift || true
+
+    local reaper="${BIN_DIR}/process-reaper"
+    if [[ ! -x "$reaper" ]]; then
+        log_error "process-reaper not found at $reaper"
+        exit 1
+    fi
+
+    case "$sub" in
+        run)
+            "$reaper" "$@"
+            ;;
+        install-cron)
+            "$reaper" --install-cron
+            ;;
+        uninstall-cron)
+            "$reaper" --uninstall-cron
+            ;;
+        status)
+            "$reaper" --status
+            ;;
+        --help|-h|"")
+            reaper_help
+            ;;
+        *)
+            log_error "Unknown reaper subcommand: $sub"
+            reaper_help
+            exit 1
+            ;;
+    esac
+}
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        queue)
+            cmd_queue "$@"
+            ;;
+        rag)
+            cmd_rag "$@"
+            ;;
+        events)
+            cmd_events "$@"
+            ;;
+        diversity)
+            cmd_diversity "$@"
+            ;;
+        reaper)
+            cmd_reaper "$@"
+            ;;
+        status)
+            status_summary
+            ;;
+        --help|-h|"")
+            usage
+            ;;
+        *)
+            log_error "Unknown command: $cmd"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

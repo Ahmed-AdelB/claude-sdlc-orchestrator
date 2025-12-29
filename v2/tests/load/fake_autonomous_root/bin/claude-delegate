@@ -1,0 +1,5 @@
+#!/bin/bash
+sleep 0.2
+echo 'Simulated output' > "$1"
+echo 'Simulated success'
+exit 0

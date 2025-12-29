@@ -1,24 +1,28 @@
 #!/bin/bash
-#===============================================================================
-# tri-agent-dashboard - Real-time TUI dashboard for tri-agent system
-#===============================================================================
-# Usage:
-#   tri-agent-dashboard           Start dashboard with auto-refresh
-#   tri-agent-dashboard --once    Single snapshot (no refresh)
-#   tri-agent-dashboard --help    Show this help
+# =============================================================================
+# tri-agent-dashboard - Real-time status dashboard for tri-agent orchestrator
+# =============================================================================
+# M5-035: Dashboard/CLI status
 #
-# Features:
-#   - Session status (running/stopped)
-#   - Circuit breaker states for all 3 models
-#   - Recent routing decisions (last 5)
-#   - Cost summary (requests, tokens)
-#   - Health status
-#   - Auto-refresh every 5 seconds
-#===============================================================================
+# Provides:
+# - Real-time task queue status (pending/running/completed counts)
+# - Worker health display (heartbeat, model, shard)
+# - Cost tracking summary (daily spend, rate)
+# - Recent activity log (last 10 events)
+# - System health indicators (SQLite, locks, processes)
+#
+# Usage:
+#   tri-agent-dashboard              # Interactive dashboard
+#   tri-agent-dashboard --watch      # Auto-refresh every 5 seconds
+#   tri-agent-dashboard --once       # Print once and exit
+#   tri-agent-dashboard --json       # Output as JSON
+#   tri-agent-dashboard --compact    # Compact single-line status
+# =============================================================================
 
 set -euo pipefail
+IFS=$'\n\t'
 
-# Resolve script location
+# Resolve script directory
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT_PATH" ]]; do
     SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
@@ -28,272 +32,915 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 
-# Paths
-STATE_DIR="${AUTONOMOUS_ROOT}/state"
-LOGS_DIR="${AUTONOMOUS_ROOT}/logs"
-BREAKERS_DIR="${STATE_DIR}/breakers"
-COSTS_DIR="${STATE_DIR}/costs"
+# Source common utilities
+if [[ -f "${AUTONOMOUS_ROOT}/lib/common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${AUTONOMOUS_ROOT}/lib/common.sh" 2>/dev/null || true
+fi
 
-# Configuration
-REFRESH_INTERVAL=5
-ONCE_MODE=false
+# Source SQLite state management
+if [[ -f "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" 2>/dev/null || true
+fi
+
+# State configuration
+STATE_DIR="${STATE_DIR:-${AUTONOMOUS_ROOT}/state}"
+STATE_DB="${STATE_DB:-${STATE_DIR}/tri-agent.db}"
+TASKS_DIR="${TASKS_DIR:-${AUTONOMOUS_ROOT}/tasks}"
+LOGS_DIR="${LOGS_DIR:-${AUTONOMOUS_ROOT}/logs}"
+LOCKS_DIR="${LOCKS_DIR:-${STATE_DIR}/locks}"
+BREAKERS_DIR="${BREAKERS_DIR:-${STATE_DIR}/breakers}"
+COSTS_DIR="${COSTS_DIR:-${STATE_DIR}/costs}"
+
+# Dashboard configuration
+REFRESH_INTERVAL="${REFRESH_INTERVAL:-5}"
+RECENT_EVENTS_COUNT="${RECENT_EVENTS_COUNT:-10}"
 TMUX_SOCKET="tri-agent"
 
-# Colors (with fallback for non-terminal)
+# Mode
+ONCE_MODE=false
+WATCH_MODE=false
+JSON_MODE=false
+COMPACT_MODE=false
+
+# =============================================================================
+# Color Codes
+# =============================================================================
 setup_colors() {
-    if [[ -t 1 ]] && command -v tput &>/dev/null; then
-        RED=$(tput setaf 1)
-        GREEN=$(tput setaf 2)
-        YELLOW=$(tput setaf 3)
-        BLUE=$(tput setaf 4)
-        MAGENTA=$(tput setaf 5)
-        CYAN=$(tput setaf 6)
-        WHITE=$(tput setaf 7)
-        BOLD=$(tput bold)
-        DIM=$(tput dim)
-        RESET=$(tput sgr0)
-        CLEAR=$(tput clear)
+    if [[ -t 1 ]]; then
+        RED='\033[0;31m'
+        GREEN='\033[0;32m'
+        YELLOW='\033[1;33m'
+        BLUE='\033[0;34m'
+        CYAN='\033[0;36m'
+        MAGENTA='\033[0;35m'
+        WHITE='\033[1;37m'
+        GRAY='\033[0;90m'
+        BOLD='\033[1m'
+        DIM='\033[2m'
+        NC='\033[0m'
+        CLEAR='\033c'
     else
-        RED="" GREEN="" YELLOW="" BLUE="" MAGENTA="" CYAN="" WHITE=""
-        BOLD="" DIM="" RESET="" CLEAR=""
+        RED=''
+        GREEN=''
+        YELLOW=''
+        BLUE=''
+        CYAN=''
+        MAGENTA=''
+        WHITE=''
+        GRAY=''
+        BOLD=''
+        DIM=''
+        NC=''
+        CLEAR=''
     fi
 }
 
-# Parse arguments
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --once|-1)
-                ONCE_MODE=true
-                shift
-                ;;
-            --help|-h)
-                show_help
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+# Check if SQLite database is accessible
+check_sqlite() {
+    if ! command -v sqlite3 &>/dev/null; then
+        return 1
+    fi
+    if [[ ! -f "$STATE_DB" ]]; then
+        return 2
+    fi
+    if ! sqlite3 "$STATE_DB" "SELECT 1;" &>/dev/null; then
+        return 3
+    fi
+    return 0
+}
+
+# Format duration in human-readable form
+format_duration() {
+    local seconds="${1:-0}"
+    if [[ -z "$seconds" || "$seconds" == "null" || ! "$seconds" =~ ^[0-9]+$ ]]; then
+        echo "N/A"
+        return
+    fi
+
+    if [[ $seconds -lt 60 ]]; then
+        echo "${seconds}s"
+    elif [[ $seconds -lt 3600 ]]; then
+        local mins=$((seconds / 60))
+        local secs=$((seconds % 60))
+        echo "${mins}m ${secs}s"
+    else
+        local hours=$((seconds / 3600))
+        local mins=$(((seconds % 3600) / 60))
+        echo "${hours}h ${mins}m"
+    fi
+}
+
+# Format timestamp to relative time
+format_relative_time() {
+    local timestamp="$1"
+    if [[ -z "$timestamp" || "$timestamp" == "null" || "$timestamp" == "" ]]; then
+        echo "never"
+        return
+    fi
+
+    local now then diff
+    now=$(date +%s)
+    then=$(date -d "$timestamp" +%s 2>/dev/null || echo "$now")
+    diff=$((now - then))
+
+    if [[ $diff -lt 0 ]]; then
+        echo "future"
+    elif [[ $diff -lt 60 ]]; then
+        echo "${diff}s ago"
+    elif [[ $diff -lt 3600 ]]; then
+        echo "$((diff / 60))m ago"
+    elif [[ $diff -lt 86400 ]]; then
+        echo "$((diff / 3600))h ago"
+    else
+        echo "$((diff / 86400))d ago"
+    fi
+}
+
+# Get status color
+get_status_color() {
+    local status="$1"
+    case "$status" in
+        QUEUED|pending|idle)     echo -n "${YELLOW}" ;;
+        RUNNING|busy|starting)   echo -n "${CYAN}" ;;
+        COMPLETED|success)       echo -n "${GREEN}" ;;
+        FAILED|dead|error)       echo -n "${RED}" ;;
+        REVIEW|PAUSED|stopping)  echo -n "${MAGENTA}" ;;
+        APPROVED)                echo -n "${GREEN}" ;;
+        REJECTED|TIMEOUT)        echo -n "${RED}" ;;
+        ESCALATED)               echo -n "${YELLOW}" ;;
+        CLOSED)                  echo -n "${GREEN}" ;;
+        OPEN)                    echo -n "${RED}" ;;
+        HALF_OPEN)               echo -n "${YELLOW}" ;;
+        stale)                   echo -n "${GRAY}" ;;
+        *)                       echo -n "${NC}" ;;
+    esac
+}
+
+# =============================================================================
+# Data Retrieval Functions
+# =============================================================================
+
+# Get task queue statistics from SQLite
+get_task_stats() {
+    if ! check_sqlite; then
+        echo "0|0|0|0|0|0|0|0"
+        return
+    fi
+
+    sqlite3 -separator '|' "$STATE_DB" <<'SQL' 2>/dev/null || echo "0|0|0|0|0|0|0|0"
+SELECT
+    COALESCE(SUM(CASE WHEN state='QUEUED' THEN 1 ELSE 0 END), 0) as queued,
+    COALESCE(SUM(CASE WHEN state='RUNNING' THEN 1 ELSE 0 END), 0) as running,
+    COALESCE(SUM(CASE WHEN state='COMPLETED' THEN 1 ELSE 0 END), 0) as completed,
+    COALESCE(SUM(CASE WHEN state='FAILED' THEN 1 ELSE 0 END), 0) as failed,
+    COALESCE(SUM(CASE WHEN state='REVIEW' THEN 1 ELSE 0 END), 0) as review,
+    COALESCE(SUM(CASE WHEN state='ESCALATED' THEN 1 ELSE 0 END), 0) as escalated,
+    COALESCE(SUM(CASE WHEN state='TIMEOUT' THEN 1 ELSE 0 END), 0) as timeout,
+    COUNT(*) as total
+FROM tasks;
+SQL
+}
+
+# Get task stats from file system as fallback
+get_task_stats_fs() {
+    local queued=0 running=0 completed=0 failed=0
+
+    if [[ -d "${TASKS_DIR}/queue" ]]; then
+        queued=$(find "${TASKS_DIR}/queue" -maxdepth 1 -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    if [[ -d "${TASKS_DIR}/running" ]]; then
+        running=$(find "${TASKS_DIR}/running" -maxdepth 1 -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    if [[ -d "${TASKS_DIR}/completed" ]]; then
+        completed=$(find "${TASKS_DIR}/completed" -maxdepth 1 -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    if [[ -d "${TASKS_DIR}/failed" ]]; then
+        failed=$(find "${TASKS_DIR}/failed" -maxdepth 1 -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+
+    local total=$((queued + running + completed + failed))
+    echo "${queued}|${running}|${completed}|${failed}|0|0|0|${total}"
+}
+
+# Get worker health information
+get_worker_health() {
+    if ! check_sqlite; then
+        echo ""
+        return
+    fi
+
+    sqlite3 -separator '|' "$STATE_DB" <<'SQL' 2>/dev/null || echo ""
+SELECT
+    w.worker_id,
+    COALESCE(w.status, 'unknown') as status,
+    COALESCE(w.model, '-') as model,
+    COALESCE(w.shard, '-') as shard,
+    w.last_heartbeat,
+    COALESCE(w.tasks_completed, 0) as completed,
+    COALESCE(w.tasks_failed, 0) as failed,
+    COALESCE(h.task_id, '-') as current_task,
+    COALESCE(h.progress_percent, 0) as progress
+FROM workers w
+LEFT JOIN worker_heartbeats h ON w.worker_id = h.worker_id
+WHERE w.status != 'dead' OR w.last_heartbeat > datetime('now', '-1 hour')
+ORDER BY w.last_heartbeat DESC
+LIMIT 8;
+SQL
+}
+
+# Get cost summary for today
+get_daily_cost_summary() {
+    if ! check_sqlite; then
+        echo "0|0|0|0|0|0|0"
+        return
+    fi
+
+    sqlite3 -separator '|' "$STATE_DB" <<'SQL' 2>/dev/null || echo "0|0|0|0|0|0|0"
+SELECT
+    COALESCE(COUNT(*), 0) as requests,
+    COALESCE(SUM(input_tokens), 0) as input_tokens,
+    COALESCE(SUM(output_tokens), 0) as output_tokens,
+    COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) as avg_duration,
+    COALESCE(SUM(CASE WHEN model='claude' THEN 1 ELSE 0 END), 0) as claude_requests,
+    COALESCE(SUM(CASE WHEN model='gemini' THEN 1 ELSE 0 END), 0) as gemini_requests,
+    COALESCE(SUM(CASE WHEN model='codex' THEN 1 ELSE 0 END), 0) as codex_requests
+FROM costs
+WHERE date(timestamp) = date('now');
+SQL
+}
+
+# Get recent events from SQLite
+get_recent_events() {
+    local limit="${1:-$RECENT_EVENTS_COUNT}"
+
+    if ! check_sqlite; then
+        echo ""
+        return
+    fi
+
+    sqlite3 -separator '|' "$STATE_DB" <<SQL 2>/dev/null || echo ""
+SELECT
+    timestamp,
+    event_type,
+    actor,
+    COALESCE(task_id, '-') as task_id,
+    SUBSTR(COALESCE(payload, ''), 1, 40) as payload
+FROM events
+ORDER BY id DESC
+LIMIT $limit;
+SQL
+}
+
+# Get circuit breaker status from SQLite or files
+get_circuit_breaker_status() {
+    # Try SQLite first
+    if check_sqlite; then
+        local result
+        result=$(sqlite3 -separator '|' "$STATE_DB" "SELECT model, state, failure_count, last_failure, last_success FROM breakers;" 2>/dev/null)
+        if [[ -n "$result" ]]; then
+            echo "$result"
+            return
+        fi
+    fi
+
+    # Fallback to file-based breakers
+    local output=""
+    for model in claude gemini codex; do
+        local state_file="${BREAKERS_DIR}/${model}.state"
+        if [[ -f "$state_file" ]]; then
+            local state failure_count last_failure last_success
+            state=$(grep -E "^state=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "CLOSED")
+            failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "0")
+            last_failure=$(grep -E "^last_failure=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "")
+            last_success=$(grep -E "^last_success=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "")
+            output+="${model}|${state}|${failure_count}|${last_failure}|${last_success}"$'\n'
+        else
+            output+="${model}|CLOSED|0||"$'\n'
+        fi
+    done
+    echo "$output"
+}
+
+# Get system health indicators
+get_system_health() {
+    local health_status=""
+
+    # Check SQLite
+    if check_sqlite; then
+        health_status+="sqlite:OK|"
+    else
+        local code=$?
+        case $code in
+            1) health_status+="sqlite:NO_BINARY|" ;;
+            2) health_status+="sqlite:NO_DB|" ;;
+            3) health_status+="sqlite:ERROR|" ;;
+            *) health_status+="sqlite:UNKNOWN|" ;;
+        esac
+    fi
+
+    # Check active locks
+    local lock_count=0
+    if [[ -d "$LOCKS_DIR" ]]; then
+        lock_count=$(find "$LOCKS_DIR" -type f -name "*.lock" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    health_status+="locks:${lock_count}|"
+
+    # Check stale lock files (older than 30 minutes)
+    local stale_locks=0
+    if [[ -d "$LOCKS_DIR" ]]; then
+        stale_locks=$(find "$LOCKS_DIR" -type f -name "*.lock" -mmin +30 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    health_status+="stale_locks:${stale_locks}|"
+
+    # Check running processes (tri-agent related)
+    local tri_procs=0
+    tri_procs=$(pgrep -c -f "tri-agent" 2>/dev/null || echo "0")
+    health_status+="tri_procs:${tri_procs}|"
+
+    # Check disk space
+    local disk_usage="unknown"
+    if command -v df &>/dev/null && [[ -d "$STATE_DIR" ]]; then
+        disk_usage=$(df -h "$STATE_DIR" 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%' || echo "unknown")
+    fi
+    health_status+="disk:${disk_usage}"
+
+    echo "$health_status"
+}
+
+# Get session status
+get_session_status() {
+    if tmux -L "$TMUX_SOCKET" list-sessions 2>/dev/null | grep -q "tri-agent"; then
+        local session_info
+        session_info=$(tmux -L "$TMUX_SOCKET" list-sessions 2>/dev/null | grep "tri-agent" | head -1)
+        echo "RUNNING|$session_info"
+    else
+        echo "STOPPED|"
+    fi
+}
+
+# =============================================================================
+# Display Functions
+# =============================================================================
+
+# Draw the dashboard header with ASCII art
+draw_header() {
+    local width=74
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    echo -e "${BOLD}${BLUE}"
+    echo "+========================================================================+"
+    echo "|                                                                        |"
+    echo "|   ████████╗██████╗ ██╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗|"
+    echo "|   ╚══██╔══╝██╔══██╗██║      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝|"
+    echo "|      ██║   ██████╔╝██║█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   |"
+    echo "|      ██║   ██╔══██╗██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   |"
+    echo "|      ██║   ██║  ██║██║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   |"
+    echo "|      ╚═╝   ╚═╝  ╚═╝╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   |"
+    echo "|                        ORCHESTRATOR DASHBOARD                          |"
+    echo "|                                                                        |"
+    echo "+========================================================================+"
+    echo -e "${NC}"
+    echo -e "  ${DIM}Updated: ${timestamp}  |  Refresh: ${REFRESH_INTERVAL}s  |  Press [q] quit [r] refresh${NC}"
+    echo ""
+}
+
+# Draw task queue section
+draw_task_queue() {
+    echo -e "${BOLD}${WHITE}  TASK QUEUE${NC}"
+    echo -e "  ${DIM}$(printf '%.0s-' {1..72})${NC}"
+
+    # Get stats from SQLite or fallback to filesystem
+    local stats
+    stats=$(get_task_stats)
+    if [[ "$stats" == "0|0|0|0|0|0|0|0" ]]; then
+        stats=$(get_task_stats_fs)
+    fi
+
+    IFS='|' read -r queued running completed failed review escalated timeout total <<< "$stats"
+
+    # Task status display with colors
+    echo ""
+    printf "  ${YELLOW}%-15s${NC} ${CYAN}%-15s${NC} ${GREEN}%-15s${NC} ${RED}%-15s${NC}\n" \
+           "QUEUED" "RUNNING" "COMPLETED" "FAILED"
+    printf "  ${YELLOW}%-15s${NC} ${CYAN}%-15s${NC} ${GREEN}%-15s${NC} ${RED}%-15s${NC}\n" \
+           "  $queued" "  $running" "  $completed" "  $failed"
+
+    # Additional statuses if non-zero
+    if [[ "${review:-0}" != "0" || "${escalated:-0}" != "0" || "${timeout:-0}" != "0" ]]; then
+        echo ""
+        printf "  ${MAGENTA}%-15s${NC} ${YELLOW}%-15s${NC} ${RED}%-15s${NC}\n" \
+               "REVIEW" "ESCALATED" "TIMEOUT"
+        printf "  ${MAGENTA}%-15s${NC} ${YELLOW}%-15s${NC} ${RED}%-15s${NC}\n" \
+               "  $review" "  $escalated" "  $timeout"
+    fi
+
+    # Visual progress bar
+    if [[ "${total:-0}" -gt 0 ]]; then
+        local bar_width=50
+        local active=$((queued + running + review))
+        local done=$((completed + failed + escalated + timeout))
+        local done_pct=$((done * bar_width / total))
+        local active_pct=$((active * bar_width / total))
+
+        [[ $((done_pct + active_pct)) -gt $bar_width ]] && active_pct=$((bar_width - done_pct))
+        local remain_pct=$((bar_width - done_pct - active_pct))
+        [[ $remain_pct -lt 0 ]] && remain_pct=0
+
+        local done_bar="" active_bar="" remain_bar=""
+        for ((i=0; i<done_pct; i++)); do done_bar+="#"; done
+        for ((i=0; i<active_pct; i++)); do active_bar+="="; done
+        for ((i=0; i<remain_pct; i++)); do remain_bar+="."; done
+
+        echo ""
+        printf "  [${GREEN}%s${CYAN}%s${GRAY}%s${NC}] %d/%d tasks\n" \
+               "$done_bar" "$active_bar" "$remain_bar" "$done" "$total"
+    fi
+
+    echo ""
+}
+
+# Draw worker health section
+draw_worker_health() {
+    echo -e "${BOLD}${WHITE}  WORKER HEALTH${NC}"
+    echo -e "  ${DIM}$(printf '%.0s-' {1..72})${NC}"
+
+    local workers
+    workers=$(get_worker_health)
+
+    if [[ -z "$workers" ]]; then
+        echo -e "  ${DIM}No active workers found${NC}"
+        echo ""
+        return
+    fi
+
+    # Header
+    printf "  ${DIM}%-18s %-8s %-8s %-6s %-12s %-10s${NC}\n" \
+           "WORKER ID" "STATUS" "MODEL" "SHARD" "HEARTBEAT" "DONE/FAIL"
+
+    # Worker rows
+    while IFS='|' read -r worker_id status model shard heartbeat completed failed current_task progress; do
+        [[ -z "$worker_id" ]] && continue
+
+        local status_color hb_display task_count
+        status_color=$(get_status_color "$status")
+        hb_display=$(format_relative_time "$heartbeat")
+        task_count="${completed:-0}/${failed:-0}"
+
+        # Truncate worker ID if too long
+        if [[ ${#worker_id} -gt 18 ]]; then
+            worker_id="${worker_id:0:15}..."
+        fi
+
+        printf "  %-18s ${status_color}%-8s${NC} %-8s %-6s %-12s %-10s\n" \
+               "$worker_id" "$status" "${model:-?}" "${shard:--}" "$hb_display" "$task_count"
+
+        # Show current task if busy
+        if [[ "$status" == "busy" && "$current_task" != "-" && -n "$current_task" ]]; then
+            printf "  ${DIM}  -> Task: %s (%d%%)${NC}\n" "$current_task" "${progress:-0}"
+        fi
+    done <<< "$workers"
+
+    echo ""
+}
+
+# Draw cost tracking section
+draw_cost_tracking() {
+    echo -e "${BOLD}${WHITE}  COST TRACKING (Today)${NC}"
+    echo -e "  ${DIM}$(printf '%.0s-' {1..72})${NC}"
+
+    local costs
+    costs=$(get_daily_cost_summary)
+
+    IFS='|' read -r requests input_tokens output_tokens avg_duration claude_req gemini_req codex_req <<< "$costs"
+
+    # Handle empty values
+    requests="${requests:-0}"
+    input_tokens="${input_tokens:-0}"
+    output_tokens="${output_tokens:-0}"
+    avg_duration="${avg_duration:-0}"
+    claude_req="${claude_req:-0}"
+    gemini_req="${gemini_req:-0}"
+    codex_req="${codex_req:-0}"
+
+    # Format token counts
+    local input_k=$((input_tokens / 1000))
+    local output_k=$((output_tokens / 1000))
+    local total_tokens=$((input_tokens + output_tokens))
+    local total_k=$((total_tokens / 1000))
+
+    # Format average duration
+    local avg_dur_sec=$((avg_duration / 1000))
+
+    echo ""
+    printf "  ${CYAN}Requests:${NC} %-8s  ${CYAN}Avg Duration:${NC} %s\n" \
+           "$requests" "$(format_duration $avg_dur_sec)"
+    printf "  ${CYAN}Tokens:${NC}   %dK input / %dK output = ${BOLD}%dK total${NC}\n" \
+           "$input_k" "$output_k" "$total_k"
+    echo ""
+    printf "  ${DIM}By Model:${NC}  Claude: %-6s  Gemini: %-6s  Codex: %-6s\n" \
+           "$claude_req" "$gemini_req" "$codex_req"
+
+    echo ""
+}
+
+# Draw circuit breaker section
+draw_circuit_breakers() {
+    echo -e "${BOLD}${WHITE}  CIRCUIT BREAKERS${NC}"
+    echo -e "  ${DIM}$(printf '%.0s-' {1..72})${NC}"
+
+    local breakers
+    breakers=$(get_circuit_breaker_status)
+
+    if [[ -z "$breakers" ]]; then
+        echo -e "  ${GREEN}All circuits CLOSED (healthy)${NC}"
+        echo ""
+        return
+    fi
+
+    printf "  ${DIM}%-10s %-12s %-10s %-16s${NC}\n" \
+           "MODEL" "STATE" "FAILURES" "LAST FAILURE"
+
+    while IFS='|' read -r model state failures last_failure last_success; do
+        [[ -z "$model" ]] && continue
+
+        local state_color
+        state_color=$(get_status_color "$state")
+        local fail_time
+        fail_time=$(format_relative_time "$last_failure")
+
+        printf "  %-10s ${state_color}%-12s${NC} %-10s %-16s\n" \
+               "$model" "${state:-CLOSED}" "${failures:-0}" "$fail_time"
+    done <<< "$breakers"
+
+    echo ""
+}
+
+# Draw recent activity section
+draw_recent_activity() {
+    echo -e "${BOLD}${WHITE}  RECENT ACTIVITY (last $RECENT_EVENTS_COUNT)${NC}"
+    echo -e "  ${DIM}$(printf '%.0s-' {1..72})${NC}"
+
+    local events
+    events=$(get_recent_events)
+
+    if [[ -z "$events" ]]; then
+        echo -e "  ${DIM}No recent events${NC}"
+        echo ""
+        return
+    fi
+
+    while IFS='|' read -r timestamp event_type actor task_id payload; do
+        [[ -z "$timestamp" ]] && continue
+
+        local time_display
+        time_display=$(format_relative_time "$timestamp")
+
+        # Color code by event type
+        local event_color="${NC}"
+        case "$event_type" in
+            STATE_COMPLETED|TASK_COMPLETED)   event_color="${GREEN}" ;;
+            STATE_FAILED|TASK_FAILED|ERROR)   event_color="${RED}" ;;
+            STATE_RUNNING|TASK_STARTED)       event_color="${CYAN}" ;;
+            STATE_QUEUED|TASK_QUEUED)         event_color="${YELLOW}" ;;
+            STATE_ESCALATED|ESCALATION)       event_color="${MAGENTA}" ;;
+            RECOVERY|TASK_RECOVERED)          event_color="${YELLOW}" ;;
+            *)                                event_color="${DIM}" ;;
+        esac
+
+        # Truncate event type if too long
+        local event_display="$event_type"
+        if [[ ${#event_type} -gt 18 ]]; then
+            event_display="${event_type:0:15}..."
+        fi
+
+        printf "  ${DIM}%-10s${NC} ${event_color}%-18s${NC} %-10s ${DIM}%s${NC}\n" \
+               "$time_display" "$event_display" "${actor:-sys}" "${task_id:--}"
+    done <<< "$events"
+
+    echo ""
+}
+
+# Draw system health section
+draw_system_health() {
+    echo -e "${BOLD}${WHITE}  SYSTEM HEALTH${NC}"
+    echo -e "  ${DIM}$(printf '%.0s-' {1..72})${NC}"
+
+    local health
+    health=$(get_system_health)
+
+    echo ""
+
+    # Parse health indicators
+    local sqlite_status="" lock_count="" stale_locks="" procs="" disk=""
+
+    IFS='|' read -r sqlite_part locks_part stale_part procs_part disk_part <<< "$health"
+
+    sqlite_status="${sqlite_part#sqlite:}"
+    lock_count="${locks_part#locks:}"
+    stale_locks="${stale_part#stale_locks:}"
+    procs="${procs_part#tri_procs:}"
+    disk="${disk_part#disk:}"
+
+    # SQLite status
+    if [[ "$sqlite_status" == "OK" ]]; then
+        printf "  ${GREEN}[OK]${NC}  SQLite Database\n"
+    else
+        printf "  ${RED}[!!]${NC}  SQLite Database: ${sqlite_status}\n"
+    fi
+
+    # Lock status
+    if [[ "${stale_locks:-0}" == "0" ]]; then
+        printf "  ${GREEN}[OK]${NC}  File Locks (${lock_count:-0} active)\n"
+    else
+        printf "  ${YELLOW}[!!]${NC}  File Locks (${lock_count:-0} active, ${stale_locks} stale)\n"
+    fi
+
+    # Process status
+    if [[ "${procs:-0}" != "0" ]]; then
+        printf "  ${GREEN}[OK]${NC}  Tri-Agent Processes: ${procs}\n"
+    else
+        printf "  ${DIM}[--]${NC}  Tri-Agent Processes: ${procs:-0}\n"
+    fi
+
+    # Session status
+    local session_info
+    session_info=$(get_session_status)
+    IFS='|' read -r session_status session_details <<< "$session_info"
+    if [[ "$session_status" == "RUNNING" ]]; then
+        printf "  ${GREEN}[OK]${NC}  Tmux Session: RUNNING\n"
+    else
+        printf "  ${DIM}[--]${NC}  Tmux Session: STOPPED\n"
+    fi
+
+    # Disk status
+    if [[ "$disk" != "unknown" && -n "$disk" ]]; then
+        local disk_num="${disk%\%}"
+        if [[ "$disk_num" =~ ^[0-9]+$ ]]; then
+            if [[ "$disk_num" -lt 80 ]]; then
+                printf "  ${GREEN}[OK]${NC}  Disk Usage: ${disk}%%\n"
+            elif [[ "$disk_num" -lt 90 ]]; then
+                printf "  ${YELLOW}[!!]${NC}  Disk Usage: ${disk}%%\n"
+            else
+                printf "  ${RED}[!!]${NC}  Disk Usage: ${disk}%%\n"
+            fi
+        fi
+    fi
+
+    echo ""
+}
+
+# Draw footer
+draw_footer() {
+    echo -e "  ${DIM}$(printf '%.0s-' {1..72})${NC}"
+    echo -e "  ${DIM}Keys: [q] Quit  [r] Refresh  [c] Clear stale locks  [h] Help${NC}"
+    echo ""
+}
+
+# =============================================================================
+# Output Modes
+# =============================================================================
+
+# Full dashboard display
+show_dashboard() {
+    echo -e "$CLEAR"
+    draw_header
+    draw_task_queue
+    draw_worker_health
+    draw_cost_tracking
+    draw_circuit_breakers
+    draw_recent_activity
+    draw_system_health
+    draw_footer
+}
+
+# Compact single-line status
+show_compact() {
+    local stats
+    stats=$(get_task_stats)
+    if [[ "$stats" == "0|0|0|0|0|0|0|0" ]]; then
+        stats=$(get_task_stats_fs)
+    fi
+
+    IFS='|' read -r queued running completed failed review escalated timeout total <<< "$stats"
+
+    local health
+    health=$(get_system_health)
+    local sqlite_part
+    IFS='|' read -r sqlite_part _ <<< "$health"
+    local sqlite_status="${sqlite_part#sqlite:}"
+
+    local status_icon="[OK]"
+    if [[ "$sqlite_status" != "OK" ]]; then
+        status_icon="[!!]"
+    fi
+
+    echo "Tri-Agent ${status_icon} | Queue: ${queued:-0} | Running: ${running:-0} | Done: ${completed:-0}/${failed:-0} | Total: ${total:-0}"
+}
+
+# JSON output
+show_json() {
+    local stats
+    stats=$(get_task_stats)
+    if [[ "$stats" == "0|0|0|0|0|0|0|0" ]]; then
+        stats=$(get_task_stats_fs)
+    fi
+
+    IFS='|' read -r queued running completed failed review escalated timeout total <<< "$stats"
+
+    local costs
+    costs=$(get_daily_cost_summary)
+    IFS='|' read -r requests input_tokens output_tokens avg_duration claude_req gemini_req codex_req <<< "$costs"
+
+    local health
+    health=$(get_system_health)
+    IFS='|' read -r sqlite_part locks_part stale_part procs_part disk_part <<< "$health"
+
+    cat <<EOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "trace_id": "${TRACE_ID:-unknown}",
+  "tasks": {
+    "queued": ${queued:-0},
+    "running": ${running:-0},
+    "completed": ${completed:-0},
+    "failed": ${failed:-0},
+    "review": ${review:-0},
+    "escalated": ${escalated:-0},
+    "timeout": ${timeout:-0},
+    "total": ${total:-0}
+  },
+  "costs": {
+    "requests": ${requests:-0},
+    "input_tokens": ${input_tokens:-0},
+    "output_tokens": ${output_tokens:-0},
+    "avg_duration_ms": ${avg_duration:-0},
+    "by_model": {
+      "claude": ${claude_req:-0},
+      "gemini": ${gemini_req:-0},
+      "codex": ${codex_req:-0}
+    }
+  },
+  "health": {
+    "sqlite": "${sqlite_part#sqlite:}",
+    "locks": ${locks_part#locks:},
+    "stale_locks": ${stale_part#stale_locks:},
+    "tri_procs": ${procs_part#tri_procs:},
+    "disk": "${disk_part#disk:}"
+  }
+}
+EOF
+}
+
+# =============================================================================
+# Interactive Mode
+# =============================================================================
+
+interactive_mode() {
+    trap 'echo ""; echo "Dashboard stopped."; exit 0' INT TERM
+
+    while true; do
+        show_dashboard
+
+        read -t "$REFRESH_INTERVAL" -n 1 -s key 2>/dev/null || key=""
+
+        case "$key" in
+            q|Q)
+                echo ""
+                echo "Dashboard stopped."
                 exit 0
                 ;;
-            *)
-                echo "Unknown option: $1"
-                exit 1
+            r|R)
+                # Just refresh
+                ;;
+            c|C)
+                # Clear stale locks
+                if [[ -d "$LOCKS_DIR" ]]; then
+                    find "$LOCKS_DIR" -type f -name "*.lock" -mmin +30 -delete 2>/dev/null || true
+                    echo -e "${GREEN}Stale locks cleared${NC}"
+                    sleep 1
+                fi
+                ;;
+            h|H)
+                show_help
+                read -n 1 -s -r -p "Press any key to continue..."
                 ;;
         esac
     done
 }
 
+# Watch mode - auto-refresh without keyboard input
+watch_mode() {
+    trap 'echo ""; echo "Dashboard stopped."; exit 0' INT TERM
+
+    while true; do
+        show_dashboard
+        sleep "$REFRESH_INTERVAL"
+    done
+}
+
+# =============================================================================
+# Help and Usage
+# =============================================================================
+
 show_help() {
     cat <<EOF
-tri-agent-dashboard - Real-time TUI dashboard
 
-Usage: tri-agent-dashboard [OPTIONS]
+${BOLD}tri-agent-dashboard${NC} - Real-time status dashboard for tri-agent orchestrator
 
-Options:
-  --once, -1    Single snapshot (no auto-refresh)
-  --help, -h    Show this help
+${BOLD}USAGE:${NC}
+    tri-agent-dashboard [OPTIONS]
 
-Dashboard shows:
-  - Session status
-  - Circuit breaker states
-  - Recent routing decisions
-  - Cost/usage summary
-  - System health
+${BOLD}OPTIONS:${NC}
+    -h, --help      Show this help message
+    -w, --watch     Auto-refresh mode (no keyboard input)
+    -o, --once      Print dashboard once and exit
+    -j, --json      Output status as JSON
+    -c, --compact   Compact single-line status
+    -i, --interval  Set refresh interval in seconds (default: 5)
 
-Press Ctrl+C to exit.
+${BOLD}INTERACTIVE KEYS:${NC}
+    q   Quit dashboard
+    r   Force refresh
+    c   Clear stale locks
+    h   Show help
+
+${BOLD}EXAMPLES:${NC}
+    tri-agent-dashboard              # Interactive dashboard
+    tri-agent-dashboard --watch      # Auto-refresh (for monitoring)
+    tri-agent-dashboard --json       # JSON output (for scripting)
+    tri-agent-dashboard --compact    # Single line status
+
+${BOLD}ENVIRONMENT:${NC}
+    STATE_DB              SQLite database path
+    REFRESH_INTERVAL      Default refresh interval (seconds)
+    RECENT_EVENTS_COUNT   Number of events to display
+
 EOF
 }
 
-# Get session status
-get_session_status() {
-    local status
-    if tmux -L "$TMUX_SOCKET" list-sessions 2>/dev/null | grep -q "tri-agent"; then
-        status="${GREEN}RUNNING${RESET}"
-        local session_info
-        session_info=$(tmux -L "$TMUX_SOCKET" list-sessions 2>/dev/null | head -1)
-        echo "$status ($session_info)"
-    else
-        echo "${RED}STOPPED${RESET}"
-    fi
-}
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
-# Get circuit breaker status for a model
-get_breaker_status() {
-    local model="$1"
-    local state_file="${BREAKERS_DIR}/${model}.state"
-
-    if [[ -f "$state_file" ]]; then
-        local state failure_count
-        state=$(grep -E "^state=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "UNKNOWN")
-        failure_count=$(grep -E "^failure_count=" "$state_file" 2>/dev/null | cut -d'=' -f2 || echo "0")
-
-        case "$state" in
-            CLOSED)
-                echo "${GREEN}CLOSED${RESET} (failures: $failure_count)"
-                ;;
-            OPEN)
-                echo "${RED}OPEN${RESET} (failures: $failure_count)"
-                ;;
-            HALF_OPEN)
-                echo "${YELLOW}HALF_OPEN${RESET} (failures: $failure_count)"
-                ;;
-            *)
-                echo "${DIM}$state${RESET}"
-                ;;
-        esac
-    else
-        echo "${DIM}NO DATA${RESET}"
-    fi
-}
-
-# Get recent routing decisions
-get_routing_decisions() {
-    local routing_log="${LOGS_DIR}/routing-decisions.jsonl"
-
-    if [[ -f "$routing_log" ]] && command -v jq &>/dev/null; then
-        tail -5 "$routing_log" 2>/dev/null | while read -r line; do
-            local model confidence reason timestamp
-            model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null)
-            confidence=$(echo "$line" | jq -r '.confidence // 0' 2>/dev/null)
-            reason=$(echo "$line" | jq -r '.reason // "unknown"' 2>/dev/null | cut -c1-40)
-            timestamp=$(echo "$line" | jq -r '.timestamp // ""' 2>/dev/null | cut -c12-19)
-
-            local color
-            case "$model" in
-                claude) color="$BLUE" ;;
-                gemini) color="$GREEN" ;;
-                codex) color="$YELLOW" ;;
-                *) color="$WHITE" ;;
-            esac
-
-            printf "  ${DIM}%s${RESET} ${color}%-7s${RESET} %3d%% %s\n" \
-                "$timestamp" "$model" "$confidence" "$reason"
-        done
-    elif [[ -f "$routing_log" ]]; then
-        tail -5 "$routing_log" 2>/dev/null | while read -r line; do
-            echo "  $line" | cut -c1-70
-        done
-    else
-        echo "  ${DIM}No routing decisions yet${RESET}"
-    fi
-}
-
-# Get cost summary
-get_cost_summary() {
-    local totals_file="${COSTS_DIR}/totals.json"
-
-    if [[ -f "$totals_file" ]] && command -v jq &>/dev/null; then
-        local requests input_tokens output_tokens
-        requests=$(jq -r '.total_requests // 0' "$totals_file" 2>/dev/null)
-        input_tokens=$(jq -r '.total_input_tokens // 0' "$totals_file" 2>/dev/null)
-        output_tokens=$(jq -r '.total_output_tokens // 0' "$totals_file" 2>/dev/null)
-
-        echo "  Requests: ${CYAN}$requests${RESET}"
-        echo "  Input:    ${CYAN}$input_tokens${RESET} tokens"
-        echo "  Output:   ${CYAN}$output_tokens${RESET} tokens"
-
-        # Per-model breakdown
-        for model in claude gemini codex; do
-            local model_requests
-            model_requests=$(jq -r ".by_model.${model}.requests // 0" "$totals_file" 2>/dev/null)
-            if [[ "$model_requests" != "0" && "$model_requests" != "null" ]]; then
-                printf "  %-8s  ${DIM}%s requests${RESET}\n" "$model:" "$model_requests"
-            fi
-        done
-    else
-        echo "  ${DIM}No cost data available${RESET}"
-    fi
-}
-
-# Get health status
-get_health_status() {
-    local health_file="${STATE_DIR}/health.json"
-
-    if [[ -f "$health_file" ]] && command -v jq &>/dev/null; then
-        local status timestamp
-        status=$(jq -r '.status // "UNKNOWN"' "$health_file" 2>/dev/null)
-        timestamp=$(jq -r '.timestamp // ""' "$health_file" 2>/dev/null | cut -c1-19)
-
-        local color
-        case "$status" in
-            OK|HEALTHY) color="$GREEN" ;;
-            DEGRADED) color="$YELLOW" ;;
-            FAIL|CRITICAL) color="$RED" ;;
-            *) color="$WHITE" ;;
-        esac
-
-        echo "  Status: ${color}${status}${RESET}"
-        echo "  ${DIM}Last check: $timestamp${RESET}"
-
-        # Show issues if any
-        local issues
-        issues=$(jq -r '.issues[]? // empty' "$health_file" 2>/dev/null)
-        if [[ -n "$issues" ]]; then
-            echo "  ${YELLOW}Issues:${RESET}"
-            echo "$issues" | while read -r issue; do
-                echo "    ${DIM}- $issue${RESET}"
-            done
-        fi
-    else
-        echo "  ${DIM}No health data available${RESET}"
-    fi
-}
-
-# Draw the dashboard
-draw_dashboard() {
-    local now
-    now=$(date '+%Y-%m-%d %H:%M:%S')
-
-    echo "${CLEAR}"
-    echo "${BOLD}${MAGENTA}╔══════════════════════════════════════════════════════════════════╗${RESET}"
-    echo "${BOLD}${MAGENTA}║          TRI-AGENT DASHBOARD                                     ║${RESET}"
-    echo "${BOLD}${MAGENTA}╚══════════════════════════════════════════════════════════════════╝${RESET}"
-    echo ""
-    echo "${DIM}Updated: $now${RESET}    ${DIM}Refresh: ${REFRESH_INTERVAL}s (Ctrl+C to exit)${RESET}"
-    echo ""
-
-    # Session Status
-    echo "${BOLD}${BLUE}┌─ SESSION ─────────────────────────────────────────────────────────┐${RESET}"
-    echo "  Status: $(get_session_status)"
-    echo ""
-
-    # Circuit Breakers
-    echo "${BOLD}${CYAN}┌─ CIRCUIT BREAKERS ────────────────────────────────────────────────┐${RESET}"
-    printf "  %-10s %s\n" "Claude:" "$(get_breaker_status claude)"
-    printf "  %-10s %s\n" "Gemini:" "$(get_breaker_status gemini)"
-    printf "  %-10s %s\n" "Codex:" "$(get_breaker_status codex)"
-    echo ""
-
-    # Routing Decisions
-    echo "${BOLD}${GREEN}┌─ RECENT ROUTING (last 5) ────────────────────────────────────────┐${RESET}"
-    get_routing_decisions
-    echo ""
-
-    # Cost Summary
-    echo "${BOLD}${YELLOW}┌─ USAGE SUMMARY ───────────────────────────────────────────────────┐${RESET}"
-    get_cost_summary
-    echo ""
-
-    # Health Status
-    echo "${BOLD}${RED}┌─ HEALTH STATUS ───────────────────────────────────────────────────┐${RESET}"
-    get_health_status
-    echo ""
-
-    echo "${DIM}────────────────────────────────────────────────────────────────────${RESET}"
-}
-
-# Main
 main() {
     setup_colors
-    parse_args "$@"
 
-    if [[ "$ONCE_MODE" == "true" ]]; then
-        draw_dashboard
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -w|--watch)
+                WATCH_MODE=true
+                shift
+                ;;
+            -o|--once|-1)
+                ONCE_MODE=true
+                shift
+                ;;
+            -j|--json)
+                JSON_MODE=true
+                shift
+                ;;
+            -c|--compact)
+                COMPACT_MODE=true
+                shift
+                ;;
+            -i|--interval)
+                REFRESH_INTERVAL="${2:-5}"
+                shift 2
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # Determine mode
+    if [[ "$JSON_MODE" == "true" ]]; then
+        show_json
+    elif [[ "$COMPACT_MODE" == "true" ]]; then
+        show_compact
+    elif [[ "$ONCE_MODE" == "true" ]]; then
+        show_dashboard
+    elif [[ "$WATCH_MODE" == "true" ]]; then
+        watch_mode
     else
-        # Trap Ctrl+C for clean exit
-        trap 'echo ""; echo "Dashboard stopped."; exit 0' INT TERM
-
-        while true; do
-            draw_dashboard
-            sleep "$REFRESH_INTERVAL"
-        done
+        interactive_mode
     fi
 }
 
-main "$@"
+# Run main if not sourced
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

@@ -1,0 +1,9 @@
+{
+  "check": "EXE-002",
+  "name": "Test Coverage",
+  "coverage": "N/A",
+  "threshold": 80,
+  "exit_code": 0,
+  "status": "SKIPPED",
+  "reason": "no_coverage_tool"
+}

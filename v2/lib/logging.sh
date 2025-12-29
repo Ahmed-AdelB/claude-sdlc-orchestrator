@@ -16,6 +16,19 @@
 
 # Ensure we have required directories
 : "${LOG_DIR:=$HOME/.claude/autonomous/logs}"
+
+# INC-ARCH-003: Support log separation by execution mode
+if [[ -n "${EXECUTION_MODE:-}" ]]; then
+    # When running in a specific mode (stress-test, dev, etc.),
+    # segregate logs into a subdirectory
+    LOG_DIR="${LOG_DIR}/${EXECUTION_MODE}"
+    
+    # Force update derived paths as they might be pre-set by common.sh
+    SESSION_LOG_DIR="${LOG_DIR}/sessions"
+    ERROR_LOG_DIR="${LOG_DIR}/errors"
+    AUDIT_LOG_DIR="${LOG_DIR}/audit"
+fi
+
 : "${SESSION_LOG_DIR:=$LOG_DIR/sessions}"
 : "${ERROR_LOG_DIR:=$LOG_DIR/errors}"
 : "${AUDIT_LOG_DIR:=$LOG_DIR/audit}"

@@ -1,0 +1,371 @@
+#!/bin/bash
+#===============================================================================
+# tri-24-launch - Launch autonomous 24-hour execution environment
+#===============================================================================
+#
+# This script launches a complete TRI-24 autonomous execution environment
+# using tmux with multiple windows for supervision, workers, and monitoring.
+#
+# Usage:
+#   tri-24-launch                    # Launch and print attach instructions
+#   ATTACH=true tri-24-launch        # Launch and automatically attach
+#   DURATION_HOURS=12 tri-24-launch  # Custom duration
+#   BUDGET_DAILY=50.00 tri-24-launch # Custom budget
+#
+#===============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+# Configuration
+TMUX_SESSION="tri-24"
+DURATION_HOURS="${DURATION_HOURS:-24}"
+BUDGET_DAILY="${BUDGET_DAILY:-75.00}"
+BUDGET_RATE="${BUDGET_RATE:-1.00}"
+ATTACH="${ATTACH:-false}"
+LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+STATE_DIR="${AUTONOMOUS_ROOT}/state"
+TASKS_DIR="${AUTONOMOUS_ROOT}/tasks"
+ARTIFACTS_DIR="${AUTONOMOUS_ROOT}/artifacts"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+#-------------------------------------------------------------------------------
+# Logging functions
+#-------------------------------------------------------------------------------
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+log_header() {
+    echo -e "${CYAN}========================================${NC}"
+    echo -e "${CYAN}$1${NC}"
+    echo -e "${CYAN}========================================${NC}"
+}
+
+#-------------------------------------------------------------------------------
+# Check dependencies
+#-------------------------------------------------------------------------------
+check_dependencies() {
+    log_info "Checking dependencies..."
+
+    local missing=()
+
+    if ! command -v tmux &> /dev/null; then
+        missing+=("tmux")
+    fi
+
+    if ! command -v watch &> /dev/null; then
+        missing+=("watch")
+    fi
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        log_error "Missing dependencies: ${missing[*]}"
+        log_error "Please install them and try again."
+        exit 1
+    fi
+
+    log_success "All dependencies present"
+}
+
+#-------------------------------------------------------------------------------
+# Initialize directory structure
+#-------------------------------------------------------------------------------
+init_directories() {
+    log_info "Initializing directory structure..."
+
+    # State directories
+    mkdir -p "${STATE_DIR}/budget"
+    mkdir -p "${STATE_DIR}/heartbeat"
+
+    # Task directories (queue pipeline)
+    mkdir -p "${TASKS_DIR}/queue"
+    mkdir -p "${TASKS_DIR}/running"
+    mkdir -p "${TASKS_DIR}/review"
+    mkdir -p "${TASKS_DIR}/approved"
+    mkdir -p "${TASKS_DIR}/completed"
+    mkdir -p "${TASKS_DIR}/failed"
+
+    # Logs and artifacts
+    mkdir -p "${LOG_DIR}"
+    mkdir -p "${ARTIFACTS_DIR}"
+
+    log_success "Directory structure initialized at ${AUTONOMOUS_ROOT}"
+}
+
+#-------------------------------------------------------------------------------
+# Kill existing session if running
+#-------------------------------------------------------------------------------
+kill_existing_session() {
+    if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
+        log_warn "Killing existing tmux session: ${TMUX_SESSION}"
+        tmux kill-session -t "${TMUX_SESSION}"
+        sleep 1
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Create tmux session with all windows
+#-------------------------------------------------------------------------------
+create_tmux_session() {
+    log_info "Creating tmux session: ${TMUX_SESSION}"
+
+    # Create session with first window (supervisor)
+    tmux new-session -d -s "${TMUX_SESSION}" -n "supervisor" -x 200 -y 50
+
+    # Set environment variables in session
+    tmux set-environment -t "${TMUX_SESSION}" AUTONOMOUS_ROOT "${AUTONOMOUS_ROOT}"
+    tmux set-environment -t "${TMUX_SESSION}" DURATION_HOURS "${DURATION_HOURS}"
+    tmux set-environment -t "${TMUX_SESSION}" BUDGET_DAILY "${BUDGET_DAILY}"
+    tmux set-environment -t "${TMUX_SESSION}" BUDGET_RATE "${BUDGET_RATE}"
+    tmux set-environment -t "${TMUX_SESSION}" LOG_DIR "${LOG_DIR}"
+    tmux set-environment -t "${TMUX_SESSION}" STATE_DIR "${STATE_DIR}"
+    tmux set-environment -t "${TMUX_SESSION}" TASKS_DIR "${TASKS_DIR}"
+
+    # Create remaining windows
+    tmux new-window -t "${TMUX_SESSION}" -n "worker-claude"
+    tmux new-window -t "${TMUX_SESSION}" -n "worker-codex"
+    tmux new-window -t "${TMUX_SESSION}" -n "worker-gemini"
+    tmux new-window -t "${TMUX_SESSION}" -n "monitor"
+
+    log_success "Tmux session created with 5 windows"
+}
+
+#-------------------------------------------------------------------------------
+# Start processes in each window
+#-------------------------------------------------------------------------------
+start_processes() {
+    log_info "Starting processes in tmux windows..."
+
+    local bin_dir="${AUTONOMOUS_ROOT}/bin"
+
+    #---------------------------------------------------------------------------
+    # Window 0: supervisor - budget-watchdog and tri-agent-supervisor
+    #---------------------------------------------------------------------------
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "cd ${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "export BUDGET_DAILY=${BUDGET_DAILY}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "export BUDGET_RATE=${BUDGET_RATE}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "export DURATION_HOURS=${DURATION_HOURS}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "echo '=== TRI-24 Supervisor Window ===' " C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "echo 'Starting budget-watchdog daemon...'" C-m
+
+    # Start budget-watchdog as daemon (background)
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "if [ -x \"${bin_dir}/budget-watchdog\" ]; then" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "  ${bin_dir}/budget-watchdog --daemon &" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "  echo 'Budget watchdog started (PID: '\$!')'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "else" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "  echo '[WARN] budget-watchdog not found, skipping...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "fi" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "sleep 2" C-m
+
+    # Start tri-agent-supervisor (foreground)
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "echo 'Starting tri-agent-supervisor...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "if [ -x \"${bin_dir}/tri-agent-supervisor\" ]; then" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "  ${bin_dir}/tri-agent-supervisor" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "else" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "  echo '[WARN] tri-agent-supervisor not found'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "  echo 'Supervisor ready - waiting for scripts to be created...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:supervisor" "fi" C-m
+
+    #---------------------------------------------------------------------------
+    # Window 1: worker-claude
+    #---------------------------------------------------------------------------
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "cd ${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "export WORKER_SHARD=0" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "export WORKER_MODEL=claude" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "echo '=== TRI-24 Worker: Claude (Shard 0) ===' " C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "echo 'WORKER_SHARD=0, WORKER_MODEL=claude'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "if [ -x \"${bin_dir}/tri-agent-worker\" ]; then" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "  ${bin_dir}/tri-agent-worker" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "else" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "  echo '[WARN] tri-agent-worker not found'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "  echo 'Worker ready - waiting for scripts to be created...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "fi" C-m
+
+    #---------------------------------------------------------------------------
+    # Window 2: worker-codex
+    #---------------------------------------------------------------------------
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "cd ${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "export WORKER_SHARD=1" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "export WORKER_MODEL=codex" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "echo '=== TRI-24 Worker: Codex (Shard 1) ===' " C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "echo 'WORKER_SHARD=1, WORKER_MODEL=codex'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "if [ -x \"${bin_dir}/tri-agent-worker\" ]; then" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "  ${bin_dir}/tri-agent-worker" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "else" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "  echo '[WARN] tri-agent-worker not found'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "  echo 'Worker ready - waiting for scripts to be created...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "fi" C-m
+
+    #---------------------------------------------------------------------------
+    # Window 3: worker-gemini
+    #---------------------------------------------------------------------------
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "cd ${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "export WORKER_SHARD=2" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "export WORKER_MODEL=gemini" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "echo '=== TRI-24 Worker: Gemini (Shard 2) ===' " C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "echo 'WORKER_SHARD=2, WORKER_MODEL=gemini'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "if [ -x \"${bin_dir}/tri-agent-worker\" ]; then" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "  ${bin_dir}/tri-agent-worker" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "else" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "  echo '[WARN] tri-agent-worker not found'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "  echo 'Worker ready - waiting for scripts to be created...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "fi" C-m
+
+    #---------------------------------------------------------------------------
+    # Window 4: monitor - health-check with watch, logs in split pane
+    #---------------------------------------------------------------------------
+    tmux send-keys -t "${TMUX_SESSION}:monitor" "cd ${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor" "" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor" "echo '=== TRI-24 Monitor Window ===' " C-m
+
+    # Split pane horizontally for logs
+    tmux split-window -t "${TMUX_SESSION}:monitor" -v -p 40
+
+    # Top pane: health-check with watch
+    tmux send-keys -t "${TMUX_SESSION}:monitor.0" "if [ -x \"${bin_dir}/health-check\" ]; then" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.0" "  watch -n 5 -c ${bin_dir}/health-check" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.0" "else" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.0" "  echo 'Health check script not found. Showing task queue status...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.0" "  watch -n 5 'echo \"=== Task Queue Status ===\"; echo \"Queue:     \$(ls -1 ${TASKS_DIR}/queue 2>/dev/null | wc -l) tasks\"; echo \"Running:   \$(ls -1 ${TASKS_DIR}/running 2>/dev/null | wc -l) tasks\"; echo \"Review:    \$(ls -1 ${TASKS_DIR}/review 2>/dev/null | wc -l) tasks\"; echo \"Approved:  \$(ls -1 ${TASKS_DIR}/approved 2>/dev/null | wc -l) tasks\"; echo \"Completed: \$(ls -1 ${TASKS_DIR}/completed 2>/dev/null | wc -l) tasks\"; echo \"Failed:    \$(ls -1 ${TASKS_DIR}/failed 2>/dev/null | wc -l) tasks\"; echo \"\"; echo \"=== Heartbeats ===\"; ls -la ${STATE_DIR}/heartbeat 2>/dev/null || echo \"No heartbeats yet\"; echo \"\"; echo \"=== Budget ===\"; cat ${STATE_DIR}/budget/current.json 2>/dev/null || echo \"Budget not initialized\"'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.0" "fi" C-m
+
+    # Bottom pane: tail logs
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "cd ${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "echo '=== Log Viewer ===' " C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "if [ -f \"${LOG_DIR}/supervisor.log\" ]; then" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "  tail -f ${LOG_DIR}/*.log" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "else" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "  echo 'Waiting for logs...'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "  echo 'Log directory: ${LOG_DIR}'" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "  touch ${LOG_DIR}/supervisor.log" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "  tail -f ${LOG_DIR}/supervisor.log" C-m
+    tmux send-keys -t "${TMUX_SESSION}:monitor.1" "fi" C-m
+
+    # Select top pane in monitor window
+    tmux select-pane -t "${TMUX_SESSION}:monitor.0"
+
+    # Select supervisor window
+    tmux select-window -t "${TMUX_SESSION}:supervisor"
+
+    log_success "All processes started"
+}
+
+#-------------------------------------------------------------------------------
+# Print session information and attach instructions
+#-------------------------------------------------------------------------------
+print_session_info() {
+    local end_time=$(date -d "+${DURATION_HOURS} hours" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -v+${DURATION_HOURS}H "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "N/A")
+
+    echo ""
+    log_header "TRI-24 Autonomous Execution Environment"
+    echo ""
+    echo -e "${GREEN}Session Name:${NC}     ${TMUX_SESSION}"
+    echo -e "${GREEN}Duration:${NC}         ${DURATION_HOURS} hours"
+    echo -e "${GREEN}Daily Budget:${NC}     \$${BUDGET_DAILY}"
+    echo -e "${GREEN}Budget Rate:${NC}      \$${BUDGET_RATE}/minute"
+    echo -e "${GREEN}Start Time:${NC}       $(date '+%Y-%m-%d %H:%M:%S')"
+    echo -e "${GREEN}End Time:${NC}         ${end_time}"
+    echo ""
+    echo -e "${GREEN}Root Directory:${NC}   ${AUTONOMOUS_ROOT}"
+    echo -e "${GREEN}Log Directory:${NC}    ${LOG_DIR}"
+    echo -e "${GREEN}Tasks Directory:${NC}  ${TASKS_DIR}"
+    echo ""
+    log_header "Tmux Windows"
+    echo ""
+    echo -e "  ${CYAN}0: supervisor${NC}    - Budget watchdog + Tri-agent supervisor"
+    echo -e "  ${CYAN}1: worker-claude${NC} - Claude worker (Shard 0)"
+    echo -e "  ${CYAN}2: worker-codex${NC}  - Codex worker (Shard 1)"
+    echo -e "  ${CYAN}3: worker-gemini${NC} - Gemini worker (Shard 2)"
+    echo -e "  ${CYAN}4: monitor${NC}       - Health check + Log viewer"
+    echo ""
+    log_header "Commands"
+    echo ""
+    echo -e "  ${YELLOW}Attach to session:${NC}"
+    echo -e "    tmux attach -t ${TMUX_SESSION}"
+    echo ""
+    echo -e "  ${YELLOW}Switch windows:${NC}"
+    echo -e "    Ctrl+B, 0-4  (or use Ctrl+B, n/p for next/prev)"
+    echo ""
+    echo -e "  ${YELLOW}Detach from session:${NC}"
+    echo -e "    Ctrl+B, d"
+    echo ""
+    echo -e "  ${YELLOW}Kill session:${NC}"
+    echo -e "    tmux kill-session -t ${TMUX_SESSION}"
+    echo ""
+    echo -e "  ${YELLOW}List sessions:${NC}"
+    echo -e "    tmux ls"
+    echo ""
+    log_success "TRI-24 environment is ready!"
+    echo ""
+}
+
+#-------------------------------------------------------------------------------
+# Attach to session if requested
+#-------------------------------------------------------------------------------
+attach_if_requested() {
+    if [ "${ATTACH}" = "true" ]; then
+        log_info "Attaching to session..."
+        exec tmux attach -t "${TMUX_SESSION}"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Main execution
+#-------------------------------------------------------------------------------
+main() {
+    log_header "TRI-24 Launch Script"
+    echo ""
+
+    # Pre-flight checks
+    check_dependencies
+
+    # Initialize environment
+    init_directories
+
+    # Kill any existing session
+    kill_existing_session
+
+    # Create and configure tmux session
+    create_tmux_session
+
+    # Start all processes
+    start_processes
+
+    # Print information
+    print_session_info
+
+    # Attach if requested
+    attach_if_requested
+}
+
+# Run main
+main "$@"

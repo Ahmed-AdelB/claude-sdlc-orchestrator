@@ -1,0 +1,7 @@
+{
+  "check": "EXE-006",
+  "name": "Build",
+  "duration_seconds": 0,
+  "exit_code": 0,
+  "status": "PASS"
+}

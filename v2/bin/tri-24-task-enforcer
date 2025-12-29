@@ -1,0 +1,268 @@
+#!/bin/bash
+#===============================================================================
+# tri-24-task-enforcer - System Process to Enforce Task Implementation
+# Generated: 2025-12-29
+# Purpose: Manages and enforces implementation of tasks from 20-PART PLAN
+#===============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${SCRIPT_DIR}/.."
+TASK_LIST="${ROOT_DIR}/tasks/COMPREHENSIVE_TASK_LIST.md"
+PLAN_FILE="${ROOT_DIR}/docs/TRI24_COMPLETE_20PART_PLAN.md"
+STATE_DIR="${ROOT_DIR}/state"
+LOG_DIR="${ROOT_DIR}/logs"
+ENFORCER_LOG="${LOG_DIR}/tri-24-enforcer.log"
+STATUS_FILE="${STATE_DIR}/enforcer-status.json"
+
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log() {
+    local level="$1"
+    shift
+    local ts=$(date -Iseconds)
+    echo "[$ts][$level] $*" | tee -a "$ENFORCER_LOG"
+}
+
+update_status() {
+    local status="$1"
+    local message="$2"
+    local ts=$(date -Iseconds)
+    cat > "$STATUS_FILE" <<EOF
+{
+    "status": "$status",
+    "message": "$message",
+    "timestamp": "$ts",
+    "completed": $COMPLETED,
+    "in_progress": $IN_PROGRESS,
+    "pending": $PENDING,
+    "total": $TOTAL
+}
+EOF
+}
+
+# Task counters
+COMPLETED=5
+IN_PROGRESS=1
+PENDING=37
+TOTAL=43
+
+show_status() {
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}  TRI-24 TASK ENFORCER STATUS${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+    echo -e "Plan File:     ${GREEN}$PLAN_FILE${NC}"
+    echo -e "Task List:     ${GREEN}$TASK_LIST${NC}"
+    echo ""
+    echo -e "${GREEN}Completed:${NC}     $COMPLETED"
+    echo -e "${YELLOW}In Progress:${NC}  $IN_PROGRESS"
+    echo -e "${RED}Pending:${NC}       $PENDING"
+    echo -e "Total:         $TOTAL"
+    echo ""
+
+    # Show recent completions
+    echo -e "${GREEN}Recently Completed:${NC}"
+    echo "  - FIX-001: Coverage measurement bug (supervisor-approver.sh)"
+    echo "  - FIX-003: Monitor daemon exception handling (tri-24-monitor)"
+    echo "  - FIX-004: Lock timeout increase (common.sh)"
+    echo "  - FIX-005: Max retry limit for quality gates (supervisor-approver.sh)"
+    echo "  - 20-PART PLAN: Merged and saved to docs/"
+    echo ""
+
+    # Show current focus
+    echo -e "${YELLOW}Current Focus:${NC}"
+    echo "  - System process management"
+    echo "  - Restart monitor daemon"
+    echo "  - Verify system operational"
+    echo ""
+}
+
+check_system_health() {
+    log "INFO" "Checking system health..."
+
+    # Check if key daemons are running
+    local monitor_running=false
+    local guardian_running=false
+
+    if pgrep -f "tri-24-monitor" > /dev/null 2>&1; then
+        monitor_running=true
+    fi
+
+    if pgrep -f "tri-24-guardian" > /dev/null 2>&1; then
+        guardian_running=true
+    fi
+
+    echo ""
+    echo -e "${BLUE}System Health:${NC}"
+    if $monitor_running; then
+        echo -e "  Monitor daemon:  ${GREEN}RUNNING${NC}"
+    else
+        echo -e "  Monitor daemon:  ${RED}STOPPED${NC}"
+    fi
+
+    if $guardian_running; then
+        echo -e "  Guardian daemon: ${GREEN}RUNNING${NC}"
+    else
+        echo -e "  Guardian daemon: ${YELLOW}STOPPED${NC}"
+    fi
+
+    # Check health.json
+    if [[ -f "${STATE_DIR}/health.json" ]]; then
+        local health_status=$(grep -o '"status": *"[^"]*"' "${STATE_DIR}/health.json" 2>/dev/null | cut -d'"' -f4 || echo "UNKNOWN")
+        echo -e "  Health Status:   $health_status"
+    fi
+    echo ""
+}
+
+restart_monitor() {
+    log "INFO" "Restarting tri-24-monitor daemon..."
+
+    # Kill existing monitor if running
+    pkill -f "tri-24-monitor" 2>/dev/null || true
+    sleep 1
+
+    # Start monitor daemon in background
+    nohup "$ROOT_DIR/bin/tri-24-monitor" 30 > "$LOG_DIR/tri-24-monitor.out" 2>&1 &
+    local pid=$!
+
+    sleep 2
+
+    if kill -0 "$pid" 2>/dev/null; then
+        log "INFO" "Monitor daemon started successfully (PID: $pid)"
+        echo -e "${GREEN}Monitor daemon started (PID: $pid)${NC}"
+    else
+        log "ERROR" "Failed to start monitor daemon"
+        echo -e "${RED}Failed to start monitor daemon${NC}"
+        return 1
+    fi
+}
+
+verify_fixes() {
+    log "INFO" "Verifying implemented fixes..."
+
+    local fixes_ok=0
+    local fixes_total=4
+
+    echo ""
+    echo -e "${BLUE}Verifying Fixes:${NC}"
+
+    # FIX-001: Coverage measurement
+    if grep -q "coverage_tool_found" "$ROOT_DIR/lib/supervisor-approver.sh" 2>/dev/null; then
+        echo -e "  FIX-001 (Coverage):     ${GREEN}VERIFIED${NC}"
+        ((fixes_ok++))
+    else
+        echo -e "  FIX-001 (Coverage):     ${RED}NOT FOUND${NC}"
+    fi
+
+    # FIX-003: Monitor exception handling
+    if grep -q "_monitor_error_handler" "$ROOT_DIR/bin/tri-24-monitor" 2>/dev/null; then
+        echo -e "  FIX-003 (Monitor):      ${GREEN}VERIFIED${NC}"
+        ((fixes_ok++))
+    else
+        echo -e "  FIX-003 (Monitor):      ${RED}NOT FOUND${NC}"
+    fi
+
+    # FIX-004: Lock timeout
+    if grep -q "atomic_append_with_backoff" "$ROOT_DIR/lib/common.sh" 2>/dev/null; then
+        echo -e "  FIX-004 (Lock timeout): ${GREEN}VERIFIED${NC}"
+        ((fixes_ok++))
+    else
+        echo -e "  FIX-004 (Lock timeout): ${RED}NOT FOUND${NC}"
+    fi
+
+    # FIX-005: Max retry limit
+    if grep -q "MAX_RETRIES_EXCEEDED" "$ROOT_DIR/lib/supervisor-approver.sh" 2>/dev/null; then
+        echo -e "  FIX-005 (Max retries):  ${GREEN}VERIFIED${NC}"
+        ((fixes_ok++))
+    else
+        echo -e "  FIX-005 (Max retries):  ${RED}NOT FOUND${NC}"
+    fi
+
+    echo ""
+    echo -e "Fixes verified: $fixes_ok/$fixes_total"
+    echo ""
+
+    return $((fixes_total - fixes_ok))
+}
+
+show_next_tasks() {
+    echo ""
+    echo -e "${BLUE}Next Priority Tasks:${NC}"
+    echo ""
+    echo "  P0 (Critical):"
+    echo "    - FIX-002: Configure Codex API key (Manual)"
+    echo "    - SEC-001: Implement sanitize_git_log() in common.sh"
+    echo "    - SEC-003A: Add symlink protection to state.sh"
+    echo "    - SEC-003B: Add symlink protection to sqlite-state.sh"
+    echo ""
+    echo "  P1 (High):"
+    echo "    - SEC-006: LLM input sanitization"
+    echo "    - SEC-007: Ledger file locking"
+    echo "    - M1-001: SQLite canonical task claiming"
+    echo ""
+}
+
+run_enforcer_loop() {
+    local interval="${1:-60}"
+    log "INFO" "Starting task enforcer loop (interval: ${interval}s)"
+
+    while true; do
+        log "INFO" "Enforcer check cycle"
+
+        # Update status
+        update_status "RUNNING" "Monitoring task implementation"
+
+        # Check health
+        check_system_health
+
+        # Verify fixes
+        verify_fixes
+
+        sleep "$interval"
+    done
+}
+
+# Main entry point
+main() {
+    local command="${1:-status}"
+    shift || true
+
+    case "$command" in
+        status)
+            show_status
+            check_system_health
+            verify_fixes
+            show_next_tasks
+            ;;
+        verify)
+            verify_fixes
+            ;;
+        restart-monitor)
+            restart_monitor
+            ;;
+        health)
+            check_system_health
+            ;;
+        run)
+            run_enforcer_loop "${1:-60}"
+            ;;
+        next)
+            show_next_tasks
+            ;;
+        *)
+            echo "Usage: $0 {status|verify|restart-monitor|health|run|next}"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

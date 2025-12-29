@@ -1,0 +1,82 @@
+#!/bin/bash
+# bin/tri-agent-daemon
+# 24/7 Orchestrator: Manages Worker, Supervisor, Watchdog
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+source "${AUTONOMOUS_ROOT}/lib/common.sh"
+
+BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+PID_FILE="${AUTONOMOUS_ROOT}/state/daemon.pid"
+
+mkdir -p "$LOG_DIR" "${AUTONOMOUS_ROOT}/state"
+
+log_info "Starting Tri-Agent Daemon..."
+echo $$ > "$PID_FILE"
+
+start_component() {
+    local name="$1"
+    local cmd="$2"
+    log_info "Starting component: $name"
+    nohup $cmd >> "${LOG_DIR}/${name}.log" 2>&1 &
+    echo $! > "${AUTONOMOUS_ROOT}/state/${name}.pid"
+}
+
+stop_component() {
+    local name="$1"
+    local pid_file="${AUTONOMOUS_ROOT}/state/${name}.pid"
+    if [[ -f "$pid_file" ]]; then
+        local pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            log_info "Stopping $name ($pid)..."
+            kill -TERM "$pid" || true
+        fi
+        rm -f "$pid_file"
+    fi
+}
+
+cleanup() {
+    log_info "Daemon shutting down..."
+    stop_component "worker"
+    stop_component "supervisor"
+    stop_component "watchdog"
+    rm -f "$PID_FILE"
+    exit 0
+}
+trap cleanup SIGTERM SIGINT
+
+# Start Components
+start_component "worker" "${BIN_DIR}/tri-agent-worker"
+start_component "supervisor" "${BIN_DIR}/tri-agent-supervisor"
+start_component "watchdog" "${BIN_DIR}/budget-watchdog"
+
+# Monitoring Loop
+while true; do
+    # Check if components are alive
+    for comp in worker supervisor watchdog; do
+        pid_file="${AUTONOMOUS_ROOT}/state/${comp}.pid"
+        if [[ -f "$pid_file" ]]; then
+            pid=$(cat "$pid_file")
+            if ! kill -0 "$pid" 2>/dev/null; then
+                log_error "$comp died! Restarting..."
+                case "$comp" in
+                    worker) start_component "worker" "${BIN_DIR}/tri-agent-worker" ;;
+                    supervisor) start_component "supervisor" "${BIN_DIR}/tri-agent-supervisor" ;;
+                    watchdog) start_component "watchdog" "${BIN_DIR}/budget-watchdog" ;;
+                esac
+            fi
+        else
+            log_warn "$comp pid file missing. Restarting..."
+             case "$comp" in
+                worker) start_component "worker" "${BIN_DIR}/tri-agent-worker" ;;
+                supervisor) start_component "supervisor" "${BIN_DIR}/tri-agent-supervisor" ;;
+                watchdog) start_component "watchdog" "${BIN_DIR}/budget-watchdog" ;;
+            esac
+        fi
+    done
+    sleep 10
+done

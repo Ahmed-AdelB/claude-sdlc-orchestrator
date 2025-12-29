@@ -1,500 +1,699 @@
 #!/bin/bash
 # =============================================================================
-# tri-agent-supervisor - Autonomous Supervisor for Tri-Agent Session
+# bin/tri-agent-supervisor
 # =============================================================================
-# Monitors the primary agent's work, runs audits/tests, and provides feedback.
-# Uses ALL THREE models (Claude + Codex + Gemini) for failure analysis.
-# Never stops primary session - documents issues and sends to task queue.
+# M2-010: Unified Supervisor - Orchestrates Quality Gates & Approvals
+# M2-011: Crash-Resistant Main Loop with Exponential Backoff
 #
-# Usage:
-#   tri-agent-supervisor [--daemon]
-#   tri-agent-supervisor --status
-#   tri-agent-supervisor --help
+# Features:
+# - Watches for tasks awaiting review
+# - Runs unified workflow (gates + approve/reject)
+# - Handles retries and permanent failures
+# - Provides detailed logging and notifications
+# - Crash-resistant main loop with error recovery
+# - Exponential backoff on consecutive failures
+# - Heartbeat signals for liveness monitoring
+# - Graceful shutdown on SIGTERM/SIGINT
+# - Auto-restart of internal components on failure
 # =============================================================================
 
-set -euo pipefail
+# NOTE: We intentionally do NOT use set -e here to enable crash-resistant behavior
+# The main loop catches and handles all errors without exiting
+set -uo pipefail
 
-# Source common utilities
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../lib/common.sh"
-source "${SCRIPT_DIR}/../lib/state.sh"
+# Resolve paths
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
-# Source supervisor modules if they exist
-[[ -f "${SCRIPT_DIR}/../lib/supervisor-planner.sh" ]] && source "${SCRIPT_DIR}/../lib/supervisor-planner.sh"
-[[ -f "${SCRIPT_DIR}/../lib/supervisor-communicator.sh" ]] && source "${SCRIPT_DIR}/../lib/supervisor-communicator.sh"
-
-# =============================================================================
-# Configuration
-# =============================================================================
-
-SUPERVISOR_STATE_DIR="${STATE_DIR}/supervisor"
-FEEDBACK_DIR="${TASKS_DIR}/supervisor_feedback"
-TASK_QUEUE_DIR="${TASKS_DIR}/queue"
-AUDIT_LOG_DIR="${LOG_DIR}/audit"
-STATUS_FILE="${SUPERVISOR_STATE_DIR}/status.json"
-LAST_COMMIT_FILE="${SUPERVISOR_STATE_DIR}/last_checked_commit"
-WATCH_INTERVAL="${SUPERVISOR_WATCH_INTERVAL:-30}" # Seconds
-PRIMARY_SESSION="${TRI_AGENT_PRIMARY_SESSION:-tri-agent-aadel-v2}"
-TMUX_SOCKET="${TRI_AGENT_TMUX_SOCKET:-tri-agent}"
-
-# Rate limiting
-MAX_NOTIFICATIONS_PER_MINUTE=1
-LAST_NOTIFICATION_TIME=0
-
-# Ensure directories
-ensure_dir "$SUPERVISOR_STATE_DIR"
-ensure_dir "$FEEDBACK_DIR"
-ensure_dir "$TASK_QUEUE_DIR"
-ensure_dir "$AUDIT_LOG_DIR"
+source "${AUTONOMOUS_ROOT}/lib/common.sh"
 
 # =============================================================================
-# Helper Functions
+# CONFIGURATION
 # =============================================================================
+REVIEW_DIR="${AUTONOMOUS_ROOT}/tasks/review"
+APPROVED_DIR="${AUTONOMOUS_ROOT}/tasks/approved"
+REJECTED_DIR="${AUTONOMOUS_ROOT}/tasks/rejected"
+FAILED_DIR="${AUTONOMOUS_ROOT}/tasks/failed"
+COMMS_DIR="${AUTONOMOUS_ROOT}/comms"
+LOG_DIR="${AUTONOMOUS_ROOT}/logs/supervision"
+STATE_DIR="${AUTONOMOUS_ROOT}/state"
+SUPERVISOR_APPROVER="${AUTONOMOUS_ROOT}/lib/supervisor-approver.sh"
 
-update_status() {
-    local state="$1"
-    local message="${2:-""}"
-    local timestamp=$(iso_timestamp)
-    
-    cat > "$STATUS_FILE" <<EOF
+# M2-011: Heartbeat and state files
+HEARTBEAT_FILE="${STATE_DIR}/supervisor-heartbeat"
+PID_FILE="${STATE_DIR}/supervisor.pid"
+STATE_FILE="${STATE_DIR}/supervisor-state.json"
+
+# Configurable settings
+WATCH_INTERVAL="${WATCH_INTERVAL:-30}"
+MAX_CONCURRENT="${MAX_CONCURRENT:-3}"
+SINGLE_RUN="${SINGLE_RUN:-false}"
+VERBOSE="${VERBOSE:-false}"
+
+# M2-011: Backoff configuration
+INITIAL_BACKOFF="${INITIAL_BACKOFF:-1}"           # Initial backoff in seconds
+MAX_BACKOFF="${MAX_BACKOFF:-300}"                 # Maximum backoff (5 minutes)
+BACKOFF_MULTIPLIER="${BACKOFF_MULTIPLIER:-2}"     # Exponential multiplier
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-10}"   # Heartbeat interval in seconds
+MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-10}"  # Max failures before extended backoff
+COMPONENT_RESTART_DELAY="${COMPONENT_RESTART_DELAY:-5}"     # Delay before restarting components
+
+# Counters for session statistics
+declare -i TOTAL_PROCESSED=0
+declare -i TOTAL_APPROVED=0
+declare -i TOTAL_REJECTED=0
+declare -i TOTAL_FAILED=0
+
+# M2-011: Runtime state
+declare -i CONSECUTIVE_FAILURES=0
+declare -i CURRENT_BACKOFF=$INITIAL_BACKOFF
+declare -i LAST_HEARTBEAT=0
+declare -i CYCLE_COUNT=0
+declare -i START_TIME=0
+SHUTDOWN_REQUESTED=false
+SUPERVISOR_STATE="starting"
+
+# Ensure directories exist
+mkdir -p "$REVIEW_DIR" "$APPROVED_DIR" "$REJECTED_DIR" "$FAILED_DIR" "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+log_supervisor() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date -Iseconds)
+
+    echo "[${timestamp}] [SUPERVISOR] [${level}] ${message}" >&2
+    echo "[${timestamp}] [SUPERVISOR] [${level}] ${message}" >> "${LOG_DIR}/supervisor.log" 2>/dev/null || true
+}
+
+# =============================================================================
+# M2-011: HEARTBEAT SYSTEM
+# =============================================================================
+# Sends periodic heartbeat signals to indicate the supervisor is alive
+# Other processes can monitor this file to detect supervisor health
+# =============================================================================
+send_heartbeat() {
+    local now
+    now=$(date +%s)
+
+    # Only send heartbeat if interval has passed
+    if (( now - LAST_HEARTBEAT >= HEARTBEAT_INTERVAL )); then
+        local heartbeat_data
+        heartbeat_data=$(cat <<EOF
 {
-  "state": "$state",
-  "message": "$message",
-  "updated_at": "$timestamp",
-  "trace_id": "${TRACE_ID}"
+  "timestamp": "$(date -Iseconds)",
+  "epoch": $now,
+  "pid": $$,
+  "state": "$SUPERVISOR_STATE",
+  "cycle_count": $CYCLE_COUNT,
+  "uptime_seconds": $((now - START_TIME)),
+  "consecutive_failures": $CONSECUTIVE_FAILURES,
+  "current_backoff": $CURRENT_BACKOFF,
+  "stats": {
+    "processed": $TOTAL_PROCESSED,
+    "approved": $TOTAL_APPROVED,
+    "rejected": $TOTAL_REJECTED,
+    "failed": $TOTAL_FAILED
+  }
 }
 EOF
-}
+)
+        echo "$heartbeat_data" > "$HEARTBEAT_FILE" 2>/dev/null || true
+        LAST_HEARTBEAT=$now
 
-get_last_checked_commit() {
-    if [[ -f "$LAST_COMMIT_FILE" ]]; then
-        cat "$LAST_COMMIT_FILE"
-    else
-        # If no last commit, start from HEAD
-        git rev-parse HEAD
+        [[ "$VERBOSE" == "true" ]] && log_supervisor "DEBUG" "Heartbeat sent (cycle: $CYCLE_COUNT, failures: $CONSECUTIVE_FAILURES)"
     fi
 }
 
-set_last_checked_commit() {
-    echo "$1" > "$LAST_COMMIT_FILE"
+# =============================================================================
+# M2-011: STATE MANAGEMENT
+# =============================================================================
+# Persists supervisor state for recovery and monitoring
+# =============================================================================
+save_state() {
+    local state_data
+    state_data=$(cat <<EOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "pid": $$,
+  "state": "$SUPERVISOR_STATE",
+  "start_time": $START_TIME,
+  "cycle_count": $CYCLE_COUNT,
+  "consecutive_failures": $CONSECUTIVE_FAILURES,
+  "current_backoff": $CURRENT_BACKOFF,
+  "shutdown_requested": $SHUTDOWN_REQUESTED,
+  "stats": {
+    "processed": $TOTAL_PROCESSED,
+    "approved": $TOTAL_APPROVED,
+    "rejected": $TOTAL_REJECTED,
+    "failed": $TOTAL_FAILED
+  },
+  "config": {
+    "watch_interval": $WATCH_INTERVAL,
+    "max_concurrent": $MAX_CONCURRENT,
+    "max_backoff": $MAX_BACKOFF,
+    "heartbeat_interval": $HEARTBEAT_INTERVAL
+  }
+}
+EOF
+)
+    echo "$state_data" > "$STATE_FILE" 2>/dev/null || true
+}
+
+update_state() {
+    local new_state="$1"
+    SUPERVISOR_STATE="$new_state"
+    save_state
+    log_supervisor "INFO" "State changed to: $new_state"
 }
 
 # =============================================================================
-# Audit Functions
+# M2-011: EXPONENTIAL BACKOFF
 # =============================================================================
+# Implements exponential backoff on consecutive failures
+# Resets backoff on successful cycle
+# =============================================================================
+calculate_backoff() {
+    # Double the backoff on each failure, up to MAX_BACKOFF
+    CURRENT_BACKOFF=$((CURRENT_BACKOFF * BACKOFF_MULTIPLIER))
+    if (( CURRENT_BACKOFF > MAX_BACKOFF )); then
+        CURRENT_BACKOFF=$MAX_BACKOFF
+    fi
+    log_supervisor "WARN" "Backoff increased to ${CURRENT_BACKOFF}s after $CONSECUTIVE_FAILURES consecutive failures"
+}
 
-run_security_audit() {
-    local commit_hash="$1"
-    local report_file="${AUDIT_LOG_DIR}/security_${commit_hash}.json"
-    
-    log_info "Running security audit for $commit_hash..."
-    
-    # Run audit tool in JSON mode
-    "${BIN_DIR}/tri-agent-security-audit" --full --json --output "$report_file" || true
-    
-    # Analyze result
-    if [[ -f "$report_file" ]]; then
-        local criticals=$(jq -r 'select(.severity == "CRITICAL") | .description' "$report_file" 2>/dev/null || echo "")
-        if [[ -n "$criticals" ]]; then
-            log_error "Critical security issues found!"
+reset_backoff() {
+    if (( CONSECUTIVE_FAILURES > 0 )); then
+        log_supervisor "INFO" "Resetting backoff after successful cycle (was: ${CURRENT_BACKOFF}s, failures: $CONSECUTIVE_FAILURES)"
+    fi
+    CONSECUTIVE_FAILURES=0
+    CURRENT_BACKOFF=$INITIAL_BACKOFF
+}
+
+perform_backoff_sleep() {
+    local sleep_time="$1"
+    local elapsed=0
+
+    log_supervisor "INFO" "Backing off for ${sleep_time}s (consecutive failures: $CONSECUTIVE_FAILURES)"
+
+    # Sleep in small increments to remain responsive to signals
+    while (( elapsed < sleep_time )) && [[ "$SHUTDOWN_REQUESTED" != "true" ]]; do
+        local remaining=$((sleep_time - elapsed))
+        local chunk=$((remaining < 5 ? remaining : 5))
+
+        sleep "$chunk"
+        elapsed=$((elapsed + chunk))
+
+        # Send heartbeat during long backoffs
+        send_heartbeat
+    done
+}
+
+# =============================================================================
+# M2-011: SIGNAL HANDLERS - GRACEFUL SHUTDOWN
+# =============================================================================
+# Handles SIGTERM and SIGINT for clean shutdown
+# Allows current operations to complete before exiting
+# =============================================================================
+request_shutdown() {
+    local signal="$1"
+    log_supervisor "INFO" "Received $signal - initiating graceful shutdown"
+    SHUTDOWN_REQUESTED=true
+    update_state "shutting_down"
+}
+
+cleanup() {
+    log_supervisor "INFO" "Supervisor shutting down (PID: $$)"
+    update_state "stopped"
+
+    # Remove PID file
+    rm -f "$PID_FILE" 2>/dev/null || true
+
+    # Final heartbeat
+    send_heartbeat
+
+    print_status
+    exit 0
+}
+
+# Signal handlers are set up in run_daemon() only for daemon mode
+# This prevents cleanup from running for status/help commands
+
+# =============================================================================
+# M2-011: COMPONENT HEALTH CHECK AND AUTO-RESTART
+# =============================================================================
+# Checks health of internal components and restarts them if needed
+# =============================================================================
+check_component_health() {
+    local component="$1"
+    local component_path="$2"
+
+    case "$component" in
+        supervisor-approver)
+            if [[ ! -x "$component_path" ]]; then
+                log_supervisor "ERROR" "Component not found or not executable: $component_path"
+                return 1
+            fi
+            # Test component can be invoked (dry run)
+            if ! "$component_path" --version &>/dev/null 2>&1; then
+                # Component doesn't support --version, try help
+                if ! "$component_path" help &>/dev/null 2>&1; then
+                    log_supervisor "WARN" "Component $component may be unhealthy (cannot verify)"
+                fi
+            fi
+            ;;
+        *)
+            log_supervisor "DEBUG" "Unknown component: $component"
             return 1
-        fi
-    fi
+            ;;
+    esac
+
     return 0
 }
 
-run_tests() {
-    local commit_hash="$1"
-    local log_file="${AUDIT_LOG_DIR}/tests_${commit_hash}.log"
-    
-    log_info "Running tests for $commit_hash..."
-    
-    # Run tests (with timeout to prevent hanging)
-    if timeout 300 "${AUTONOMOUS_ROOT}/tests/run_tests.sh" > "$log_file" 2>&1; then
-        log_info "Tests passed."
-        return 0
-    else
-        log_error "Tests failed or timed out. See $log_file"
-        return 1
-    fi
-}
+restart_component() {
+    local component="$1"
+    log_supervisor "WARN" "Attempting to restart component: $component"
 
-send_feedback() {
-    local commit_hash="$1"
-    local severity="$2"
-    local title="$3"
-    local message="$4"
-    local report_file="$5"
+    # Give component time to settle
+    sleep "$COMPONENT_RESTART_DELAY"
 
-    local feedback_file="${FEEDBACK_DIR}/ISSUE_${commit_hash}_${severity}.md"
-
-    cat > "$feedback_file" <<EOF
-# Supervisor Feedback: [${severity}] ${title}
-
-**Context:** Commit \`${commit_hash}\`
-**Time:** $(date)
-
-## Issue
-${message}
-
-## Remediation
-Please address this immediately. See detailed report: \`${report_file}\`
-
-## Severity
-${severity}
-EOF
-
-    log_warn "Feedback sent: $feedback_file"
+    case "$component" in
+        supervisor-approver)
+            # No persistent process to restart, just verify it exists
+            if [[ -x "$SUPERVISOR_APPROVER" ]]; then
+                log_supervisor "INFO" "Component $component is available"
+                return 0
+            else
+                log_supervisor "ERROR" "Component $component restart failed - not executable"
+                return 1
+            fi
+            ;;
+        *)
+            log_supervisor "WARN" "Unknown component: $component"
+            return 1
+            ;;
+    esac
 }
 
 # =============================================================================
-# Tri-Agent Analysis Functions
+# M2-010: UNIFIED REVIEW PROCESSING
 # =============================================================================
+# Processes a single task through the unified workflow
+# Returns: 0 on approval, 1 on rejection, 2 on permanent failure
+# =============================================================================
+process_task() {
+    local task_id="$1"
+    local workspace="${2:-$AUTONOMOUS_ROOT}"
 
-# Analyze failure using all 3 models
-analyze_with_tri_agent() {
-    local failure_log="$1"
-    local analysis_type="${2:-code}"  # code|security|architecture
-    local output_file="${AUDIT_LOG_DIR}/analysis_$(date +%s).json"
+    log_supervisor "INFO" "Processing task: $task_id"
 
-    log_info "Starting tri-agent failure analysis..."
-
-    local failure_content=""
-    if [[ -f "$failure_log" ]]; then
-        failure_content=$(head -c 10000 "$failure_log")  # Limit to 10KB
-    fi
-
-    local claude_analysis="" codex_fix="" gemini_review=""
-
-    # Claude: Deep reasoning, security analysis (if delegate exists)
-    if [[ -x "${BIN_DIR}/claude-delegate" ]]; then
-        log_info "Getting Claude analysis..."
-        claude_analysis=$("${BIN_DIR}/claude-delegate" \
-            "Analyze this ${analysis_type} failure and identify root cause: ${failure_content}" 2>/dev/null || echo "Claude analysis unavailable")
-    fi
-
-    # Codex: Implementation fixes
-    if [[ -x "${BIN_DIR}/codex-ask" ]]; then
-        log_info "Getting Codex fix recommendations..."
-        codex_fix=$("${BIN_DIR}/codex-ask" \
-            "Generate a specific code fix for this failure: ${failure_content}" 2>/dev/null || echo "Codex fix unavailable")
-    fi
-
-    # Gemini: Architecture review (large context)
-    if [[ -x "${BIN_DIR}/gemini-ask" ]]; then
-        log_info "Getting Gemini architecture review..."
-        gemini_review=$("${BIN_DIR}/gemini-ask" \
-            "Review the architecture impact of this failure and suggest improvements: ${failure_content}" 2>/dev/null || echo "Gemini review unavailable")
-    fi
-
-    # Combine into JSON
-    cat > "$output_file" <<EOF
-{
-    "timestamp": "$(iso_timestamp)",
-    "analysis_type": "$analysis_type",
-    "failure_log": "$failure_log",
-    "claude_analysis": $(echo "$claude_analysis" | jq -Rs .),
-    "codex_fix": $(echo "$codex_fix" | jq -Rs .),
-    "gemini_review": $(echo "$gemini_review" | jq -Rs .)
-}
-EOF
-
-    echo "$output_file"
-}
-
-# Send notification to primary session (rate limited)
-notify_primary_session() {
-    local message="$1"
-    local priority="${2:-INFO}"
-
-    local current_time=$(date +%s)
-    local time_diff=$((current_time - LAST_NOTIFICATION_TIME))
-
-    # Rate limit: max 1 notification per minute
-    if [[ $time_diff -lt 60 ]]; then
-        log_debug "Rate limiting notification (${time_diff}s since last)"
-        return 0
-    fi
-
-    # Check if primary session exists
-    if ! tmux -L "$TMUX_SOCKET" has-session -t "$PRIMARY_SESSION" 2>/dev/null; then
-        log_warn "Primary session $PRIMARY_SESSION not found"
+    # Verify supervisor-approver.sh exists
+    if [[ ! -x "$SUPERVISOR_APPROVER" ]]; then
+        log_supervisor "ERROR" "Supervisor approver not found or not executable: $SUPERVISOR_APPROVER"
         return 1
     fi
 
-    # Send notification via tmux
-    tmux -L "$TMUX_SOCKET" send-keys -t "$PRIMARY_SESSION" \
-        "SUPERVISOR [$priority]: $message" Enter
+    # Call the unified workflow
+    local result=0
+    local output
+    output=$("$SUPERVISOR_APPROVER" workflow "$task_id" "$workspace" 2>&1) || result=$?
 
-    LAST_NOTIFICATION_TIME=$current_time
-    log_info "Notification sent to primary session: $message"
-}
+    # Log the output
+    [[ "$VERBOSE" == "true" ]] && log_supervisor "DEBUG" "Workflow output: $output"
 
-# Create task file for primary session
-create_task_for_primary() {
-    local issue_id="$1"
-    local severity="$2"
-    local title="$3"
-    local description="$4"
-    local analysis_file="${5:-}"
-
-    local task_file="${TASK_QUEUE_DIR}/${severity}_${issue_id}_$(date +%s).md"
-
-    cat > "$task_file" <<EOF
-# SUPERVISOR TASK: ${issue_id}
-
-## Priority: ${severity}
-
-## Title
-${title}
-
-## Description
-${description}
-
-## Analysis
-$(if [[ -n "$analysis_file" && -f "$analysis_file" ]]; then cat "$analysis_file"; else echo "No analysis available"; fi)
-
-## Instructions
-1. Review the issue details above
-2. Implement the recommended fix
-3. Run tests to verify the fix
-4. Move this file to tasks/completed/ when done
-
-## Created
-- Time: $(date)
-- By: tri-agent-supervisor
-- Trace ID: ${TRACE_ID}
-EOF
-
-    log_info "Task created: $task_file"
-    echo "$task_file"
-}
-
-# Run comprehensive tests (all test types)
-run_comprehensive_tests() {
-    local commit_hash="$1"
-    local log_file="${AUDIT_LOG_DIR}/comprehensive_tests_${commit_hash}.log"
-    local exit_code=0
-
-    log_info "Running comprehensive tests for $commit_hash..."
-
-    {
-        echo "=== Comprehensive Test Run for $commit_hash ==="
-        echo "Started: $(date)"
-        echo ""
-
-        # 1. Main test suite
-        echo "--- Running main test suite ---"
-        if timeout 300 "${AUTONOMOUS_ROOT}/tests/run_tests.sh" all 2>&1; then
-            echo "Main tests: PASSED"
-        else
-            echo "Main tests: FAILED"
-            exit_code=1
-        fi
-        echo ""
-
-        # 2. Coverage check
-        if [[ -x "${BIN_DIR}/tri-agent-coverage" ]]; then
-            echo "--- Running coverage check ---"
-            if "${BIN_DIR}/tri-agent-coverage" --run --threshold 70 2>&1; then
-                echo "Coverage: PASSED"
-            else
-                echo "Coverage: WARNING (below threshold)"
-            fi
-            echo ""
-        fi
-
-        # 3. Preflight checks
-        if [[ -x "${BIN_DIR}/tri-agent-preflight" ]]; then
-            echo "--- Running preflight checks ---"
-            if "${BIN_DIR}/tri-agent-preflight" --quick 2>&1; then
-                echo "Preflight: PASSED"
-            else
-                echo "Preflight: FAILED"
-                exit_code=1
-            fi
-            echo ""
-        fi
-
-        echo "Completed: $(date)"
-        echo "Exit code: $exit_code"
-    } > "$log_file" 2>&1
-
-    return $exit_code
+    case $result in
+        0)
+            log_supervisor "PASS" "Task $task_id APPROVED"
+            ((TOTAL_APPROVED++))
+            return 0
+            ;;
+        1)
+            log_supervisor "WARN" "Task $task_id REJECTED (retryable)"
+            ((TOTAL_REJECTED++))
+            return 1
+            ;;
+        2)
+            log_supervisor "FAIL" "Task $task_id PERMANENTLY FAILED"
+            ((TOTAL_FAILED++))
+            return 2
+            ;;
+        *)
+            log_supervisor "ERROR" "Task $task_id unexpected result: $result"
+            ((TOTAL_REJECTED++))
+            return $result
+            ;;
+    esac
 }
 
 # =============================================================================
-# Main Loop
+# REVIEW QUEUE CHECK
 # =============================================================================
+# Scans the review directory and processes pending tasks
+# Returns: 0 on success (including no tasks), 1 on error
+# =============================================================================
+check_reviews() {
+    local count=0
+    local processed=0
+    local errors=0
 
-main_loop() {
-    log_info "Supervisor started. Watching repo for $PRIMARY_SESSION..."
-    log_info "Watch interval: ${WATCH_INTERVAL}s"
-    update_status "IDLE" "Waiting for changes"
-
-    while true; do
-        current_head=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-        last_checked=$(get_last_checked_commit)
-
-        if [[ "$current_head" != "$last_checked" && "$current_head" != "unknown" ]]; then
-            log_info "New commit detected: $current_head (was $last_checked)"
-            update_status "AUDITING" "Processing commit $current_head"
-
-            local has_critical=false
-            local has_high=false
-
-            # 1. Security Audit
-            update_status "AUDITING" "Running security checks"
-            if ! run_security_audit "$current_head"; then
-                has_critical=true
-                local security_report="${AUDIT_LOG_DIR}/security_${current_head}.json"
-
-                # Run tri-agent analysis for security issues
-                update_status "ANALYZING" "Tri-agent security analysis"
-                local analysis_file=$(analyze_with_tri_agent "$security_report" "security")
-
-                # Create task for primary session
-                local task_file=$(create_task_for_primary \
-                    "SEC-${current_head:0:8}" \
-                    "CRITICAL" \
-                    "Security Audit Failed" \
-                    "Critical vulnerabilities detected in commit $current_head" \
-                    "$analysis_file")
-
-                # Send feedback and notify
-                send_feedback "$current_head" "CRITICAL" "Security Audit Failed" \
-                    "Critical vulnerabilities detected. Task created: $task_file" \
-                    "$security_report"
-                notify_primary_session "CRITICAL: Security issue found. Check tasks/queue/" "CRITICAL"
-            fi
-
-            # 2. Comprehensive Tests
-            update_status "TESTING" "Running comprehensive test suite"
-            if ! run_comprehensive_tests "$current_head"; then
-                has_high=true
-                local test_log="${AUDIT_LOG_DIR}/comprehensive_tests_${current_head}.log"
-
-                # Run tri-agent analysis for test failures
-                update_status "ANALYZING" "Tri-agent test failure analysis"
-                local analysis_file=$(analyze_with_tri_agent "$test_log" "code")
-
-                # Create task for primary session
-                local task_file=$(create_task_for_primary \
-                    "TEST-${current_head:0:8}" \
-                    "HIGH" \
-                    "Tests Failed" \
-                    "Test suite failed after commit $current_head" \
-                    "$analysis_file")
-
-                # Send feedback and notify
-                send_feedback "$current_head" "HIGH" "Tests Failed" \
-                    "Test suite failed. Task created: $task_file" \
-                    "$test_log"
-                notify_primary_session "HIGH: Tests failed. Check tasks/queue/" "HIGH"
-            fi
-
-            # 3. Generate Audit Report
-            update_status "REPORTING" "Generating audit report"
-            generate_audit_report "$current_head" "$has_critical" "$has_high"
-
-            # Update state
-            set_last_checked_commit "$current_head"
-            log_info "Audit complete for $current_head (critical: $has_critical, high: $has_high)"
-            update_status "IDLE" "Last checked: ${current_head:0:8} at $(date +%H:%M:%S)"
-        fi
-
-        sleep "$WATCH_INTERVAL"
+    # Count pending tasks
+    for task_file in "${REVIEW_DIR}"/*.md; do
+        [[ -f "$task_file" ]] || continue
+        ((count++))
     done
-}
 
-# Generate audit report for a commit
-generate_audit_report() {
-    local commit_hash="$1"
-    local has_critical="${2:-false}"
-    local has_high="${3:-false}"
-    local report_file="${AUDIT_LOG_DIR}/report_${commit_hash}.json"
-
-    local status="PASS"
-    [[ "$has_high" == "true" ]] && status="WARN"
-    [[ "$has_critical" == "true" ]] && status="FAIL"
-
-    cat > "$report_file" <<EOF
-{
-    "timestamp": "$(iso_timestamp)",
-    "commit_hash": "$commit_hash",
-    "status": "$status",
-    "has_critical": $has_critical,
-    "has_high": $has_high,
-    "trace_id": "${TRACE_ID}",
-    "primary_session": "$PRIMARY_SESSION"
-}
-EOF
-
-    log_info "Audit report: $report_file"
-}
-
-# Show status and exit
-show_status() {
-    if [[ -f "$STATUS_FILE" ]]; then
-        cat "$STATUS_FILE" | jq .
-    else
-        echo "Supervisor not running or no status file found"
+    if [[ $count -eq 0 ]]; then
+        [[ "$VERBOSE" == "true" ]] && log_supervisor "DEBUG" "No tasks awaiting review"
+        return 0
     fi
-    exit 0
-}
 
-# Show help
-show_help() {
-    cat <<EOF
-tri-agent-supervisor - Autonomous Supervisor for Tri-Agent Session
+    log_supervisor "INFO" "Found $count task(s) awaiting review"
 
-Usage:
-    tri-agent-supervisor [OPTIONS]
+    # Process each task
+    for task_file in "${REVIEW_DIR}"/*.md; do
+        [[ -f "$task_file" ]] || continue
 
-Options:
-    --daemon    Run in background (detached)
-    --status    Show current supervisor status
-    --help      Show this help message
+        # Check for shutdown request between tasks
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            log_supervisor "INFO" "Shutdown requested, stopping task processing"
+            break
+        fi
 
-Environment Variables:
-    SUPERVISOR_WATCH_INTERVAL    Polling interval in seconds (default: 30)
-    TRI_AGENT_PRIMARY_SESSION    Primary session name (default: tri-agent-aadel-v2)
-    TRI_AGENT_TMUX_SOCKET        Tmux socket name (default: tri-agent)
+        # Check concurrent limit
+        if [[ $processed -ge $MAX_CONCURRENT ]]; then
+            log_supervisor "INFO" "Reached concurrent limit ($MAX_CONCURRENT), pausing"
+            break
+        fi
 
-The supervisor monitors the primary tri-agent session, runs tests and security
-audits after each commit, and creates tasks in tasks/queue/ for any issues found.
-It uses ALL THREE models (Claude + Codex + Gemini) for failure analysis.
+        local task_id
+        task_id=$(basename "$task_file" .md)
 
-The supervisor NEVER stops the primary session - it only documents issues.
-EOF
-    exit 0
-}
+        # Skip hidden files
+        [[ "$task_id" == .* ]] && continue
 
-# Parse arguments
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --daemon)
-                # Daemonize (handled by systemd or nohup externally)
-                shift
-                ;;
-            --status)
-                show_status
-                ;;
-            --help|-h)
-                show_help
-                ;;
-            *)
-                log_error "Unknown option: $1"
-                show_help
-                ;;
+        log_supervisor "INFO" "------- Processing: $task_id -------"
+
+        # Process the task with error handling
+        local result=0
+        if ! process_task "$task_id" "$AUTONOMOUS_ROOT"; then
+            result=$?
+            ((errors++))
+        fi
+
+        ((TOTAL_PROCESSED++))
+        ((processed++))
+
+        # Log result
+        case $result in
+            0) log_supervisor "INFO" "Task $task_id completed (APPROVED)" ;;
+            1) log_supervisor "WARN" "Task $task_id completed (REJECTED)" ;;
+            2) log_supervisor "ERROR" "Task $task_id completed (PERMANENT FAIL)" ;;
         esac
+
+        log_supervisor "INFO" "------- End: $task_id -------"
+
+        # Send heartbeat after each task
+        send_heartbeat
     done
+
+    log_supervisor "INFO" "Processed $processed tasks this cycle ($errors errors)"
+
+    # Return error status if all tasks failed
+    if (( processed > 0 && errors == processed )); then
+        return 1
+    fi
+
+    return 0
 }
 
-# Handle signals
-trap 'log_info "Supervisor stopping..."; update_status "STOPPED" "Signal received"; exit 0' SIGINT SIGTERM
+# =============================================================================
+# STATUS REPORT
+# =============================================================================
+print_status() {
+    local now
+    now=$(date +%s)
+    local uptime=$((now - START_TIME))
 
-# Parse arguments and start
-parse_args "$@"
-main_loop
+    echo ""
+    echo "=== Supervisor Session Statistics ==="
+    echo "PID:             $$"
+    echo "State:           $SUPERVISOR_STATE"
+    echo "Uptime:          ${uptime}s"
+    echo "Cycles:          $CYCLE_COUNT"
+    echo ""
+    echo "Processing Stats:"
+    echo "  Processed:     $TOTAL_PROCESSED"
+    echo "  Approved:      $TOTAL_APPROVED"
+    echo "  Rejected:      $TOTAL_REJECTED"
+    echo "  Failed:        $TOTAL_FAILED"
+    echo ""
+    echo "Health Stats:"
+    echo "  Consecutive Failures: $CONSECUTIVE_FAILURES"
+    echo "  Current Backoff:      ${CURRENT_BACKOFF}s"
+    echo ""
+    echo "Queues:"
+    echo "  Review:    $(find "$REVIEW_DIR" -name "*.md" 2>/dev/null | wc -l) tasks"
+    echo "  Approved:  $(find "$APPROVED_DIR" -name "*.md" 2>/dev/null | wc -l) tasks"
+    echo "  Rejected:  $(find "$REJECTED_DIR" -name "*.md" 2>/dev/null | wc -l) tasks"
+    echo "  Failed:    $(find "$FAILED_DIR" -name "*.md" 2>/dev/null | wc -l) tasks"
+    echo "====================================="
+}
+
+# =============================================================================
+# M2-011: CRASH-RESISTANT MAIN LOOP
+# =============================================================================
+# Implements a crash-resistant main loop that:
+# 1. Catches all errors without crashing
+# 2. Implements exponential backoff on consecutive failures
+# 3. Sends heartbeat signals for liveness monitoring
+# 4. Checks for shutdown signals between iterations
+# 5. Auto-restarts components on failure
+# =============================================================================
+run_daemon() {
+    START_TIME=$(date +%s)
+
+    # Set up signal handlers for daemon mode
+    trap 'request_shutdown "SIGTERM"' SIGTERM
+    trap 'request_shutdown "SIGINT"' SIGINT
+    trap cleanup EXIT
+
+    # Write PID file
+    echo $$ > "$PID_FILE"
+
+    log_supervisor "INFO" "Starting Tri-Agent Supervisor (PID: $$)"
+    log_supervisor "INFO" "Watch interval: ${WATCH_INTERVAL}s"
+    log_supervisor "INFO" "Max concurrent: $MAX_CONCURRENT"
+    log_supervisor "INFO" "Review directory: $REVIEW_DIR"
+    log_supervisor "INFO" "Heartbeat interval: ${HEARTBEAT_INTERVAL}s"
+    log_supervisor "INFO" "Max backoff: ${MAX_BACKOFF}s"
+
+    update_state "running"
+    send_heartbeat
+
+    # Main crash-resistant loop
+    while true; do
+        # Check for shutdown request
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            log_supervisor "INFO" "Shutdown requested, exiting main loop"
+            break
+        fi
+
+        ((CYCLE_COUNT++))
+        local cycle_start
+        cycle_start=$(date +%s)
+        local cycle_success=true
+
+        [[ "$VERBOSE" == "true" ]] && log_supervisor "DEBUG" "Starting cycle $CYCLE_COUNT"
+
+        # Run check_reviews with comprehensive error handling
+        # This is the core of the crash-resistant design
+        {
+            check_reviews
+        } || {
+            local error_code=$?
+            cycle_success=false
+            log_supervisor "ERROR" "Cycle $CYCLE_COUNT failed with error code: $error_code"
+
+            # Check if we need to restart components
+            if (( CONSECUTIVE_FAILURES > 0 && CONSECUTIVE_FAILURES % 3 == 0 )); then
+                log_supervisor "WARN" "Multiple consecutive failures, checking component health"
+                if ! check_component_health "supervisor-approver" "$SUPERVISOR_APPROVER"; then
+                    restart_component "supervisor-approver"
+                fi
+            fi
+        }
+
+        # Update backoff based on cycle result
+        if [[ "$cycle_success" == "true" ]]; then
+            reset_backoff
+        else
+            ((CONSECUTIVE_FAILURES++))
+
+            # Check if we've hit the failure threshold
+            if (( CONSECUTIVE_FAILURES >= MAX_CONSECUTIVE_FAILURES )); then
+                log_supervisor "ERROR" "Hit maximum consecutive failures ($MAX_CONSECUTIVE_FAILURES)"
+                log_supervisor "WARN" "Entering extended backoff mode"
+                update_state "degraded"
+            fi
+
+            calculate_backoff
+        fi
+
+        # Send heartbeat
+        send_heartbeat
+        save_state
+
+        # Single run mode (for testing)
+        if [[ "$SINGLE_RUN" == "true" ]]; then
+            log_supervisor "INFO" "Single run mode, exiting"
+            break
+        fi
+
+        # Check for shutdown before sleep
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            break
+        fi
+
+        # Determine sleep time: normal interval or backoff
+        local sleep_time=$WATCH_INTERVAL
+        if (( CONSECUTIVE_FAILURES > 0 )); then
+            sleep_time=$CURRENT_BACKOFF
+        fi
+
+        # Calculate actual sleep accounting for cycle duration
+        local cycle_duration=$(($(date +%s) - cycle_start))
+        local adjusted_sleep=$((sleep_time - cycle_duration))
+        if (( adjusted_sleep < 1 )); then
+            adjusted_sleep=1
+        fi
+
+        # Perform interruptible sleep with heartbeats
+        perform_backoff_sleep "$adjusted_sleep"
+    done
+
+    log_supervisor "INFO" "Main loop exited"
+}
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+main() {
+    local command="${1:-daemon}"
+
+    case "$command" in
+        daemon|start)
+            run_daemon
+            ;;
+
+        once)
+            # Run once and exit
+            START_TIME=$(date +%s)
+            log_supervisor "INFO" "Running single check cycle"
+            SINGLE_RUN=true
+            check_reviews || true  # Don't exit on error in once mode
+            print_status
+            ;;
+
+        process)
+            # Process a specific task
+            shift
+            local task_id="${1:-}"
+            if [[ -z "$task_id" ]]; then
+                echo "Usage: $0 process <task_id> [workspace]"
+                exit 1
+            fi
+            local workspace="${2:-$AUTONOMOUS_ROOT}"
+            process_task "$task_id" "$workspace"
+            ;;
+
+        status)
+            # Show queue status
+            START_TIME=$(date +%s)  # For uptime calculation
+            CYCLE_COUNT=0
+            print_status
+            ;;
+
+        health)
+            # Check supervisor health
+            if [[ -f "$HEARTBEAT_FILE" ]]; then
+                local last_heartbeat
+                last_heartbeat=$(cat "$HEARTBEAT_FILE" 2>/dev/null)
+                echo "$last_heartbeat"
+
+                # Check if heartbeat is recent (within 2x heartbeat interval)
+                local heartbeat_epoch
+                heartbeat_epoch=$(echo "$last_heartbeat" | grep -o '"epoch": [0-9]*' | grep -o '[0-9]*' || echo "0")
+                local now
+                now=$(date +%s)
+                local age=$((now - heartbeat_epoch))
+
+                if (( age > HEARTBEAT_INTERVAL * 2 )); then
+                    echo ""
+                    echo "WARNING: Heartbeat is stale (${age}s old)"
+                    exit 1
+                else
+                    echo ""
+                    echo "Supervisor is healthy (heartbeat ${age}s ago)"
+                    exit 0
+                fi
+            else
+                echo "No heartbeat file found - supervisor may not be running"
+                exit 1
+            fi
+            ;;
+
+        help|--help|-h)
+            echo "tri-agent-supervisor v2.2.0 (M2-010 Unified + M2-011 Crash-Resistant)"
+            echo ""
+            echo "Usage: $0 [command]"
+            echo ""
+            echo "Commands:"
+            echo "  daemon, start   Run as daemon (default)"
+            echo "  once            Run single check cycle and exit"
+            echo "  process <id>    Process specific task"
+            echo "  status          Show queue status"
+            echo "  health          Check supervisor health via heartbeat"
+            echo "  help            Show this help"
+            echo ""
+            echo "Environment Variables:"
+            echo "  WATCH_INTERVAL           Seconds between checks (default: 30)"
+            echo "  MAX_CONCURRENT           Max tasks per cycle (default: 3)"
+            echo "  SINGLE_RUN               Exit after one cycle (default: false)"
+            echo "  VERBOSE                  Enable debug logging (default: false)"
+            echo ""
+            echo "M2-011 Crash-Resistant Options:"
+            echo "  INITIAL_BACKOFF          Initial backoff seconds (default: 1)"
+            echo "  MAX_BACKOFF              Maximum backoff seconds (default: 300)"
+            echo "  BACKOFF_MULTIPLIER       Exponential multiplier (default: 2)"
+            echo "  HEARTBEAT_INTERVAL       Heartbeat interval seconds (default: 10)"
+            echo "  MAX_CONSECUTIVE_FAILURES Max failures before degraded mode (default: 10)"
+            echo "  COMPONENT_RESTART_DELAY  Delay before component restart (default: 5)"
+            echo ""
+            echo "Files:"
+            echo "  ${PID_FILE}              PID file"
+            echo "  ${HEARTBEAT_FILE}        Heartbeat file (JSON)"
+            echo "  ${STATE_FILE}            State file (JSON)"
+            echo "  ${LOG_DIR}/supervisor.log    Log file"
+            echo ""
+            ;;
+
+        *)
+            echo "Unknown command: $command"
+            echo "Run '$0 help' for usage"
+            exit 1
+            ;;
+    esac
+}
+
+# Run main
+main "$@"

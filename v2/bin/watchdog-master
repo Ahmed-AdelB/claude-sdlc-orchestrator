@@ -1,0 +1,323 @@
+#!/bin/bash
+# =============================================================================
+# watchdog-master - Master Watchdog for All System Daemons
+# =============================================================================
+# Supervises and restarts all autonomous system daemons:
+#   - task-auto-picker
+#   - budget-watchdog
+#   - process-reaper
+#   - health-check daemon
+#   - self-healing orchestrator
+#
+# Features:
+#   - Automatic daemon restart on failure
+#   - Exponential backoff for repeated failures
+#   - Health monitoring and alerting
+#   - Graceful shutdown coordination
+# =============================================================================
+
+set -euo pipefail
+
+# Script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+STATE_DIR="${AUTONOMOUS_ROOT}/state"
+LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+
+# Source common utilities
+source "${LIB_DIR}/common.sh" 2>/dev/null || {
+    echo "[ERROR] Failed to source common.sh"
+    exit 1
+}
+
+# Configuration
+WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-10}"
+MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
+RESTART_BACKOFF_BASE="${RESTART_BACKOFF_BASE:-2}"
+PID_DIR="${STATE_DIR}/pids"
+
+# Managed daemons
+declare -A DAEMONS=(
+    [task-auto-picker]="${BIN_DIR}/task-auto-picker"
+    [budget-watchdog]="${BIN_DIR}/budget-watchdog"
+    [process-reaper]="${BIN_DIR}/process-reaper"
+)
+
+# Daemon state tracking
+declare -A DAEMON_PIDS=()
+declare -A DAEMON_RESTART_COUNT=()
+declare -A DAEMON_LAST_RESTART=()
+
+# Watchdog state
+WATCHDOG_PID=$$ 
+RUNNING=true
+
+# =============================================================================
+# Initialization
+# =============================================================================
+
+mkdir -p "$PID_DIR" "$LOG_DIR"
+
+# Write watchdog PID
+echo "$WATCHDOG_PID" > "${PID_DIR}/watchdog-master.pid"
+
+# =============================================================================
+# Signal Handlers
+# =============================================================================
+
+handle_shutdown() {
+    log_info "Watchdog master initiating graceful shutdown..."
+    RUNNING=false
+
+    # Stop all managed daemons
+    for daemon in "${!DAEMON_PIDS[@]}"; do
+        local pid="${DAEMON_PIDS[$daemon]}"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null;
+        then
+            log_info "Stopping daemon: $daemon (PID: $pid)"
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for daemons to stop
+    sleep 2
+
+    # Force kill any remaining
+    for daemon in "${!DAEMON_PIDS[@]}"; do
+        local pid="${DAEMON_PIDS[$daemon]}"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null;
+        then
+            log_warn "Force killing daemon: $daemon (PID: $pid)"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Cleanup PID files
+    rm -f "${PID_DIR}"/*.pid
+
+    log_info "Watchdog master shutdown complete"
+    exit 0
+}
+
+trap handle_shutdown SIGTERM SIGINT SIGHUP
+
+# =============================================================================
+# Daemon Management Functions
+# =============================================================================
+
+# Start a daemon
+start_daemon() {
+    local daemon="$1"
+    local binary="${DAEMONS[$daemon]}"
+
+    if [[ ! -x "$binary" ]]; then
+        log_error "Daemon binary not found or not executable: $binary"
+        return 1
+    fi
+
+    local log_file="${LOG_DIR}/${daemon}.log"
+
+    log_info "Starting daemon: $daemon"
+
+    # Start daemon in background
+    "$binary" >> "$log_file" 2>&1 &
+    local pid=$!
+
+    # Verify daemon started
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null;
+    then
+        DAEMON_PIDS[$daemon]=$pid
+        echo "$pid" > "${PID_DIR}/${daemon}.pid"
+        log_info "Daemon $daemon started (PID: $pid)"
+        return 0
+    else
+        log_error "Daemon $daemon failed to start"
+        return 1
+    fi
+}
+
+# Stop a daemon
+stop_daemon() {
+    local daemon="$1"
+    local pid="${DAEMON_PIDS[$daemon]:-}"
+
+    if [[ -z "$pid" ]]; then
+        # Try to read from PID file
+        local pid_file="${PID_DIR}/${daemon}.pid"
+        if [[ -f "$pid_file" ]]; then
+            pid=$(cat "$pid_file")
+        fi
+    fi
+
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null;
+    then
+        log_info "Stopping daemon: $daemon (PID: $pid)"
+        kill -TERM "$pid" 2>/dev/null || true
+
+        # Wait for graceful shutdown
+        local wait_count=0
+        while kill -0 "$pid" 2>/dev/null && [[ $wait_count -lt 10 ]]; do
+            sleep 1
+            ((wait_count++))
+        done
+
+        # Force kill if still running
+        if kill -0 "$pid" 2>/dev/null;
+        then
+            log_warn "Force killing daemon: $daemon"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+
+    unset "DAEMON_PIDS[$daemon]"
+    rm -f "${PID_DIR}/${daemon}.pid"
+}
+
+# Check if daemon is running
+is_daemon_running() {
+    local daemon="$1"
+    local pid="${DAEMON_PIDS[$daemon]:-}"
+
+    if [[ -z "$pid" ]]; then
+        # Try to read from PID file
+        local pid_file="${PID_DIR}/${daemon}.pid"
+        if [[ -f "$pid_file" ]]; then
+            pid=$(cat "$pid_file")
+            DAEMON_PIDS[$daemon]=$pid
+        fi
+    fi
+
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null;
+    then
+        return 0
+    fi
+
+    return 1
+}
+
+# Restart a daemon with backoff
+restart_daemon() {
+    local daemon="$1"
+
+    local restart_count="${DAEMON_RESTART_COUNT[$daemon]:-0}"
+    local last_restart="${DAEMON_LAST_RESTART[$daemon]:-0}"
+    local now
+    now=$(date +%s)
+
+    # Reset restart count if last restart was more than 5 minutes ago
+    if [[ $((now - last_restart)) -gt 300 ]]; then
+        restart_count=0
+    fi
+
+    if [[ $restart_count -ge $MAX_RESTART_ATTEMPTS ]]; then
+        log_error "Daemon $daemon exceeded max restart attempts ($MAX_RESTART_ATTEMPTS)"
+        # Emit alert
+        if declare -f emit_event >/dev/null;
+        then
+            emit_event "DAEMON_RESTART_LIMIT" "$daemon" "{\"attempts\":$restart_count}"
+        fi
+        return 1
+    fi
+
+    # Calculate backoff delay
+    local delay=$((RESTART_BACKOFF_BASE ** restart_count))
+    if [[ $delay -gt 60 ]]; then
+        delay=60
+    fi
+
+    log_warn "Restarting daemon $daemon in ${delay}s (attempt $((restart_count + 1)))"
+    sleep "$delay"
+
+    # Stop any existing instance
+    stop_daemon "$daemon"
+
+    # Start fresh instance
+    if start_daemon "$daemon"; then
+        DAEMON_RESTART_COUNT[$daemon]=$((restart_count + 1))
+        DAEMON_LAST_RESTART[$daemon]=$now
+        return 0
+    else
+        return 1
+    fi
+}
+
+# =============================================================================
+# Health Check
+# =============================================================================
+
+# Check overall system health
+check_system_status() {
+    local status="healthy"
+    local issues=()
+
+    # Check each daemon
+    for daemon in "${!DAEMONS[@]}"; do
+        if ! is_daemon_running "$daemon"; then
+            status="degraded"
+            issues+=("$daemon not running")
+        fi
+    done
+
+    # Write status file
+    local issues_json
+    issues_json=$(printf '%s\n' "${issues[@]}" | jq -R . | jq -s . 2>/dev/null || echo "[]")
+    
+    cat > "${STATE_DIR}/watchdog-status.json" <<EOF
+{
+    "status": "$status",
+    "timestamp": "$(date -Iseconds)",
+    "watchdog_pid": $WATCHDOG_PID,
+    "daemons": {
+$(for daemon in "${!DAEMONS[@]}"; do
+    local pid="${DAEMON_PIDS[$daemon]:-}"
+    local running="false"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && running="true"
+    echo "        \"$daemon\": {\"pid\": ${pid:-null}, \"running\": $running},"
+done | sed '$ s/,$//')
+    },
+    "issues": $issues_json
+}
+EOF
+}
+
+# =============================================================================
+# Main Loop
+# =============================================================================
+
+main() {
+    log_info "Watchdog master starting (PID: $WATCHDOG_PID)"
+
+    # Start all daemons
+    for daemon in "${!DAEMONS[@]}"; do
+        DAEMON_RESTART_COUNT[$daemon]=0
+        DAEMON_LAST_RESTART[$daemon]=0
+        start_daemon "$daemon" || true
+    done
+
+    # Main supervision loop
+    while [[ "$RUNNING" == "true" ]]; do
+        # Check each daemon
+        for daemon in "${!DAEMONS[@]}"; do
+            if ! is_daemon_running "$daemon"; then
+                log_warn "Daemon $daemon is not running"
+                restart_daemon "$daemon" || true
+            fi
+        done
+
+        # Update system status
+        check_system_status
+
+        sleep "$WATCHDOG_INTERVAL"
+    done
+}
+
+main "$@"

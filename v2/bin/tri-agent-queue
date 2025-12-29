@@ -1,0 +1,143 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-queue - SQLite-backed Task Queue for Tri-Agent System
+#===============================================================================
+
+set -e
+
+# Configuration
+DB_TOOL="$HOME/.claude/autonomous/bin/db-tool"
+LOG_DIR="$HOME/.claude/autonomous/logs"
+SETTINGS_FILE="$HOME/.claude/autonomous/settings-autonomous.json"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# Check dependencies
+if [[ ! -x "$DB_TOOL" ]]; then
+    # Fallback to local path if not in global bin
+    DB_TOOL="./bin/db-tool"
+    if [[ ! -x "$DB_TOOL" ]]; then
+        echo -e "${RED}Error: db-tool not found.${NC}"
+        exit 1
+    fi
+fi
+
+# Generate UUID
+generate_uuid() {
+    cat /proc/sys/kernel/random/uuid
+}
+
+# Add task
+add_task() {
+    local description="$1"
+    local priority="${2:-2}"
+    local id=$(generate_uuid)
+    
+    local query="INSERT INTO tasks (id, state, priority, payload, current_phase) VALUES (?, 'QUEUED', ?, ?, 'BRAINSTORM')"
+    local args="[\"$id\", $priority, \"$description\"]"
+    
+    $DB_TOOL query "$query" --args "$args" > /dev/null
+    echo -e "${GREEN}[+] Task added:${NC} $id"
+}
+
+# List tasks
+list_tasks() {
+    echo -e "\n${BLUE}=== Task Queue (SQLite) ===${NC}\n"
+    
+    local query="SELECT id, priority, state, payload FROM tasks WHERE state IN ('QUEUED', 'RUNNING', 'REVIEW') ORDER BY priority ASC, created_at ASC"
+    local result=$($DB_TOOL query "$query")
+    
+    if [[ "$result" == "[]" ]]; then
+        echo -e "  ${YELLOW}(Queue is empty)${NC}"
+    else
+        # Parse JSON output with python for pretty printing
+        echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for task in data:
+    print(f\"  [{task['state']}] Priority: {task['priority']} - ID: {task['id']}\")
+    print(f\"     {task['payload'][:80]}...\")
+    print(\"\")
+"
+    fi
+    
+    echo ""
+}
+
+# Process Queue (Single Worker Mode Simulation)
+process_queue() {
+    echo -e "${BLUE}=== Processing Task Queue ===${NC}"
+    
+    # Claim a task
+    local claim_query="UPDATE tasks SET state='RUNNING', worker_id='worker-1', updated_at=datetime('now') WHERE id = (SELECT id FROM tasks WHERE state='QUEUED' ORDER BY priority ASC LIMIT 1) RETURNING id, payload"
+    local task_json=$($DB_TOOL query "$claim_query")
+    
+    if [[ "$task_json" == "[]" ]]; then
+        echo -e "${YELLOW}No tasks to process.${NC}"
+        return
+    fi
+    
+    # Extract Task ID and Payload
+    local task_id=$(echo "$task_json" | python3 -c "import sys, json; print(json.load(sys.stdin)[0]['id'])")
+    local payload=$(echo "$task_json" | python3 -c "import sys, json; print(json.load(sys.stdin)[0]['payload'])")
+    
+    echo -e "${CYAN}>>> Claimed Task: $task_id${NC}"
+    echo -e "Instructions: $payload"
+    
+    # Execute (Call Claude)
+    # Note: In a real worker pool, this would dispatch to a separate process
+    # Here we run inline for compatibility with old task-queue.sh
+    
+    if claude --dangerously-skip-permissions --settings "$SETTINGS_FILE" --model opus -p "$payload"; then
+        # Complete
+        $DB_TOOL query "UPDATE tasks SET state='COMPLETED', updated_at=datetime('now') WHERE id=?" --args "[\"$task_id\"]" > /dev/null
+        echo -e "${GREEN}[OK] Task Completed: $task_id${NC}"
+    else
+        # Fail
+        $DB_TOOL query "UPDATE tasks SET state='FAILED', updated_at=datetime('now') WHERE id=?" --args "[\"$task_id\"]" > /dev/null
+        echo -e "${RED}[FAIL] Task Failed: $task_id${NC}"
+    fi
+}
+
+# Show Status
+show_status() {
+    echo -e "\n${BLUE}=== System Status ===${NC}\n"
+    $DB_TOOL query "SELECT state, COUNT(*) as count FROM tasks GROUP BY state" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for row in data:
+    print(f\"  {row['state']}: {row['count']}\")
+"
+    echo ""
+}
+
+# Main Dispatch
+case "${1:-}" in
+    add)
+        shift
+        if [[ -z "$*" ]]; then
+            echo "Usage: tri-agent-queue add \"task description\" [priority]"
+            exit 1
+        fi
+        add_task "$1" "$2"
+        ;;
+    list)
+        list_tasks
+        ;;
+    process)
+        process_queue
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "Usage: tri-agent-queue <command>"
+        echo "Commands: add, list, process, status"
+        ;;
+esac

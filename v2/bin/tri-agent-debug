@@ -1,0 +1,190 @@
+#!/bin/bash
+# =============================================================================
+# tri-agent-debug - Debug utilities for tri-agent system
+# =============================================================================
+
+set -euo pipefail
+
+# Resolve script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+
+# Source common utilities
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/common.sh"
+else
+    set -euo pipefail
+    AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-${HOME}/.claude/autonomous}"
+    LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+    BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+    log_info() { echo "[INFO] $*" >&2; }
+    log_warn() { echo "[WARN] $*" >&2; }
+    log_error() { echo "[ERROR] $*" >&2; }
+fi
+
+# Source libs
+[[ -f "${LIB_DIR}/priority-queue.sh" ]] && source "${LIB_DIR}/priority-queue.sh"
+[[ -f "${LIB_DIR}/rag-context.sh" ]] && source "${LIB_DIR}/rag-context.sh"
+[[ -f "${LIB_DIR}/event-store.sh" ]] && source "${LIB_DIR}/event-store.sh"
+[[ -f "${LIB_DIR}/model-diversity.sh" ]] && source "${LIB_DIR}/model-diversity.sh"
+
+COMPONENT="DEBUG"
+export COMPONENT
+
+usage() {
+    cat <<EOF
+tri-agent-debug - Debug utilities
+
+USAGE:
+    tri-agent-debug status
+    tri-agent-debug queue
+    tri-agent-debug processes
+    tri-agent-debug locks
+    tri-agent-debug containers
+    tri-agent-debug events [--tail N]
+    tri-agent-debug rag "query" [--limit N]
+    tri-agent-debug diversity
+EOF
+}
+
+show_status() {
+    echo "Queue counts:"
+    pq_list || true
+    echo "RAG entries: $(rag_stats 2>/dev/null || echo 0)"
+    echo "Events: $(event_store_stats 2>/dev/null || echo 0)"
+}
+
+show_queue() {
+    pq_list || true
+    local next
+    next=$(pq_next_task || true)
+    if [[ -n "$next" ]]; then
+        echo "Next: $next"
+    else
+        echo "Next: none"
+    fi
+}
+
+show_processes() {
+    local reaper="${BIN_DIR}/process-reaper"
+    if [[ -x "$reaper" ]]; then
+        "$reaper" --dry-run --processes-only --once
+    else
+        log_warn "process-reaper not found"
+    fi
+}
+
+show_locks() {
+    local reaper="${BIN_DIR}/process-reaper"
+    if [[ -x "$reaper" ]]; then
+        "$reaper" --dry-run --locks-only --once
+    else
+        log_warn "process-reaper not found"
+    fi
+}
+
+show_containers() {
+    local reaper="${BIN_DIR}/process-reaper"
+    if [[ -x "$reaper" ]]; then
+        "$reaper" --dry-run --containers-only --once
+    else
+        log_warn "process-reaper not found"
+    fi
+}
+
+show_events() {
+    local tail_n="50"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tail)
+                tail_n="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    event_store_init
+    tail -n "$tail_n" "$EVENT_LOG_FILE"
+}
+
+show_rag() {
+    local query="$1"
+    shift || true
+    local limit="5"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --limit)
+                limit="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    rag_search "$query" "$limit"
+}
+
+show_diversity() {
+    local selected
+    selected=$(diversity_select 3)
+    local score
+    score=$(diversity_score $selected)
+    echo "Models: $selected"
+    echo "Score: $score"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+    status)
+        show_status
+        ;;
+    queue)
+        show_queue
+        ;;
+    processes)
+        show_processes
+        ;;
+    locks)
+        show_locks
+        ;;
+    containers)
+        show_containers
+        ;;
+    events)
+        show_events "$@"
+        ;;
+    rag)
+        if [[ $# -lt 1 ]]; then
+            log_error "rag requires a query"
+            exit 1
+        fi
+        show_rag "$@"
+        ;;
+    diversity)
+        show_diversity
+        ;;
+    -h|--help|"")
+        usage
+        ;;
+    *)
+        log_error "Unknown command: $cmd"
+        usage
+        exit 1
+        ;;
+esac

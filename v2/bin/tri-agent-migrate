@@ -1,0 +1,190 @@
+#!/bin/bash
+# =============================================================================
+# tri-agent-migrate - Migration tool for tri-agent system
+# =============================================================================
+# Performs idempotent migrations for queue layout, RAG store, and event store.
+# =============================================================================
+
+set -euo pipefail
+
+# Resolve script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+
+# Source common utilities
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/common.sh"
+else
+    set -euo pipefail
+    AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-${HOME}/.claude/autonomous}"
+    LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+    log_info() { echo "[INFO] $*" >&2; }
+    log_warn() { echo "[WARN] $*" >&2; }
+    log_error() { echo "[ERROR] $*" >&2; }
+fi
+
+# Source libs
+[[ -f "${LIB_DIR}/priority-queue.sh" ]] && source "${LIB_DIR}/priority-queue.sh"
+[[ -f "${LIB_DIR}/rag-context.sh" ]] && source "${LIB_DIR}/rag-context.sh"
+[[ -f "${LIB_DIR}/event-store.sh" ]] && source "${LIB_DIR}/event-store.sh"
+
+COMPONENT="MIGRATE"
+export COMPONENT
+
+DRY_RUN=false
+RUN_ALL=false
+RUN_QUEUE=false
+RUN_RAG=false
+RUN_EVENTS=false
+RUN_LOCKS=false
+
+usage() {
+    cat <<EOF
+tri-agent-migrate - Migration tool
+
+USAGE:
+    tri-agent-migrate [OPTIONS]
+
+OPTIONS:
+    --all          Run all migrations
+    --queue        Migrate queue layout
+    --rag          Initialize/upgrade RAG store
+    --events       Initialize/upgrade event store
+    --locks        Cleanup stale locks (1h+)
+    --dry-run      Show actions without executing
+    -h, --help     Show this help
+EOF
+}
+
+run_or_echo() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "[DRY-RUN] $*"
+    else
+        "$@"
+    fi
+}
+
+migrate_queue_layout() {
+    pq_init
+    local queue_dir="$PQ_QUEUE_DIR"
+
+    for p in CRITICAL HIGH MEDIUM LOW; do
+        local lane_dir="${queue_dir}/${p}"
+        if [[ -d "$lane_dir" ]]; then
+            while IFS= read -r file; do
+                [[ -f "$file" ]] || continue
+                local base
+                base=$(basename "$file")
+                local dest
+                if [[ "$base" =~ ^${p}_ ]]; then
+                    dest="${queue_dir}/${base}"
+                else
+                    dest="${queue_dir}/${p}_${base}"
+                fi
+                run_or_echo mv "$file" "$dest"
+            done < <(find "$lane_dir" -maxdepth 1 -type f 2>/dev/null)
+            run_or_echo rmdir "$lane_dir" 2>/dev/null || true
+        fi
+    done
+
+    # Normalize files without priority prefix
+    while IFS= read -r file; do
+        [[ -f "$file" ]] || continue
+        local base
+        base=$(basename "$file")
+        if [[ ! "$base" =~ ^(CRITICAL|HIGH|MEDIUM|LOW)_ ]]; then
+            run_or_echo mv "$file" "${queue_dir}/MEDIUM_${base}"
+        fi
+    done < <(find "$queue_dir" -maxdepth 1 -type f 2>/dev/null)
+
+    log_info "Queue migration complete"
+}
+
+migrate_rag_store() {
+    if rag_init; then
+        rag_rebuild_fts || true
+        log_info "RAG store ready"
+    else
+        log_warn "RAG store initialization skipped"
+    fi
+}
+
+migrate_event_store() {
+    event_store_init
+    log_info "Event store ready"
+}
+
+cleanup_stale_locks() {
+    local reaper="${AUTONOMOUS_ROOT}/bin/process-reaper"
+    if [[ -x "$reaper" ]]; then
+        run_or_echo "$reaper" --locks-only --once
+    else
+        log_warn "process-reaper not found; skipping lock cleanup"
+    fi
+}
+
+# Parse arguments
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --all)
+            RUN_ALL=true
+            shift
+            ;;
+        --queue)
+            RUN_QUEUE=true
+            shift
+            ;;
+        --rag)
+            RUN_RAG=true
+            shift
+            ;;
+        --events)
+            RUN_EVENTS=true
+            shift
+            ;;
+        --locks)
+            RUN_LOCKS=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+ done
+
+if [[ "$RUN_ALL" == "true" ]]; then
+    RUN_QUEUE=true
+    RUN_RAG=true
+    RUN_EVENTS=true
+    RUN_LOCKS=true
+fi
+
+[[ "$RUN_QUEUE" == "true" ]] && migrate_queue_layout
+[[ "$RUN_RAG" == "true" ]] && migrate_rag_store
+[[ "$RUN_EVENTS" == "true" ]] && migrate_event_store
+[[ "$RUN_LOCKS" == "true" ]] && cleanup_stale_locks
+
+log_info "Migration completed"

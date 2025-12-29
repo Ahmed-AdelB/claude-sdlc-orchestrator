@@ -42,6 +42,11 @@ else
     exit 1
 fi
 
+# Source Circuit Breaker
+if [[ -f "${LIB_DIR}/circuit-breaker.sh" ]]; then
+    source "${LIB_DIR}/circuit-breaker.sh"
+fi
+
 # Set component for logging
 COMPONENT="GEMINI"
 export COMPONENT
@@ -200,20 +205,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 #===============================================================================
-# Validate Input
-#===============================================================================
-if [[ -z "$PROMPT" ]]; then
-    json_output "error" "ABSTAIN" "0.0" "No prompt provided" "" 0
-    exit 1
-fi
-
-# Check if Gemini CLI exists
-if ! command_exists "$GEMINI_CMD"; then
-    json_output "error" "ABSTAIN" "0.0" "Gemini CLI not found" "" 0
-    exit 1
-fi
-
-#===============================================================================
 # Helper Functions
 #===============================================================================
 
@@ -261,6 +252,37 @@ mask_secrets_local() {
         mask_secrets "$input"
     else
         printf '%s' "$input"
+    fi
+}
+
+estimate_tokens_safe() {
+    local content="$1"
+    local model="$2"
+    if type -t estimate_tokens >/dev/null 2>&1; then
+        estimate_tokens "$content" "$model"
+    else
+        echo "${#content}"
+    fi
+}
+
+estimate_output_tokens_default() {
+    local input_tokens="$1"
+    local multiplier="${COST_OUTPUT_MULTIPLIER:-0.7}"
+    local min_tokens="${COST_OUTPUT_TOKENS_MIN:-256}"
+    local est
+    est=$(awk "BEGIN {printf \"%.0f\", $input_tokens * $multiplier}")
+    if [[ "$est" -lt "$min_tokens" ]]; then
+        est="$min_tokens"
+    fi
+    echo "$est"
+}
+
+record_cost_usage() {
+    local input_tokens="$1"
+    local output_tokens="$2"
+    local duration_ms="$3"
+    if type -t record_request >/dev/null 2>&1; then
+        record_request "gemini" "$input_tokens" "$output_tokens" "$duration_ms" "delegate"
     fi
 }
 
@@ -369,6 +391,20 @@ extract_reasoning() {
 }
 
 #===============================================================================
+# Validate Input
+#===============================================================================
+if [[ -z "$PROMPT" ]]; then
+    json_output "error" "ABSTAIN" "0.0" "No prompt provided" "" 0
+    exit 1
+fi
+
+# Check if Gemini CLI exists
+if ! command_exists "$GEMINI_CMD"; then
+    json_output "error" "ABSTAIN" "0.0" "Gemini CLI not found" "" 0
+    exit 1
+fi
+
+#===============================================================================
 # Main Execution
 #===============================================================================
 
@@ -415,6 +451,18 @@ IMPORTANT: When providing your analysis, if a decision is required, please clear
 
 Include your reasoning for the decision."
 
+# Cost breaker check (pre-execution)
+INPUT_TOKENS=$(estimate_tokens_safe "$FULL_PROMPT" "gemini")
+EST_OUTPUT_TOKENS=$(estimate_output_tokens_default "$INPUT_TOKENS")
+if type -t cost_breaker_should_allow >/dev/null 2>&1; then
+    if ! cost_breaker_should_allow "gemini" "$INPUT_TOKENS" "$EST_OUTPUT_TOKENS"; then
+        log_gemini "WARN" "COST_BREAKER_OPEN" "Cost breaker open, blocking request" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"input_tokens\":${INPUT_TOKENS},\"estimated_output_tokens\":${EST_OUTPUT_TOKENS}}"
+        json_output "error" "ABSTAIN" "0.0" "Cost breaker open: daily budget guardrail reached" "" 0
+        exit 1
+    fi
+fi
+
 # Log start (#81 fix - mask secrets in logs)
 MASKED_PROMPT=$(mask_secrets_local "$FULL_PROMPT")
 log_gemini "INFO" "DELEGATE_START" "Starting Gemini delegate" \
@@ -453,9 +501,16 @@ if [[ -n "$OUTPUT_FORMAT" ]]; then
 fi
 GEMINI_ARGS+=("$FULL_PROMPT")
 
-OUTPUT=$(timeout "$TIMEOUT" "$GEMINI_CMD" \
-    "${GEMINI_ARGS[@]}" \
-    2>"$STDERR_TMP") || EXIT_CODE=$?
+# Execute with Circuit Breaker
+if declare -f circuit_breaker_call >/dev/null; then
+    OUTPUT=$(circuit_breaker_call "gemini" timeout "$TIMEOUT" "$GEMINI_CMD" \
+        "${GEMINI_ARGS[@]}" \
+        2>"$STDERR_TMP") || EXIT_CODE=$?
+else
+    OUTPUT=$(timeout "$TIMEOUT" "$GEMINI_CMD" \
+        "${GEMINI_ARGS[@]}" \
+        2>"$STDERR_TMP") || EXIT_CODE=$?
+fi
 
 STDERR_OUTPUT=$(cat "$STDERR_TMP" 2>/dev/null || echo "")
 
@@ -464,11 +519,18 @@ END_MS=$(epoch_ms)
 DURATION_MS=$((END_MS - START_MS))
 
 # Handle results
-if [[ $EXIT_CODE -eq 124 ]]; then
+if [[ $EXIT_CODE -eq 126 ]]; then
+    # Breaker open
+    log_gemini "WARN" "CIRCUIT_BREAKER" "Circuit breaker open for gemini" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
+    json_output "error" "ABSTAIN" "0.0" "Circuit breaker OPEN" "" "$DURATION_MS"
+    exit 1
+elif [[ $EXIT_CODE -eq 124 ]]; then
     # Timeout
     log_gemini "ERROR" "DELEGATE_TIMEOUT" "Gemini delegate timed out" \
         "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
 
+    record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
     json_output "error" "ABSTAIN" "0.0" "Request timed out after ${TIMEOUT}s" "" "$DURATION_MS"
     exit 1
 
@@ -496,6 +558,7 @@ elif [[ $EXIT_CODE -ne 0 ]]; then
     fi
     
     masked_reason=$(mask_secrets_local "$error_reason")
+    record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
     json_output "error" "ABSTAIN" "0.0" "$masked_reason" "" "$DURATION_MS"
     exit 1
 fi
@@ -505,6 +568,8 @@ if [[ "$OUTPUT_FORMAT" == "json" || "$OUTPUT_FORMAT" == "stream-json" ]]; then
     log_gemini "INFO" "DELEGATE_COMPLETE" "Gemini delegate completed (raw output)" \
         "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"RAW\",\"duration_ms\":${DURATION_MS},\"output_format\":\"${OUTPUT_FORMAT}\"}"
 
+    OUTPUT_TOKENS=$(estimate_tokens_safe "$OUTPUT" "gemini")
+    record_cost_usage "$INPUT_TOKENS" "$OUTPUT_TOKENS" "$DURATION_MS"
     echo "$OUTPUT"
     if [[ "$PRINT_STDERR" == "true" ]]; then
         echo "[GEMINI] Output format: $OUTPUT_FORMAT" >&2
@@ -516,11 +581,13 @@ fi
 DECISION=$(extract_decision "$OUTPUT")
 CONFIDENCE=$(calculate_confidence "$OUTPUT" "$DECISION")
 REASONING=$(extract_reasoning "$OUTPUT")
+OUTPUT_TOKENS=$(estimate_tokens_safe "$OUTPUT" "gemini")
 
 # Log completion
 log_gemini "INFO" "DELEGATE_COMPLETE" "Gemini delegate completed" \
     "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"${DECISION}\",\"confidence\":${CONFIDENCE},\"duration_ms\":${DURATION_MS}}"
 
+record_cost_usage "$INPUT_TOKENS" "$OUTPUT_TOKENS" "$DURATION_MS"
 # Output JSON to stdout
 json_output "success" "$DECISION" "$CONFIDENCE" "$REASONING" "$OUTPUT" "$DURATION_MS"
 

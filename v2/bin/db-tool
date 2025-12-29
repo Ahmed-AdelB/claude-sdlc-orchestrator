@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+import sqlite3
+import sys
+import os
+import argparse
+import json
+
+DB_PATH = os.path.expanduser("~/.claude/autonomous/state/tri_agent_v5.db")
+SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config/schema.sql")
+
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    with open(SCHEMA_PATH, 'r') as f:
+        schema = f.read()
+    
+    # Split by semicolon to handle multiple statements, 
+    # but sqlite3.executescript is better for scripts
+    try:
+        conn.executescript(schema)
+        print(f"Database initialized at {DB_PATH}")
+    except Exception as e:
+        print(f"Error initializing database: {e}")
+        sys.exit(1)
+    finally:
+        conn.close()
+
+def execute_query(query, args=()):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, args)
+        conn.commit()
+        
+        if query.strip().upper().startswith("SELECT"):
+            rows = [dict(row) for row in cursor.fetchall()]
+            print(json.dumps(rows, default=str))
+        else:
+            print(json.dumps({"status": "success", "rows_affected": cursor.rowcount}))
+            
+    except Exception as e:
+        print(json.dumps({"status": "error", "message": str(e)}))
+        sys.exit(1)
+    finally:
+        conn.close()
+
+def main():
+    parser = argparse.ArgumentParser(description="SQLite DB Tool for Tri-Agent")
+    subparsers = parser.add_subparsers(dest="command")
+
+    init_parser = subparsers.add_parser("init", help="Initialize the database")
+    
+    query_parser = subparsers.add_parser("query", help="Execute a query")
+    query_parser.add_argument("sql", help="SQL query to execute")
+    query_parser.add_argument("--args", help="JSON array of arguments", default="[]")
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        init_db()
+    elif args.command == "query":
+        query_args = json.loads(args.args)
+        execute_query(args.sql, query_args)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

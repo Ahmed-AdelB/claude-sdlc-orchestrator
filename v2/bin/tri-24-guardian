@@ -1,0 +1,229 @@
+#!/bin/bash
+#===============================================================================
+# tri-24-guardian - Auto-Recovery Daemon for TRI-24
+#===============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${SCRIPT_DIR}/.."
+LOG_DIR="${ROOT_DIR}/logs"
+GUARDIAN_LOG="${LOG_DIR}/tri-24-guardian.log"
+GUARDIAN_PID="${ROOT_DIR}/state/guardian.pid"
+RECOVERY_LOG="${LOG_DIR}/tri-24-recovery.jsonl"
+
+mkdir -p "$LOG_DIR" "${ROOT_DIR}/state"
+
+# Configuration
+CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
+MAX_RESTARTS="${MAX_RESTARTS:-5}"
+RESTART_COOLDOWN="${RESTART_COOLDOWN:-300}"
+
+# State
+RESTART_COUNT=0
+LAST_RESTART=0
+
+log() {
+    local level="$1"
+    shift
+    local msg="$*"
+    local ts=$(date -Iseconds)
+    echo "[$ts][$level][GUARDIAN] $msg" | tee -a "$GUARDIAN_LOG"
+}
+
+record_recovery() {
+    local action="$1"
+    local details="$2"
+    local ts=$(date -Iseconds)
+    echo "{\"timestamp\":\"$ts\",\"action\":\"$action\",\"details\":$details,\"restart_count\":$RESTART_COUNT}" >> "$RECOVERY_LOG"
+}
+
+is_tri24_running() {
+    if tmux has-session -t tri-24 2>/dev/null; then
+        local windows=$(tmux list-windows -t tri-24 2>/dev/null | wc -l)
+        if [[ "$windows" -ge 5 ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+check_supervisor_health() {
+    if ! tmux has-session -t tri-24 2>/dev/null; then
+        return 1
+    fi
+
+    # Check supervisor window (0) for activity
+    local output=$(tmux capture-pane -t "tri-24:0" -p 2>/dev/null | tail -20 || echo "")
+
+    # Look for error patterns
+    if echo "$output" | grep -qiE "FATAL|CRASH|PANIC|Traceback"; then
+        log "WARN" "Supervisor showing error patterns"
+        return 1
+    fi
+
+    return 0
+}
+
+check_worker_health() {
+    local healthy_workers=0
+
+    for win in 1 2 3; do
+        if tmux has-session -t tri-24 2>/dev/null; then
+            local output=$(tmux capture-pane -t "tri-24:$win" -p 2>/dev/null | tail -10 || echo "")
+            if echo "$output" | grep -qE "Worker|Processing|Idle|Waiting"; then
+                ((healthy_workers++))
+            fi
+        fi
+    done
+
+    echo "$healthy_workers"
+}
+
+recover_session() {
+    local now=$(date +%s)
+    local cooldown_elapsed=$((now - LAST_RESTART))
+
+    if [[ $cooldown_elapsed -lt $RESTART_COOLDOWN ]]; then
+        log "WARN" "In cooldown period (${cooldown_elapsed}s < ${RESTART_COOLDOWN}s). Skipping restart."
+        return 1
+    fi
+
+    if [[ $RESTART_COUNT -ge $MAX_RESTARTS ]]; then
+        log "ERROR" "Max restarts ($MAX_RESTARTS) reached. Manual intervention required."
+        record_recovery "max_restarts_reached" "{\"count\":$RESTART_COUNT}"
+        return 1
+    fi
+
+    log "INFO" "Attempting TRI-24 recovery (attempt $((RESTART_COUNT + 1))/$MAX_RESTARTS)"
+    record_recovery "recovery_started" "{\"attempt\":$((RESTART_COUNT + 1))}"
+
+    # Kill existing session if any
+    tmux kill-session -t tri-24 2>/dev/null || true
+    sleep 2
+
+    # Relaunch
+    if [[ -x "${ROOT_DIR}/bin/tri-24-launch" ]]; then
+        log "INFO" "Executing tri-24-launch..."
+        cd "$ROOT_DIR"
+        ./bin/tri-24-launch 2>&1 | tee -a "$GUARDIAN_LOG"
+
+        # Wait and verify
+        sleep 10
+
+        if is_tri24_running; then
+            log "INFO" "TRI-24 recovery SUCCESSFUL"
+            record_recovery "recovery_success" "{\"attempt\":$((RESTART_COUNT + 1))}"
+            ((RESTART_COUNT++))
+            LAST_RESTART=$(date +%s)
+            return 0
+        else
+            log "ERROR" "TRI-24 recovery FAILED"
+            record_recovery "recovery_failed" "{\"attempt\":$((RESTART_COUNT + 1))}"
+            ((RESTART_COUNT++))
+            LAST_RESTART=$(date +%s)
+            return 1
+        fi
+    else
+        log "ERROR" "tri-24-launch not found or not executable"
+        return 1
+    fi
+}
+
+recover_worker() {
+    local worker_num="$1"
+    local worker_name="worker-${worker_num}"
+
+    log "INFO" "Attempting to recover $worker_name..."
+
+    if tmux has-session -t tri-24 2>/dev/null; then
+        case "$worker_num" in
+            1) model="claude" ;;
+            2) model="codex" ;;
+            3) model="gemini" ;;
+            *) model="claude" ;;
+        esac
+
+        # Send restart command to worker window
+        tmux send-keys -t "tri-24:$worker_num" C-c
+        sleep 1
+        tmux send-keys -t "tri-24:$worker_num" "export WORKER_ID='worker-${model}-$((worker_num-1))' WORKER_SHARD='$((worker_num-1))' WORKER_MODEL='$model' && ./bin/tri-agent-worker" Enter
+
+        log "INFO" "Sent restart command to $worker_name"
+        record_recovery "worker_restart" "{\"worker\":\"$worker_name\",\"model\":\"$model\"}"
+        return 0
+    fi
+
+    return 1
+}
+
+guardian_loop() {
+    log "INFO" "Starting TRI-24 Guardian (check interval: ${CHECK_INTERVAL}s)"
+    log "INFO" "Max restarts: $MAX_RESTARTS, Cooldown: ${RESTART_COOLDOWN}s"
+
+    # Save PID
+    echo $$ > "$GUARDIAN_PID"
+
+    while true; do
+        # Check if TRI-24 session exists
+        if ! is_tri24_running; then
+            log "WARN" "TRI-24 session not running or incomplete!"
+            record_recovery "session_missing" "{\"action\":\"will_attempt_recovery\"}"
+            recover_session
+        else
+            # Check supervisor health
+            if ! check_supervisor_health; then
+                log "WARN" "Supervisor appears unhealthy"
+                # Don't restart entire session, just log for now
+            fi
+
+            # Check worker health
+            local healthy_workers=$(check_worker_health)
+            if [[ "$healthy_workers" -lt 3 ]]; then
+                log "WARN" "Only $healthy_workers/3 workers appear healthy"
+
+                # Try to recover individual workers
+                for win in 1 2 3; do
+                    local output=$(tmux capture-pane -t "tri-24:$win" -p 2>/dev/null | tail -5 || echo "")
+                    if ! echo "$output" | grep -qE "Worker|Processing|Idle|Waiting"; then
+                        recover_worker "$win"
+                    fi
+                done
+            fi
+
+            # All good
+            if [[ "$healthy_workers" -eq 3 ]]; then
+                # Reset restart count after successful operation
+                if [[ $RESTART_COUNT -gt 0 ]]; then
+                    local now=$(date +%s)
+                    local stable_time=$((now - LAST_RESTART))
+                    if [[ $stable_time -gt 600 ]]; then  # 10 minutes stable
+                        log "INFO" "System stable for 10+ minutes. Resetting restart count."
+                        RESTART_COUNT=0
+                    fi
+                fi
+            fi
+        fi
+
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+cleanup() {
+    log "INFO" "Guardian shutting down..."
+    rm -f "$GUARDIAN_PID"
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+# Main
+echo "========================================"
+echo "  TRI-24 Guardian (Auto-Recovery)"
+echo "========================================"
+echo ""
+echo "Guardian Log:  $GUARDIAN_LOG"
+echo "Recovery Log:  $RECOVERY_LOG"
+echo "PID File:      $GUARDIAN_PID"
+echo ""
+
+guardian_loop

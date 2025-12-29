@@ -1,0 +1,711 @@
+#!/bin/bash
+#===============================================================================
+# budget-watchdog - Active Budget Monitoring with Kill-Switch (v2.1)
+#===============================================================================
+# Features:
+# - Real-time $/min rate monitoring (SQLite or spend log)
+# - Enforces $1/min rate limit and $75/day budget
+# - Auto-pauses workers when nearing daily limit
+# - Activates kill-switch when limits exceeded
+# - Terminates all agent processes on kill-switch
+# - Sends SIGUSR1 to workers before termination
+# - SIGUSR1 toggles manual pause/resume
+# - Status command for current spend tracking
+# - SQLite integration for persistent tracking
+# - Daemon mode with PID management
+#===============================================================================
+
+set -euo pipefail
+
+# Resolve paths
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+# Source common utilities
+source "${AUTONOMOUS_ROOT}/lib/common.sh"
+
+# Source SQLite State if available
+if [[ -f "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" ]]; then
+    source "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh"
+fi
+
+# Config
+VERSION="2.1.0"
+BUDGET_DAILY_LIMIT="${BUDGET_DAILY_LIMIT:-75.00}"
+BUDGET_RATE_LIMIT="${BUDGET_RATE_LIMIT:-1.00}"          # $1/min hard limit
+BUDGET_RATE_WARNING="${BUDGET_RATE_WARNING:-0.50}"      # $0.50/min soft limit
+BUDGET_DAILY_PAUSE_PCT="${BUDGET_DAILY_PAUSE_PCT:-0.90}" # Pause workers at 90% of daily limit
+BUDGET_CHECK_INTERVAL="${BUDGET_CHECK_INTERVAL:-30}"    # seconds
+BUDGET_WINDOW_SIZE="${BUDGET_WINDOW_SIZE:-300}"         # 5-minute rolling window
+
+STATE_DIR="${AUTONOMOUS_ROOT}/state/budget"
+STATE_DB="${AUTONOMOUS_ROOT}/state/tri-agent.db"
+PID_FILE="${STATE_DIR}/watchdog.pid"
+ROOT_PID_FILE="${AUTONOMOUS_ROOT}/state/budget-watchdog.pid"
+KILL_SWITCH_FILE="${STATE_DIR}/kill_switch.active"
+SPEND_LOG="${STATE_DIR}/spend.jsonl"
+CURRENT_STATUS_FILE="${STATE_DIR}/current.json"
+
+# Tracking for status output
+COST_SOURCE_DAILY="unknown"
+COST_SOURCE_RATE="unknown"
+
+mkdir -p "$STATE_DIR"
+
+#===============================================================================
+# SQLite Helpers & Cost Estimation
+#===============================================================================
+
+sqlite_available() {
+    command -v sqlite3 &>/dev/null && [[ -n "${STATE_DB:-}" ]] && [[ -f "$STATE_DB" ]]
+}
+
+ensure_sqlite_state() {
+    if command -v sqlite3 &>/dev/null && type -t sqlite_state_init >/dev/null 2>&1; then
+        sqlite_state_init "$STATE_DB" 2>/dev/null || true
+    fi
+}
+
+sqlite_has_costs_table() {
+    if ! sqlite_available; then
+        return 1
+    fi
+    sqlite3 "$STATE_DB" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='costs' LIMIT 1;" 2>/dev/null | grep -q "1"
+}
+
+rate_configured() {
+    if ! type -t _get_rate >/dev/null 2>&1; then
+        return 1
+    fi
+    local model rate_in rate_out
+    for model in claude gemini codex; do
+        rate_in=$(_get_rate "$model" "input")
+        rate_out=$(_get_rate "$model" "output")
+        rate_in="${rate_in:-0}"
+        rate_out="${rate_out:-0}"
+        if awk "BEGIN{exit !($rate_in > 0 || $rate_out > 0)}" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+calculate_cost_from_tokens() {
+    local input_tokens="$1"
+    local output_tokens="$2"
+    local rate_in="$3"
+    local rate_out="$4"
+    awk "BEGIN {printf \"%.6f\", ($input_tokens/1000.0)*$rate_in + ($output_tokens/1000.0)*$rate_out}"
+}
+
+sqlite_cost_count() {
+    local where_clause="$1"
+    sqlite3 "$STATE_DB" "SELECT COUNT(1) FROM costs WHERE ${where_clause};" 2>/dev/null | head -1
+}
+
+sqlite_cost_sum() {
+    local where_clause="$1"
+    local total="0.000000"
+    local row
+
+    while IFS='|' read -r model input_tokens output_tokens; do
+        [[ -z "$model" ]] && continue
+        local rate_in rate_out cost
+        rate_in=$(_get_rate "$model" "input")
+        rate_out=$(_get_rate "$model" "output")
+        cost=$(calculate_cost_from_tokens "${input_tokens:-0}" "${output_tokens:-0}" "${rate_in:-0}" "${rate_out:-0}")
+        total=$(awk "BEGIN {printf \"%.6f\", $total + $cost}")
+    done < <(sqlite3 -separator '|' "$STATE_DB" "SELECT model, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM costs WHERE ${where_clause} GROUP BY model;" 2>/dev/null)
+
+    echo "$total"
+}
+
+ensure_sqlite_state
+
+#===============================================================================
+# Spend Calculation
+#===============================================================================
+
+get_daily_spend() {
+    if sqlite_has_costs_table && rate_configured; then
+        local count
+        count=$(sqlite_cost_count "date(timestamp)=date('now')" || echo "0")
+        if [[ -n "$count" && "$count" != "0" ]]; then
+            COST_SOURCE_DAILY="sqlite"
+            local total
+            total=$(sqlite_cost_sum "date(timestamp)=date('now')")
+            printf "%.2f" "$total"
+            return
+        fi
+    fi
+
+    COST_SOURCE_DAILY="spend_log"
+    get_daily_spend_log
+}
+
+get_daily_spend_log() {
+    # Calculate total spend for today from spend log
+    if [[ ! -f "$SPEND_LOG" ]]; then
+        echo "0.00"
+        return
+    fi
+
+    local today=$(date +%Y-%m-%d)
+    local total=0
+
+    while IFS= read -r line; do
+        # Parse JSON line (basic grep approach)
+        if echo "$line" | grep -q "\"timestamp\":\"${today}"; then
+            local amount=$(echo "$line" | grep -oE '"amount":[0-9.]+' | cut -d: -f2)
+            if [[ -n "$amount" ]]; then
+                total=$(awk "BEGIN {print $total + $amount}")
+            fi
+        fi
+    done < "$SPEND_LOG"
+
+    printf "%.2f" "$total"
+}
+
+get_current_rate() {
+    if sqlite_has_costs_table && rate_configured; then
+        local count
+        count=$(sqlite_cost_count "timestamp >= datetime('now', '-${BUDGET_WINDOW_SIZE} seconds')" || echo "0")
+        if [[ -n "$count" && "$count" != "0" ]]; then
+            COST_SOURCE_RATE="sqlite"
+            get_current_rate_sqlite
+            return
+        fi
+    fi
+
+    COST_SOURCE_RATE="spend_log"
+    get_current_rate_log
+}
+
+get_current_rate_sqlite() {
+    local total
+    total=$(sqlite_cost_sum "timestamp >= datetime('now', '-${BUDGET_WINDOW_SIZE} seconds')")
+
+    local window_minutes
+    window_minutes=$(awk "BEGIN {print $BUDGET_WINDOW_SIZE / 60}")
+    if awk "BEGIN{exit !($window_minutes > 0)}" 2>/dev/null; then
+        local rate
+        rate=$(awk "BEGIN {printf \"%.2f\", $total / $window_minutes}")
+        echo "$rate"
+    else
+        echo "0.00"
+    fi
+}
+
+get_current_rate_log() {
+    # Calculate spend rate over last BUDGET_WINDOW_SIZE seconds
+    if [[ ! -f "$SPEND_LOG" ]]; then
+        echo "0.00"
+        return
+    fi
+
+    local window_start=$(($(date +%s) - BUDGET_WINDOW_SIZE))
+    local total=0
+    local count=0
+
+    while IFS= read -r line; do
+        # Extract timestamp_epoch (Unix timestamp)
+        local ts=$(echo "$line" | grep -oE '"timestamp_epoch":[0-9]+' | cut -d: -f2)
+        if [[ -n "$ts" && $ts -ge $window_start ]]; then
+            local amount=$(echo "$line" | grep -oE '"amount":[0-9.]+' | cut -d: -f2)
+            if [[ -n "$amount" ]]; then
+                total=$(awk "BEGIN {print $total + $amount}")
+                count=$((count + 1))
+            fi
+        fi
+    done < "$SPEND_LOG"
+
+    # Convert to per-minute rate
+    local window_minutes=$(awk "BEGIN {print $BUDGET_WINDOW_SIZE / 60}")
+    if [[ $(echo "$window_minutes > 0" | bc -l) -eq 1 ]]; then
+        local rate=$(awk "BEGIN {printf \"%.2f\", $total / $window_minutes}")
+        echo "$rate"
+    else
+        echo "0.00"
+    fi
+}
+
+#===============================================================================
+# Pause & State Management
+#===============================================================================
+
+BUDGET_PAUSED="${BUDGET_PAUSED:-0}"
+BUDGET_PAUSE_REASON="${BUDGET_PAUSE_REASON:-}"
+
+budget_pause_active() {
+    if type -t state_get >/dev/null 2>&1; then
+        local flag
+        flag=$(state_get "budget" "pause_workers" "0" 2>/dev/null || echo "0")
+        [[ "$flag" == "1" ]]
+    else
+        [[ "${BUDGET_PAUSED}" == "1" ]]
+    fi
+}
+
+budget_pause_reason() {
+    if type -t state_get >/dev/null 2>&1; then
+        state_get "budget" "pause_reason" "" 2>/dev/null || echo ""
+    else
+        echo "${BUDGET_PAUSE_REASON}"
+    fi
+}
+
+set_budget_pause() {
+    local reason="$1"
+    local source="${2:-auto}"
+    BUDGET_PAUSED="1"
+    BUDGET_PAUSE_REASON="$reason"
+
+    if type -t state_set >/dev/null 2>&1; then
+        state_set "budget" "pause_workers" "1"
+        state_set "budget" "pause_reason" "$reason"
+        state_set "budget" "pause_source" "$source"
+        state_set "budget" "pause_requested_at" "$(date -Iseconds)"
+    fi
+
+    if type -t set_pause_requested >/dev/null 2>&1; then
+        set_pause_requested "$reason" 2>/dev/null || true
+    fi
+}
+
+clear_budget_pause() {
+    BUDGET_PAUSED="0"
+    BUDGET_PAUSE_REASON=""
+
+    if type -t state_set >/dev/null 2>&1; then
+        state_set "budget" "pause_workers" "0"
+        state_delete "budget" "pause_reason" 2>/dev/null || true
+        state_delete "budget" "pause_source" 2>/dev/null || true
+        state_delete "budget" "pause_requested_at" 2>/dev/null || true
+    fi
+
+    if type -t state_get >/dev/null 2>&1 && type -t clear_pause_requested >/dev/null 2>&1; then
+        local sys_reason
+        sys_reason=$(state_get "system" "pause_reason" "" 2>/dev/null || echo "")
+        if [[ "$sys_reason" == budget_* ]]; then
+            clear_pause_requested 2>/dev/null || true
+        fi
+    fi
+}
+
+pause_workers() {
+    local reason="$1"
+    local source="${2:-auto}"
+
+    if budget_pause_active; then
+        return 0
+    fi
+
+    log_warn "Pausing workers (reason: ${reason})"
+    set_budget_pause "$reason" "$source"
+    signal_all_workers "SIGUSR1" "$reason"
+}
+
+resume_workers() {
+    local reason="${1:-manual_resume}"
+
+    if is_kill_switch_active; then
+        log_warn "Kill-switch active. Resume ignored."
+        return 1
+    fi
+
+    if ! budget_pause_active; then
+        return 0
+    fi
+
+    log_info "Resuming workers (reason: ${reason})"
+    clear_budget_pause
+    signal_all_workers "SIGUSR2" "$reason"
+}
+
+toggle_manual_pause() {
+    if budget_pause_active; then
+        resume_workers "budget_manual_resume"
+    else
+        pause_workers "budget_manual_pause" "manual"
+    fi
+}
+
+handle_manual_toggle() {
+    set +e
+    toggle_manual_pause
+    set -e
+}
+
+update_budget_state() {
+    local daily_spend="$1"
+    local current_rate="$2"
+    local timestamp
+    timestamp=$(date -Iseconds)
+
+    local pause_reason
+    pause_reason=$(budget_pause_reason)
+    local pause_reason_json="null"
+    if [[ -n "$pause_reason" ]]; then
+        pause_reason_json=$(printf '%s' "$pause_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        pause_reason_json="\"${pause_reason_json}\""
+    fi
+
+    local pause_active="false"
+    if budget_pause_active; then
+        pause_active="true"
+    fi
+    local kill_active="false"
+    if is_kill_switch_active; then
+        kill_active="true"
+    fi
+
+    if type -t state_set >/dev/null 2>&1; then
+        state_set "budget" "daily_spend" "$daily_spend"
+        state_set "budget" "daily_limit" "$BUDGET_DAILY_LIMIT"
+        state_set "budget" "current_rate" "$current_rate"
+        state_set "budget" "rate_limit" "$BUDGET_RATE_LIMIT"
+        state_set "budget" "rate_warning" "$BUDGET_RATE_WARNING"
+        state_set "budget" "rate_window_seconds" "$BUDGET_WINDOW_SIZE"
+        state_set "budget" "daily_pause_pct" "$BUDGET_DAILY_PAUSE_PCT"
+        state_set "budget" "last_checked_at" "$timestamp"
+        state_set "budget" "daily_cost_source" "$COST_SOURCE_DAILY"
+        state_set "budget" "rate_cost_source" "$COST_SOURCE_RATE"
+        state_set "budget" "pause_active" "$pause_active"
+        state_set "budget" "kill_switch_active" "$kill_active"
+    fi
+
+    cat > "${CURRENT_STATUS_FILE}.tmp" <<EOF
+{
+  "timestamp": "$timestamp",
+  "daily_spend": $daily_spend,
+  "daily_limit": $BUDGET_DAILY_LIMIT,
+  "current_rate": $current_rate,
+  "rate_limit": $BUDGET_RATE_LIMIT,
+  "rate_warning": $BUDGET_RATE_WARNING,
+  "rate_window_seconds": $BUDGET_WINDOW_SIZE,
+  "daily_pause_pct": $BUDGET_DAILY_PAUSE_PCT,
+  "pause_active": $pause_active,
+  "pause_reason": $pause_reason_json,
+  "kill_switch": $kill_active,
+  "daily_cost_source": "${COST_SOURCE_DAILY}",
+  "rate_cost_source": "${COST_SOURCE_RATE}"
+}
+EOF
+    mv "${CURRENT_STATUS_FILE}.tmp" "$CURRENT_STATUS_FILE" 2>/dev/null || true
+}
+
+#===============================================================================
+# Kill Switch
+#===============================================================================
+
+is_kill_switch_active() {
+    [[ -f "$KILL_SWITCH_FILE" ]]
+}
+
+activate_kill_switch() {
+    local reason="$1"
+    local timestamp=$(date -Iseconds)
+    local daily_spend=$(get_daily_spend)
+    local current_rate=$(get_current_rate)
+
+    cat > "$KILL_SWITCH_FILE" <<EOF
+{
+    "activated_at": "$timestamp",
+    "reason": "$reason",
+    "daily_spend": $daily_spend,
+    "current_rate": $current_rate,
+    "trace_id": "${TRACE_ID:-budget-watchdog}"
+}
+EOF
+
+    log_error "!!! KILL SWITCH ACTIVATED: $reason !!!"
+    log_error "    Daily spend: \$$daily_spend / \$$BUDGET_DAILY_LIMIT"
+    log_error "    Current rate: \$$current_rate/min / \$$BUDGET_RATE_LIMIT/min"
+
+    # Signal workers to pause
+    set_budget_pause "budget_kill_switch" "auto"
+    signal_all_workers "SIGUSR1" "budget_exceeded"
+
+    # Wait a moment for graceful pause
+    sleep 2
+
+    # Kill all agents
+    kill_all_agents
+
+    # Set pause flag in SQLite
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        set_pause_requested "budget_kill_switch" 2>/dev/null || true
+    fi
+}
+
+deactivate_kill_switch() {
+    if [[ -f "$KILL_SWITCH_FILE" ]]; then
+        log_info "Deactivating kill-switch..."
+        mv "$KILL_SWITCH_FILE" "${KILL_SWITCH_FILE}.$(date +%s)" 2>/dev/null || rm -f "$KILL_SWITCH_FILE"
+
+        # Clear pause flags and resume workers (if any are still running)
+        resume_workers "budget_resumed"
+    fi
+}
+
+#===============================================================================
+# Process Management
+#===============================================================================
+
+signal_all_workers() {
+    local signal="$1"
+    local reason="${2:-}"
+
+    log_info "Sending $signal to all workers (reason: ${reason:-manual})"
+
+    # Get PIDs from SQLite if available
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local pids
+        pids=$(sqlite3 "$STATE_DB" "SELECT pid FROM workers WHERE status IN ('idle','busy','paused') AND pid IS NOT NULL;" 2>/dev/null || echo "")
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -"$signal" "$pid" 2>/dev/null || true
+                log_debug "Sent $signal to worker PID $pid"
+            fi
+        done
+    fi
+
+    # Also use pkill as fallback
+    pkill -"$signal" -f "tri-agent-worker" 2>/dev/null || true
+}
+
+kill_all_agents() {
+    log_warn "Terminating all agent processes..."
+
+    # Kill workers
+    pkill -TERM -f "tri-agent-worker" 2>/dev/null || true
+    sleep 1
+    pkill -KILL -f "tri-agent-worker" 2>/dev/null || true
+
+    # Kill supervisors
+    pkill -TERM -f "tri-agent-supervisor" 2>/dev/null || true
+
+    # Kill delegates
+    pkill -TERM -f "claude-delegate" 2>/dev/null || true
+    pkill -TERM -f "codex-delegate" 2>/dev/null || true
+    pkill -TERM -f "gemini-delegate" 2>/dev/null || true
+
+    # Kill CLI processes (be careful here)
+    pkill -TERM -f "^claude " 2>/dev/null || true
+    pkill -TERM -f "^codex " 2>/dev/null || true
+    pkill -TERM -f "^gemini " 2>/dev/null || true
+
+    log_warn "All agent processes terminated"
+}
+
+#===============================================================================
+# Budget Checking
+#===============================================================================
+
+check_budget_status() {
+    # Check if kill-switch is already active
+    if is_kill_switch_active; then
+        return 1
+    fi
+
+    local daily_spend=$(get_daily_spend)
+    local current_rate=$(get_current_rate)
+    local daily_pause_threshold
+    daily_pause_threshold=$(awk "BEGIN {printf \"%.2f\", $BUDGET_DAILY_LIMIT * $BUDGET_DAILY_PAUSE_PCT}")
+
+    log_debug "Budget check: daily=\$$daily_spend/${BUDGET_DAILY_LIMIT}, rate=\$$current_rate/min/${BUDGET_RATE_LIMIT}/min"
+
+    update_budget_state "$daily_spend" "$current_rate"
+
+    # Check rate limit (hard kill)
+    if awk "BEGIN{exit !($current_rate >= $BUDGET_RATE_LIMIT)}" 2>/dev/null; then
+        activate_kill_switch "Rate limit exceeded: \$${current_rate}/min >= \$${BUDGET_RATE_LIMIT}/min"
+        return 1
+    fi
+
+    # Check daily limit (hard kill)
+    if awk "BEGIN{exit !($daily_spend >= $BUDGET_DAILY_LIMIT)}" 2>/dev/null; then
+        activate_kill_switch "Daily limit exceeded: \$${daily_spend} >= \$${BUDGET_DAILY_LIMIT}"
+        return 1
+    fi
+
+    # Auto-pause workers when approaching daily limit
+    if awk "BEGIN{exit !($daily_spend >= $daily_pause_threshold)}" 2>/dev/null; then
+        log_warn "Daily spend approaching limit: \$$daily_spend >= \$$daily_pause_threshold (\$${BUDGET_DAILY_LIMIT} * ${BUDGET_DAILY_PAUSE_PCT})"
+        pause_workers "budget_near_daily_limit" "auto"
+    else
+        # Auto-resume if daily limit pressure cleared (e.g., new day)
+        if budget_pause_active; then
+            local reason
+            reason=$(budget_pause_reason)
+            if [[ "$reason" == "budget_near_daily_limit" ]]; then
+                resume_workers "budget_daily_reset"
+            fi
+        fi
+    fi
+
+    # Check warning threshold
+    if awk "BEGIN{exit !($current_rate >= $BUDGET_RATE_WARNING)}" 2>/dev/null; then
+        log_warn "Budget warning: Rate \$${current_rate}/min approaching limit \$${BUDGET_RATE_LIMIT}/min"
+    fi
+
+    return 0
+}
+
+#===============================================================================
+# Status Display
+#===============================================================================
+
+show_status() {
+    local daily_spend=$(get_daily_spend)
+    local current_rate=$(get_current_rate)
+    local kill_switch_status="INACTIVE"
+    local pause_status="INACTIVE"
+    local pause_reason=""
+    local daily_pause_threshold
+    daily_pause_threshold=$(awk "BEGIN {printf \"%.2f\", $BUDGET_DAILY_LIMIT * $BUDGET_DAILY_PAUSE_PCT}")
+
+    if is_kill_switch_active; then
+        kill_switch_status="ACTIVE"
+    fi
+    if budget_pause_active; then
+        pause_status="ACTIVE"
+        pause_reason=$(budget_pause_reason)
+    fi
+
+    update_budget_state "$daily_spend" "$current_rate"
+
+    cat <<EOF
+Budget Watchdog Status (v${VERSION})
+=====================================
+
+Kill Switch:     $kill_switch_status
+Worker Pause:    $pause_status${pause_reason:+ (reason: $pause_reason)}
+Daily Spend:     \$$daily_spend / \$$BUDGET_DAILY_LIMIT
+Current Rate:    \$$current_rate/min / \$$BUDGET_RATE_LIMIT/min
+Warning Level:   \$$BUDGET_RATE_WARNING/min
+Daily Pause At:  \$$daily_pause_threshold (${BUDGET_DAILY_PAUSE_PCT} of daily limit)
+Check Interval:  ${BUDGET_CHECK_INTERVAL}s
+Window Size:     ${BUDGET_WINDOW_SIZE}s ($(($BUDGET_WINDOW_SIZE / 60))min)
+Cost Source:     daily=${COST_SOURCE_DAILY}, rate=${COST_SOURCE_RATE}
+
+Limits:
+  - Daily Limit:  \$$BUDGET_DAILY_LIMIT
+  - Rate Limit:   \$$BUDGET_RATE_LIMIT/min
+
+EOF
+
+    if is_kill_switch_active; then
+        echo "Kill Switch Details:"
+        cat "$KILL_SWITCH_FILE" 2>/dev/null || echo "  (file read error)"
+        echo ""
+    fi
+
+    # Show active workers if SQLite available
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        echo "Active Workers:"
+        sqlite3 "$STATE_DB" "SELECT worker_id, status, pid FROM workers WHERE status IN ('idle','busy','paused') ORDER BY started_at DESC LIMIT 10;" 2>/dev/null || echo "  (none)"
+        echo ""
+    fi
+}
+
+#===============================================================================
+# Main Loop
+#===============================================================================
+
+watch_loop() {
+    log_info "Budget Watchdog v${VERSION} started (PID $$)"
+    log_info "  Daily limit: \$$BUDGET_DAILY_LIMIT"
+    log_info "  Rate limit: \$$BUDGET_RATE_LIMIT/min"
+    log_info "  Check interval: ${BUDGET_CHECK_INTERVAL}s"
+
+    echo $$ > "$PID_FILE"
+    echo $$ > "$ROOT_PID_FILE"
+
+    trap handle_manual_toggle SIGUSR1
+
+    while true; do
+        check_budget_status || {
+            log_error "Budget limit exceeded. Kill-switch active. Exiting watchdog."
+            exit 1
+        }
+
+        sleep "$BUDGET_CHECK_INTERVAL"
+    done
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+
+case "${1:-}" in
+    --status)
+        show_status
+        ;;
+    --once)
+        log_info "Running single budget check..."
+        if check_budget_status; then
+            log_info "Budget OK"
+            exit 0
+        else
+            log_error "Budget exceeded"
+            exit 1
+        fi
+        ;;
+    --reset)
+        log_warn "Resetting kill-switch..."
+        deactivate_kill_switch
+        ;;
+    --help|-h)
+        cat <<EOF
+budget-watchdog - Active Budget Monitoring with Kill-Switch
+
+Usage: budget-watchdog [OPTIONS]
+
+Options:
+  (none)     Start monitoring loop (daemon mode)
+  --status   Show current budget status
+  --once     Run single check and exit
+  --reset    Deactivate kill-switch and resume
+  --help     Show this help
+
+Environment Variables:
+  BUDGET_DAILY_LIMIT       Daily budget limit (default: \$75.00)
+  BUDGET_RATE_LIMIT        Per-minute rate limit (default: \$1.00/min)
+  BUDGET_RATE_WARNING      Warning threshold (default: \$0.50/min)
+  BUDGET_DAILY_PAUSE_PCT   Pause workers at % of daily limit (default: 0.90)
+  BUDGET_CHECK_INTERVAL    Check interval in seconds (default: 30)
+  BUDGET_WINDOW_SIZE       Rolling window for rate calc (default: 300s)
+
+Description:
+  Monitors API spending and enforces hard limits to prevent runaway costs.
+  When limits are exceeded, the kill-switch is activated:
+  1. Sends SIGUSR1 (pause) to all workers
+  2. Waits 2 seconds for graceful pause
+  3. Terminates all agent processes (TERM then KILL)
+  4. Sets pause_requested flag in SQLite
+
+Signals:
+  SIGUSR1    Toggle manual pause/resume for all workers
+
+Examples:
+  # Run as daemon
+  ./bin/budget-watchdog
+
+  # Check current status
+  ./bin/budget-watchdog --status
+
+  # Reset kill-switch
+  ./bin/budget-watchdog --reset
+EOF
+        ;;
+    *)
+        watch_loop
+        ;;
+esac

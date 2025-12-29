@@ -1,0 +1,691 @@
+#!/bin/bash
+#===============================================================================
+# bin/process-reaper - Clean up orphaned processes, zombies, and stale resources
+#===============================================================================
+
+set -euo pipefail
+IFS=$'\n\t'
+
+# Resolve script location (handles symlinks)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+BIN_DIR="${AUTONOMOUS_ROOT}/bin"
+STATE_DIR="${AUTONOMOUS_ROOT}/state"
+LOG_DIR="${AUTONOMOUS_ROOT}/logs"
+TASKS_DIR="${AUTONOMOUS_ROOT}/tasks"
+RUNNING_DIR="${TASKS_DIR}/running"
+
+STATE_DB="${STATE_DB:-${STATE_DIR}/tri-agent.db}"
+LOG_FILE="${REAPER_LOG_FILE:-${LOG_DIR}/reaper.log}"
+
+# Fallback logging (used if common.sh is missing)
+if ! declare -F log_info >/dev/null 2>&1; then
+    log_info() {
+        local timestamp
+        timestamp=$(date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S")
+        echo "[${timestamp}] [INFO] $*" >&2
+    }
+fi
+if ! declare -F log_warn >/dev/null 2>&1; then
+    log_warn() {
+        local timestamp
+        timestamp=$(date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S")
+        echo "[${timestamp}] [WARN] $*" >&2
+    }
+fi
+if ! declare -F log_error >/dev/null 2>&1; then
+    log_error() {
+        local timestamp
+        timestamp=$(date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S")
+        echo "[${timestamp}] [ERROR] $*" >&2
+    }
+fi
+if ! declare -F log_debug >/dev/null 2>&1; then
+    log_debug() {
+        if [[ "${DEBUG:-0}" == "1" ]]; then
+            local timestamp
+            timestamp=$(date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S")
+            echo "[${timestamp}] [DEBUG] $*" >&2
+        fi
+    }
+fi
+
+# Source common utilities (optional)
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/common.sh" 2>/dev/null || log_warn "Failed to source common.sh; using fallback logging"
+fi
+
+# Source heartbeat helpers (optional)
+if [[ -f "${LIB_DIR}/heartbeat.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/heartbeat.sh" 2>/dev/null || log_warn "Failed to source heartbeat.sh; zombie recovery limited"
+fi
+
+# Source worker pool utilities (optional, for zombie cleanup)
+if [[ -f "${LIB_DIR}/worker-pool.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/worker-pool.sh" 2>/dev/null || log_warn "Failed to source worker-pool.sh; zombie cleanup limited"
+fi
+
+mkdir -p "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
+
+# Reaper-specific logging (always writes to log file)
+log_reaper() {
+    local level="$1"
+    shift
+    local ts
+    ts=$(date -Iseconds)
+    echo "[$ts] [$level] $*" | tee -a "$LOG_FILE" >&2
+}
+log_rinfo() { log_reaper "INFO" "$*"; }
+log_rwarn() { log_reaper "WARN" "$*"; }
+log_rerror() { log_reaper "ERROR" "$*"; }
+log_rdebug() { [[ "${VERBOSE:-false}" == "true" ]] && log_reaper "DEBUG" "$*" || true; }
+
+# Configuration
+REAPER_INTERVAL="${REAPER_INTERVAL:-300}"
+STALE_WORKER_MINUTES="${REAPER_STALE_WORKER_MINUTES:-10}"
+ZOMBIE_TASK_MINUTES="${REAPER_ZOMBIE_TASK_MINUTES:-60}"
+LOCK_MAX_AGE_SECONDS="${REAPER_LOCK_MAX_AGE_SECONDS:-3600}"
+AUTO_RESTART="${REAPER_AUTO_RESTART:-true}"
+RESTART_COOLDOWN_SECONDS="${REAPER_RESTART_COOLDOWN_SECONDS:-60}"
+RESTART_STATE_FILE="${STATE_DIR}/reaper.restarts"
+
+TRI_AGENT_PROCESS_PATTERN="${REAPER_PROCESS_PATTERN:-tri-agent-worker|tri-agent-supervisor|tri-agent-queue-watcher|tri-agent-daemon|budget-watchdog|claude-delegate|codex-delegate|gemini-delegate}"
+
+# Flags
+RUN_ONCE=false
+RUN_DAEMON=false
+DRY_RUN=false
+VERBOSE=false
+PROCESSES_ONLY=false
+LOCKS_ONLY=false
+CONTAINERS_ONLY=false
+STATUS_ONLY=false
+
+# Helpers
+is_true() {
+    local val
+    val=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+    [[ "$val" == "1" || "$val" == "true" || "$val" == "yes" || "$val" == "y" ]]
+}
+
+find_pids_by_pattern() {
+    local pattern="$1"
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -f "$pattern" 2>/dev/null || true
+    else
+        ps -eo pid=,command= 2>/dev/null | awk -v pat="$pattern" '$0 ~ pat {print $1}' || true
+    fi
+}
+
+process_is_running() {
+    local pattern="$1"
+    local pid_file="${2:-}"
+    local pid=""
+    if [[ -n "$pid_file" && -f "$pid_file" ]]; then
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    local found
+    found=$(find_pids_by_pattern "$pattern")
+    [[ -n "$found" ]]
+}
+
+terminate_pid() {
+    local pid="$1"
+    local label="${2:-process}"
+    local timeout="${3:-10}"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_rinfo "[DRY-RUN] Would terminate $label PID $pid"
+        return 0
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+
+    log_rwarn "Terminating $label PID $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    local remaining="$timeout"
+    while kill -0 "$pid" 2>/dev/null && [[ "$remaining" -gt 0 ]]; do
+        sleep 1
+        remaining=$((remaining - 1))
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        log_rwarn "Force killing $label PID $pid"
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+}
+
+get_mtime_epoch() {
+    local path="$1"
+    if stat --version >/dev/null 2>&1; then
+        stat -c %Y "$path" 2>/dev/null || echo 0
+    else
+        stat -f %m "$path" 2>/dev/null || echo 0
+    fi
+}
+
+# Zombie detection
+find_zombies() {
+    ps -eo pid=,ppid=,stat=,command= 2>/dev/null | awk -v pat="$TRI_AGENT_PROCESS_PATTERN" '$3 ~ /Z/ && $0 ~ pat {print $1 "|" $2}' || true
+}
+
+cleanup_zombie() {
+    local pid="$1"
+    local ppid="$2"
+
+    log_rwarn "Zombie detected: PID $pid (parent $ppid)"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        return 0
+    fi
+
+    if [[ -n "$ppid" && "$ppid" != "1" ]] && kill -0 "$ppid" 2>/dev/null; then
+        # Ask parent to reap
+        kill -SIGCHLD "$ppid" 2>/dev/null || true
+        sleep 1
+
+        if ps -o stat= -p "$pid" 2>/dev/null | grep -q "Z"; then
+            local parent_cmd
+            parent_cmd=$(ps -o command= -p "$ppid" 2>/dev/null || true)
+            if [[ "$parent_cmd" =~ $TRI_AGENT_PROCESS_PATTERN ]]; then
+                log_rwarn "Parent $ppid did not reap zombie $pid; terminating parent"
+                terminate_pid "$ppid" "zombie-parent" 5
+            else
+                log_rwarn "Zombie $pid remains; parent $ppid not tri-agent"
+            fi
+        else
+            log_rinfo "Zombie $pid reaped by parent $ppid"
+        fi
+    fi
+}
+
+# Orphan detection for tri-agent processes
+find_orphans() {
+    local pid
+    for pid in $(find_pids_by_pattern "$TRI_AGENT_PROCESS_PATTERN"); do
+        [[ "$pid" == "$$" ]] && continue
+        local cmd
+        cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+        [[ "$cmd" == *"process-reaper"* ]] && continue
+
+        local ppid
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [[ -z "$ppid" ]] && continue
+
+        if [[ "$ppid" == "1" ]] || ! kill -0 "$ppid" 2>/dev/null; then
+            echo "$pid"
+        fi
+    done
+}
+
+cleanup_orphan() {
+    local pid="$1"
+    terminate_pid "$pid" "orphan"
+}
+
+# Stale workers (heartbeat-based)
+reap_stale_workers() {
+    local timeout_minutes="$1"
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        log_rdebug "sqlite3 not available; skipping stale worker check"
+        return 0
+    fi
+    if [[ ! -f "$STATE_DB" ]]; then
+        log_rdebug "State DB not found; skipping stale worker check"
+        return 0
+    fi
+
+    local rows
+    rows=$(sqlite3 -separator '|' "$STATE_DB" <<SQL
+SELECT worker_id, pid, status, last_heartbeat
+FROM workers
+WHERE status NOT IN ('dead', 'stopping')
+  AND last_heartbeat < datetime('now', '-${timeout_minutes} minutes');
+SQL
+) || true
+
+    local row
+    while IFS='|' read -r worker_id pid status last_heartbeat; do
+        [[ -z "$worker_id" ]] && continue
+        log_rwarn "Stale worker: $worker_id (pid: ${pid:-N/A}, status: ${status:-unknown}, last_heartbeat: ${last_heartbeat:-unknown})"
+
+        if [[ -n "${pid:-}" ]] && [[ "$pid" =~ ^[0-9]+$ ]]; then
+            terminate_pid "$pid" "stale-worker"
+        fi
+
+        if [[ "$DRY_RUN" != "true" ]]; then
+            sqlite3 "$STATE_DB" "UPDATE workers SET status='dead', last_heartbeat=datetime('now') WHERE worker_id='${worker_id//\'/\'\'}';" 2>/dev/null || true
+        fi
+    done <<< "$rows"
+}
+
+# Orphan lock cleanup
+reap_orphan_locks() {
+    log_rinfo "Cleaning orphaned locks (max age: ${LOCK_MAX_AGE_SECONDS}s)"
+
+    local now
+    now=$(date +%s)
+
+    # Lock directories (*.lock.d)
+    for lock_dir in "${RUNNING_DIR}"/*.lock.d; do
+        [[ -d "$lock_dir" ]] || continue
+        local mtime
+        mtime=$(get_mtime_epoch "$lock_dir")
+        local age=$((now - mtime))
+        if [[ "$age" -gt "$LOCK_MAX_AGE_SECONDS" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log_rinfo "[DRY-RUN] Would remove lock dir: $lock_dir (age ${age}s)"
+            else
+                log_rwarn "Removing lock dir: $lock_dir (age ${age}s)"
+                rmdir "$lock_dir" 2>/dev/null || rm -rf "$lock_dir"
+            fi
+        fi
+    done
+
+    # Lock files (*.lock)
+    for lock_file in "${RUNNING_DIR}"/*.lock; do
+        [[ -f "$lock_file" ]] || continue
+        local mtime
+        mtime=$(get_mtime_epoch "$lock_file")
+        local age=$((now - mtime))
+        if [[ "$age" -gt "$LOCK_MAX_AGE_SECONDS" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log_rinfo "[DRY-RUN] Would remove lock file: $lock_file (age ${age}s)"
+            else
+                log_rwarn "Removing lock file: $lock_file (age ${age}s)"
+                rm -f "$lock_file"
+            fi
+        fi
+    done
+}
+
+# Requeue stuck tasks (zombie recovery)
+requeue_stuck_tasks() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_rinfo "[DRY-RUN] Would requeue stuck tasks"
+        return 0
+    fi
+
+    if declare -F recover_zombie_tasks >/dev/null 2>&1; then
+        local recovered
+        recovered=$(recover_zombie_tasks "$ZOMBIE_TASK_MINUTES" 2>/dev/null || true)
+        log_rinfo "Zombie task recovery complete (recovered: ${recovered:-0})"
+        return 0
+    fi
+
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$STATE_DB" ]]; then
+        sqlite3 "$STATE_DB" <<SQL
+BEGIN IMMEDIATE;
+UPDATE tasks
+SET state='QUEUED', worker_id=NULL, updated_at=datetime('now')
+WHERE state='RUNNING'
+  AND worker_id IN (
+      SELECT worker_id FROM workers
+      WHERE last_heartbeat < datetime('now', '-${ZOMBIE_TASK_MINUTES} minutes')
+  );
+UPDATE workers
+SET status='dead'
+WHERE last_heartbeat < datetime('now', '-${ZOMBIE_TASK_MINUTES} minutes')
+  AND status != 'dead';
+COMMIT;
+SQL
+        log_rinfo "Zombie task recovery complete (fallback SQL)"
+    fi
+}
+
+# Container cleanup (optional)
+cleanup_containers() {
+    if ! command -v docker >/dev/null 2>&1; then
+        log_rdebug "docker not available; skipping container cleanup"
+        return 0
+    fi
+
+    log_rinfo "Cleaning tri-agent containers"
+
+    local exited
+    exited=$(docker ps -aq --filter "status=exited" --filter "label=tri-agent" 2>/dev/null || true)
+    if [[ -n "$exited" ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_rinfo "[DRY-RUN] Would remove exited containers: $exited"
+        else
+            log_rwarn "Removing exited containers: $exited"
+            docker rm $exited >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+# Auto-restart support
+restart_allowed() {
+    local name="$1"
+    local now
+    now=$(date +%s)
+    local last
+    last=$(awk -v n="$name" '$1 == n {print $2}' "$RESTART_STATE_FILE" 2>/dev/null | tail -1 || true)
+    if [[ -n "$last" ]]; then
+        local delta=$((now - last))
+        if [[ "$delta" -lt "$RESTART_COOLDOWN_SECONDS" ]]; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+record_restart() {
+    local name="$1"
+    local now
+    now=$(date +%s)
+    echo "$name $now" >> "$RESTART_STATE_FILE" 2>/dev/null || true
+}
+
+start_component() {
+    local name="$1"
+    local cmd="$2"
+    local pid_file="$3"
+    local log_file="$4"
+    local pattern="$5"
+
+    if process_is_running "$pattern" "$pid_file"; then
+        log_rdebug "$name is already running"
+        return 0
+    fi
+
+    if ! is_true "$AUTO_RESTART"; then
+        log_rdebug "Auto-restart disabled; $name not running"
+        return 0
+    fi
+
+    if [[ ! -x "$cmd" ]]; then
+        log_rwarn "$name command not executable: $cmd"
+        return 0
+    fi
+
+    if ! restart_allowed "$name"; then
+        log_rdebug "Restart cooldown active for $name"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_rinfo "[DRY-RUN] Would restart $name ($cmd)"
+        return 0
+    fi
+
+    log_rwarn "Restarting $name"
+    mkdir -p "$(dirname "$log_file")" "$(dirname "$pid_file")" 2>/dev/null || true
+    nohup "$cmd" >> "$log_file" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$pid_file"
+    record_restart "$name"
+    log_rinfo "$name restarted (PID $pid)"
+}
+
+auto_restart_components() {
+    if ! is_true "$AUTO_RESTART"; then
+        log_rdebug "Auto-restart disabled"
+        return 0
+    fi
+
+    # If tri-agent-daemon is running, let it manage core components
+    if process_is_running "tri-agent-daemon" "${STATE_DIR}/daemon.pid"; then
+        log_rdebug "tri-agent-daemon running; skipping core component restarts"
+    else
+        start_component "worker" "${BIN_DIR}/tri-agent-worker" "${STATE_DIR}/worker.pid" "${LOG_DIR}/worker.log" "tri-agent-worker"
+        start_component "supervisor" "${BIN_DIR}/tri-agent-supervisor" "${STATE_DIR}/supervisor.pid" "${LOG_DIR}/supervisor.log" "tri-agent-supervisor"
+        start_component "watchdog" "${BIN_DIR}/budget-watchdog" "${STATE_DIR}/watchdog.pid" "${LOG_DIR}/watchdog.log" "budget-watchdog"
+    fi
+
+    # Queue watcher is not managed by tri-agent-daemon
+    start_component "queue-watcher" "${BIN_DIR}/tri-agent-queue-watcher" "${STATE_DIR}/queue-watcher.pid" "${LOG_DIR}/queue-watcher.log" "tri-agent-queue-watcher"
+}
+
+# Reaper run
+run_reaper_cycle() {
+    log_rinfo "Reaper cycle starting"
+
+    local run_processes=true
+    local run_locks=true
+    local run_containers=true
+
+    if [[ "$PROCESSES_ONLY" == "true" || "$LOCKS_ONLY" == "true" || "$CONTAINERS_ONLY" == "true" ]]; then
+        run_processes=false
+        run_locks=false
+        run_containers=false
+    fi
+    [[ "$PROCESSES_ONLY" == "true" ]] && run_processes=true
+    [[ "$LOCKS_ONLY" == "true" ]] && run_locks=true
+    [[ "$CONTAINERS_ONLY" == "true" ]] && run_containers=true
+
+    if [[ "$run_processes" == "true" ]]; then
+        # Zombies
+        if declare -F cleanup_zombie_processes >/dev/null 2>&1; then
+            cleanup_zombie_processes "$TRI_AGENT_PROCESS_PATTERN"
+        else
+            local zombies
+            zombies=$(find_zombies)
+            if [[ -n "$zombies" ]]; then
+                while IFS='|' read -r pid ppid; do
+                    [[ -n "$pid" ]] && cleanup_zombie "$pid" "$ppid"
+                done <<< "$zombies"
+            fi
+        fi
+
+        # Orphans
+        local orphan_pids
+        orphan_pids=$(find_orphans)
+        if [[ -n "$orphan_pids" ]]; then
+            while read -r pid; do
+                [[ -n "$pid" ]] && cleanup_orphan "$pid"
+            done <<< "$orphan_pids"
+        fi
+
+        # Stale workers
+        reap_stale_workers "$STALE_WORKER_MINUTES"
+
+        # Requeue stuck tasks
+        requeue_stuck_tasks
+
+        # Auto-restart components
+        auto_restart_components
+    fi
+
+    if [[ "$run_locks" == "true" ]]; then
+        reap_orphan_locks
+    fi
+
+    if [[ "$run_containers" == "true" ]]; then
+        cleanup_containers
+    fi
+
+    log_rinfo "Reaper cycle complete"
+}
+
+# Status output
+show_status() {
+    echo "=== Tri-Agent Processes ==="
+    ps -eo pid,ppid,stat,command 2>/dev/null | awk -v pat="$TRI_AGENT_PROCESS_PATTERN" '$0 ~ pat {print}' || true
+    echo ""
+    echo "=== Zombies ==="
+    local zombies
+    zombies=$(find_zombies)
+    if [[ -n "$zombies" ]]; then
+        echo "$zombies" | awk -F'|' '{printf "PID %s (PPID %s)\n", $1, $2}'
+    else
+        echo "None"
+    fi
+    echo ""
+    echo "=== Orphans ==="
+    local orphans
+    orphans=$(find_orphans)
+    if [[ -n "$orphans" ]]; then
+        echo "$orphans"
+    else
+        echo "None"
+    fi
+}
+
+install_cron() {
+    if ! command -v crontab >/dev/null 2>&1; then
+        log_rerror "crontab not available; cannot install cron"
+        return 1
+    fi
+
+    local marker="# tri-agent-process-reaper"
+    local line="*/5 * * * * cd \"$AUTONOMOUS_ROOT\" && \"$BIN_DIR/process-reaper\" --once >> \"$LOG_FILE\" 2>&1 $marker"
+    local current
+    current=$(crontab -l 2>/dev/null || true)
+
+    if echo "$current" | grep -q "$marker"; then
+        log_rinfo "Cron entry already installed"
+        return 0
+    fi
+
+    { echo "$current"; echo "$line"; } | crontab -
+    log_rinfo "Installed cron entry"
+}
+
+uninstall_cron() {
+    if ! command -v crontab >/dev/null 2>&1; then
+        log_rerror "crontab not available; cannot uninstall cron"
+        return 1
+    fi
+
+    local marker="# tri-agent-process-reaper"
+    local current
+    current=$(crontab -l 2>/dev/null || true)
+    if ! echo "$current" | grep -q "$marker"; then
+        log_rinfo "Cron entry not found"
+        return 0
+    fi
+
+    echo "$current" | grep -v "$marker" | crontab -
+    log_rinfo "Removed cron entry"
+}
+
+usage() {
+    cat <<USAGE_EOF
+process-reaper - Clean up orphaned processes and stale resources
+
+Usage: process-reaper [OPTIONS]
+
+Options:
+  --once             Run one cleanup cycle and exit
+  --daemon           Run in background (daemonize)
+  --status           Show current process status
+  --dry-run          Show actions without executing
+  --verbose          Verbose logging
+  --processes-only   Only process cleanup (zombies/orphans/stale workers)
+  --locks-only       Only lock cleanup
+  --containers-only  Only container cleanup
+  --install-cron     Install cron entry (every 5 minutes)
+  --uninstall-cron   Remove cron entry
+  -h, --help         Show this help
+
+Environment:
+  REAPER_INTERVAL                 Loop interval in seconds (default: 300)
+  REAPER_STALE_WORKER_MINUTES     Stale worker timeout (default: 10)
+  REAPER_ZOMBIE_TASK_MINUTES      Zombie task timeout (default: 60)
+  REAPER_LOCK_MAX_AGE_SECONDS     Lock age threshold (default: 3600)
+  REAPER_AUTO_RESTART             Enable auto-restart (default: true)
+  REAPER_RESTART_COOLDOWN_SECONDS Restart cooldown (default: 60)
+  REAPER_LOG_FILE                 Override log file (default: logs/reaper.log)
+USAGE_EOF
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --once)
+            RUN_ONCE=true
+            shift
+            ;;
+        --daemon)
+            RUN_DAEMON=true
+            shift
+            ;;
+        --status)
+            STATUS_ONLY=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=true
+            shift
+            ;;
+        --processes-only)
+            PROCESSES_ONLY=true
+            shift
+            ;;
+        --locks-only)
+            LOCKS_ONLY=true
+            shift
+            ;;
+        --containers-only)
+            CONTAINERS_ONLY=true
+            shift
+            ;;
+        --install-cron)
+            install_cron
+            exit 0
+            ;;
+        --uninstall-cron)
+            uninstall_cron
+            exit 0
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            log_rerror "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+ done
+
+if [[ "$STATUS_ONLY" == "true" ]]; then
+    show_status
+    exit 0
+fi
+
+if [[ "$RUN_DAEMON" == "true" ]]; then
+    daemon_args=()
+    [[ "$DRY_RUN" == "true" ]] && daemon_args+=(--dry-run)
+    [[ "$VERBOSE" == "true" ]] && daemon_args+=(--verbose)
+    [[ "$PROCESSES_ONLY" == "true" ]] && daemon_args+=(--processes-only)
+    [[ "$LOCKS_ONLY" == "true" ]] && daemon_args+=(--locks-only)
+    [[ "$CONTAINERS_ONLY" == "true" ]] && daemon_args+=(--containers-only)
+    nohup "$0" "${daemon_args[@]}" > "$LOG_FILE" 2>&1 &
+    echo "Reaper started (PID: $!)"
+    exit 0
+fi
+
+if [[ "$RUN_ONCE" == "true" ]]; then
+    run_reaper_cycle
+    exit 0
+fi
+
+# Default: loop
+log_rinfo "Process reaper started (interval: ${REAPER_INTERVAL}s)"
+while true; do
+    run_reaper_cycle
+    sleep "$REAPER_INTERVAL"
+done

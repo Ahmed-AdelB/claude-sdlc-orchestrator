@@ -718,14 +718,57 @@ parse_args() {
 }
 
 #===============================================================================
+# Helper Functions
+#===============================================================================
+
+json_error() {
+    local msg="$1"
+    local timestamp
+    timestamp="$(date -Iseconds)"
+    cat <<EOF
+{
+    "status": "FAIL",
+    "error": "${msg}",
+    "timestamp": "${timestamp}"
+}
+EOF
+}
+
+#===============================================================================
 # Main
 #===============================================================================
 
 main() {
     parse_args "$@"
 
+    # Check for jq if JSON output is requested
+    if [[ "$JSON_OUTPUT" == "true" ]] && ! command -v jq &>/dev/null; then
+        json_error "jq is required for JSON output validation but is not installed"
+        exit 1
+    fi
+
     if [[ "$STATUS_ONLY" == "true" ]]; then
-        show_current_status
+        local status_json
+        status_json=$(show_current_status)
+        
+        if [[ "$JSON_OUTPUT" == "true" ]]; then
+            if echo "$status_json" | jq . >/dev/null 2>&1; then
+                echo "$status_json" | jq .
+            else
+                json_error "Cached status file contains invalid JSON"
+                exit 1
+            fi
+        else
+            if echo "$status_json" | jq . >/dev/null 2>&1; then
+                # Only try to parse if valid JSON, otherwise raw output might be safer or show error
+                # But show_current_status handles missing file.
+                # Use display_status which parses JSON
+                display_status "$status_json"
+            else
+                echo "Error: Invalid status data"
+                echo "$status_json"
+            fi
+        fi
         exit 0
     fi
 
@@ -736,10 +779,28 @@ main() {
 
     # Run health check (capture output and exit code separately)
     local json exit_code
-    json=$(run_health_check) && exit_code=0 || exit_code=$?
+    
+    if json=$(run_health_check); then
+        exit_code=0
+    else
+        exit_code=$?
+    fi
 
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        echo "$json"
+        if [[ -z "$json" ]]; then
+            json_error "Health check produced no output"
+            exit 1
+        fi
+
+        # Validate JSON with jq
+        if echo "$json" | jq . >/dev/null 2>&1; then
+            echo "$json" | jq .
+        else
+            json_error "Health check produced invalid JSON"
+            # Optional: output raw for debugging to stderr
+            echo "$json" >&2
+            exit 1
+        fi
     else
         display_status "$json"
     fi

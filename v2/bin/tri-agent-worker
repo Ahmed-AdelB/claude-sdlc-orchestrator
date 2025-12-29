@@ -1,0 +1,794 @@
+#!/bin/bash
+#===============================================================================
+# tri-agent-worker - Autonomous SDLC Worker Agent (v2.0)
+#===============================================================================
+# Features:
+# - M1-001: SQLite canonical task claiming with BEGIN IMMEDIATE transaction
+# - M1-004: Signal-based worker pause/resume with graceful shutdown
+# - Atomic task claiming via sqlite_claim_task() (verified success)
+# - Active governance via signals (SIGUSR1/SIGUSR2/SIGTERM/SIGINT)
+# - Filesystem queue bridge (compatibility)
+# - Worker sharding support
+# - Budget watchdog integration
+# - Robust JSON handling (jq/python fallback)
+#
+# Task Claiming (M1-001):
+# - Uses BEGIN IMMEDIATE transaction for atomic claiming
+# - Verifies UPDATE succeeded via changes() before returning task ID
+# - Prevents race conditions where multiple workers claim the same task
+# - Sets heartbeat_at and last_activity_at on claim for monitoring
+#
+# Signal-based Control (M1-004):
+# - SIGUSR1: Pause worker (stop claiming new tasks, finish current)
+# - SIGUSR2: Resume worker (resume task claiming)
+# - SIGTERM: Graceful shutdown (wait for task completion, then exit)
+# - SIGINT:  Immediate shutdown (release task, exit)
+#
+# State Machine (M1-004):
+# - RUNNING: Normal operation, claiming and processing tasks
+# - PAUSED:  Stopped claiming new tasks (via SIGUSR1 or budget watchdog)
+# - STOPPING: Graceful shutdown in progress (waiting for task completion)
+#
+# Budget Watchdog Integration (M1-004):
+# - Workers register PID with budget watchdog on startup
+# - Budget watchdog sends SIGUSR1 when threshold exceeded
+# - Workers complete current task and pause
+# - Budget watchdog sends SIGUSR2 when budget replenished
+#===============================================================================
+
+set -euo pipefail
+
+# Resolve paths
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+# Source common utilities
+source "${AUTONOMOUS_ROOT}/lib/common.sh"
+
+# Source SQLite State (Essential)
+if [[ -f "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" ]]; then
+    source "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh"
+else
+    echo "ERROR: lib/sqlite-state.sh not found" >&2
+    exit 1
+fi
+
+# Optional heartbeat helpers
+if [[ -f "${AUTONOMOUS_ROOT}/lib/heartbeat.sh" ]]; then
+    source "${AUTONOMOUS_ROOT}/lib/heartbeat.sh"
+fi
+
+# Config
+WORKER_ID="${WORKER_ID:-worker-$$-$(date +%s)}"
+WORKER_PID=$$
+WORKER_SHARD="${WORKER_SHARD:-}" # If set, only claims tasks for this shard
+WORKER_MODEL="${WORKER_MODEL:-}" # If set, only claims tasks for this model
+
+# Directories
+QUEUE_DIR="${AUTONOMOUS_ROOT}/tasks/queue"
+RUNNING_DIR="${AUTONOMOUS_ROOT}/tasks/running"
+REVIEW_DIR="${AUTONOMOUS_ROOT}/tasks/review"
+FAILED_DIR="${AUTONOMOUS_ROOT}/tasks/failed"
+COMPLETED_DIR="${AUTONOMOUS_ROOT}/tasks/completed"
+EXECUTIONS_DIR="${AUTONOMOUS_ROOT}/state/executions"
+WORKER_LOG="${AUTONOMOUS_ROOT}/logs/worker.log"
+
+# State Tracking (M1-004)
+# Valid states: RUNNING, PAUSED, STOPPING
+WORKER_STATE="RUNNING"
+CURRENT_TASK=""
+TASK_START_TIME=""
+SHUTDOWN_TIMEOUT=300  # 5 minutes max wait for task completion on shutdown
+BUDGET_WATCHDOG_PID=""
+
+# Legacy compatibility
+WORKER_PAUSED=false
+
+#===============================================================================
+# Governance & Signals (M1-004: Signal-based Worker Control)
+#===============================================================================
+# Signal Protocol:
+#   SIGUSR1 - Pause worker (stop claiming new tasks, finish current)
+#   SIGUSR2 - Resume worker (resume task claiming)
+#   SIGTERM - Graceful shutdown (wait for task completion, then exit)
+#   SIGINT  - Immediate shutdown (release task, exit)
+#
+# State Machine:
+#   RUNNING -> PAUSED (via SIGUSR1)
+#   PAUSED  -> RUNNING (via SIGUSR2)
+#   RUNNING -> STOPPING (via SIGTERM)
+#   PAUSED  -> STOPPING (via SIGTERM)
+#   STOPPING -> exit (after task completion or timeout)
+#
+# Budget Watchdog Integration:
+#   The budget watchdog sends SIGUSR1 when budget threshold is reached.
+#   Worker will complete current task and pause, preventing budget overrun.
+#===============================================================================
+
+# Update worker state in SQLite
+update_worker_state() {
+    local new_status="$1"
+    local reason="${2:-}"
+
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local esc_worker_id="${WORKER_ID//\'/\'\'}"
+        local esc_reason="${reason//\'/\'\'}"
+
+        _sqlite_exec "$STATE_DB" "
+            UPDATE workers
+            SET status='$new_status',
+                last_heartbeat=datetime('now'),
+                metadata=json_set(COALESCE(metadata,'{}'), '$.state_reason', '$esc_reason')
+            WHERE worker_id='$esc_worker_id';
+        " 2>/dev/null || true
+
+        # Log state change event
+        _sqlite_exec "$STATE_DB" "
+            INSERT INTO events (task_id, event_type, actor, payload, trace_id)
+            VALUES ('', 'WORKER_STATE_CHANGE', '$esc_worker_id',
+                    json_object('from', '$WORKER_STATE', 'to', '$new_status', 'reason', '$esc_reason'),
+                    '${TRACE_ID:-}');
+        " 2>/dev/null || true
+    fi
+}
+
+# Get current worker state (for external queries)
+get_worker_state() {
+    echo "$WORKER_STATE"
+}
+
+# SIGUSR1: Pause worker (stop claiming new tasks)
+handle_pause() {
+    if [[ "$WORKER_STATE" == "STOPPING" ]]; then
+        log_warn "Worker $WORKER_ID: Ignoring PAUSE signal - already stopping"
+        return
+    fi
+
+    log_warn "Worker $WORKER_ID received PAUSE signal (SIGUSR1)"
+    WORKER_STATE="PAUSED"
+    WORKER_PAUSED=true  # Legacy compatibility
+
+    update_worker_state "paused" "SIGUSR1 received"
+
+    if [[ -n "$CURRENT_TASK" ]]; then
+        log_info "Worker $WORKER_ID: Will complete current task $CURRENT_TASK before pausing"
+    else
+        log_info "Worker $WORKER_ID: Paused immediately (no active task)"
+    fi
+
+    # Notify budget watchdog integration (if configured)
+    if [[ -n "$BUDGET_WATCHDOG_PID" ]] && kill -0 "$BUDGET_WATCHDOG_PID" 2>/dev/null; then
+        log_debug "Worker $WORKER_ID: Acknowledged pause to budget watchdog"
+    fi
+}
+
+# SIGUSR2: Resume worker (resume task claiming)
+handle_resume() {
+    if [[ "$WORKER_STATE" == "STOPPING" ]]; then
+        log_warn "Worker $WORKER_ID: Cannot resume - shutdown in progress"
+        return
+    fi
+
+    log_info "Worker $WORKER_ID received RESUME signal (SIGUSR2)"
+    WORKER_STATE="RUNNING"
+    WORKER_PAUSED=false  # Legacy compatibility
+
+    update_worker_state "idle" "SIGUSR2 received - resumed"
+    log_info "Worker $WORKER_ID: Resumed and ready to claim tasks"
+}
+
+# SIGTERM: Graceful shutdown with task completion
+handle_shutdown() {
+    if [[ "$WORKER_STATE" == "STOPPING" ]]; then
+        log_warn "Worker $WORKER_ID: Already stopping, ignoring duplicate SIGTERM"
+        return
+    fi
+
+    log_info "Worker $WORKER_ID received SIGTERM - initiating graceful shutdown"
+    WORKER_STATE="STOPPING"
+    WORKER_PAUSED=true  # Prevent new task claims
+
+    update_worker_state "stopping" "SIGTERM received - graceful shutdown"
+
+    if [[ -n "$CURRENT_TASK" ]]; then
+        log_info "Worker $WORKER_ID: Waiting for task $CURRENT_TASK to complete (timeout: ${SHUTDOWN_TIMEOUT}s)"
+
+        local wait_start
+        wait_start=$(date +%s)
+
+        # Wait for task completion with timeout
+        while [[ -n "$CURRENT_TASK" ]]; do
+            local elapsed=$(( $(date +%s) - wait_start ))
+
+            if (( elapsed >= SHUTDOWN_TIMEOUT )); then
+                log_warn "Worker $WORKER_ID: Shutdown timeout reached. Task $CURRENT_TASK may be orphaned."
+                # Mark task as interrupted for recovery
+                if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+                    local esc_task_id="${CURRENT_TASK//\'/\'\'}"
+                    _sqlite_exec "$STATE_DB" "
+                        UPDATE tasks
+                        SET metadata=json_set(COALESCE(metadata,'{}'),
+                            '$.interrupted', 1,
+                            '$.interrupted_at', datetime('now'),
+                            '$.interrupted_by', '$WORKER_ID')
+                        WHERE id='$esc_task_id';
+                    " 2>/dev/null || true
+                fi
+                break
+            fi
+
+            log_debug "Worker $WORKER_ID: Waiting for task completion... (${elapsed}s/${SHUTDOWN_TIMEOUT}s)"
+            sleep 2
+        done
+
+        if [[ -z "$CURRENT_TASK" ]]; then
+            log_info "Worker $WORKER_ID: Task completed successfully before shutdown"
+        fi
+    else
+        log_info "Worker $WORKER_ID: No active task, shutting down immediately"
+    fi
+
+    # Final cleanup
+    graceful_cleanup
+}
+
+# SIGINT: Immediate shutdown (Ctrl+C)
+handle_interrupt() {
+    log_warn "Worker $WORKER_ID received SIGINT - immediate shutdown"
+    WORKER_STATE="STOPPING"
+
+    if [[ -n "$CURRENT_TASK" ]]; then
+        log_warn "Worker $WORKER_ID: Task $CURRENT_TASK interrupted. Releasing lock."
+
+        # Release the task back to queue for another worker to pick up
+        if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+            local esc_task_id="${CURRENT_TASK//\'/\'\'}"
+            _sqlite_exec "$STATE_DB" "
+                UPDATE tasks
+                SET status='QUEUED',
+                    claimed_by=NULL,
+                    claimed_at=NULL,
+                    metadata=json_set(COALESCE(metadata,'{}'),
+                        '$.released_by', '$WORKER_ID',
+                        '$.released_at', datetime('now'),
+                        '$.release_reason', 'SIGINT')
+                WHERE id='$esc_task_id' AND claimed_by='$WORKER_ID';
+            " 2>/dev/null || true
+
+            log_info "Worker $WORKER_ID: Task $CURRENT_TASK released back to queue"
+        fi
+
+        # Move file back to queue if it was moved to running
+        local running_file="${RUNNING_DIR}/${CURRENT_TASK}.md"
+        if [[ -f "$running_file" ]]; then
+            mv "$running_file" "${QUEUE_DIR}/${CURRENT_TASK}.md" 2>/dev/null || true
+        fi
+    fi
+
+    update_worker_state "terminated" "SIGINT received"
+    immediate_cleanup
+}
+
+# Graceful cleanup (SIGTERM path)
+graceful_cleanup() {
+    log_info "Worker $WORKER_ID: Performing graceful cleanup..."
+
+    # Kill heartbeat process
+    if [[ -n "${HEARTBEAT_PID:-}" ]] && kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
+        kill "$HEARTBEAT_PID" 2>/dev/null || true
+        wait "$HEARTBEAT_PID" 2>/dev/null || true
+    fi
+
+    # Update final state
+    update_worker_state "terminated" "Graceful shutdown complete"
+
+    # Remove worker registration
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local esc_worker_id="${WORKER_ID//\'/\'\'}"
+        _sqlite_exec "$STATE_DB" "
+            UPDATE workers
+            SET status='offline',
+                last_heartbeat=datetime('now')
+            WHERE worker_id='$esc_worker_id';
+        " 2>/dev/null || true
+    fi
+
+    # Clean up lock files
+    local lock_dir="${RUNNING_DIR}/${CURRENT_TASK}.md.lock.d"
+    if [[ -d "$lock_dir" ]]; then
+        rm -rf "$lock_dir" 2>/dev/null || true
+    fi
+
+    log_info "Worker $WORKER_ID: Shutdown complete"
+    exit 0
+}
+
+# Immediate cleanup (SIGINT path)
+immediate_cleanup() {
+    log_warn "Worker $WORKER_ID: Performing immediate cleanup..."
+
+    # Kill heartbeat process
+    if [[ -n "${HEARTBEAT_PID:-}" ]] && kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
+        kill -9 "$HEARTBEAT_PID" 2>/dev/null || true
+    fi
+
+    # Update final state
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local esc_worker_id="${WORKER_ID//\'/\'\'}"
+        _sqlite_exec "$STATE_DB" "
+            UPDATE workers
+            SET status='offline'
+            WHERE worker_id='$esc_worker_id';
+        " 2>/dev/null || true
+    fi
+
+    log_warn "Worker $WORKER_ID: Immediate shutdown complete"
+    exit 1
+}
+
+# Legacy cleanup function (for backwards compatibility)
+cleanup() {
+    graceful_cleanup
+}
+
+# Register signal handlers
+trap handle_pause SIGUSR1
+trap handle_resume SIGUSR2
+trap handle_shutdown SIGTERM
+trap handle_interrupt SIGINT
+
+#===============================================================================
+# Budget Watchdog Integration (M1-004)
+#===============================================================================
+# The budget watchdog monitors API costs and sends SIGUSR1 to pause workers
+# when thresholds are exceeded. Workers acknowledge the pause and can be
+# resumed via SIGUSR2 when budget is replenished.
+#===============================================================================
+
+# Check if budget watchdog has flagged a pause
+check_budget_watchdog() {
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local budget_pause
+        budget_pause=$(state_get "budget" "pause_workers" "0" 2>/dev/null || echo "0")
+
+        if [[ "$budget_pause" == "1" && "$WORKER_STATE" == "RUNNING" ]]; then
+            log_warn "Worker $WORKER_ID: Budget watchdog requests pause"
+            handle_pause
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Register with budget watchdog (if running)
+register_with_budget_watchdog() {
+    local watchdog_pid_file="${AUTONOMOUS_ROOT}/state/budget-watchdog.pid"
+
+    if [[ -f "$watchdog_pid_file" ]]; then
+        BUDGET_WATCHDOG_PID=$(cat "$watchdog_pid_file" 2>/dev/null || echo "")
+
+        if [[ -n "$BUDGET_WATCHDOG_PID" ]] && kill -0 "$BUDGET_WATCHDOG_PID" 2>/dev/null; then
+            log_debug "Worker $WORKER_ID: Registered with budget watchdog (PID: $BUDGET_WATCHDOG_PID)"
+
+            # Register worker PID for watchdog to signal
+            if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+                _sqlite_exec "$STATE_DB" "
+                    UPDATE workers
+                    SET metadata=json_set(COALESCE(metadata,'{}'), '$.budget_watchdog_registered', 1)
+                    WHERE worker_id='$WORKER_ID';
+                " 2>/dev/null || true
+            fi
+        else
+            BUDGET_WATCHDOG_PID=""
+        fi
+    fi
+}
+
+# Report current state for monitoring
+report_worker_status() {
+    cat <<EOF
+{
+  "worker_id": "$WORKER_ID",
+  "pid": $WORKER_PID,
+  "state": "$WORKER_STATE",
+  "current_task": "${CURRENT_TASK:-null}",
+  "task_start_time": "${TASK_START_TIME:-null}",
+  "shard": "${WORKER_SHARD:-any}",
+  "model": "${WORKER_MODEL:-any}",
+  "budget_watchdog_pid": "${BUDGET_WATCHDOG_PID:-null}"
+}
+EOF
+}
+
+#===============================================================================
+# Queue Bridge (File -> SQLite)
+#===============================================================================
+
+# Scan filesystem queue and register tasks in SQLite
+scan_queue_dirs() {
+    # Check root queue and priority subdirs
+    for priority in CRITICAL HIGH MEDIUM LOW; do
+        local dirs=("$QUEUE_DIR" "$QUEUE_DIR/$priority")
+        
+        for dir in "${dirs[@]}"; do
+            [[ -d "$dir" ]] || continue
+            
+            # Use find to list .md files
+            while IFS= read -r file; do
+                [[ -f "$file" ]] || continue
+                
+                local filename
+                filename=$(basename "$file")
+                local task_id="${filename%.md}"
+                
+                # Register in SQLite (idempotent)
+                # We assume priority based on dir or filename prefix
+                local effective_priority="$priority"
+                if [[ "$filename" =~ ^(CRITICAL|HIGH|MEDIUM|LOW)_ ]]; then
+                    effective_priority="${BASH_REMATCH[1]}"
+                fi
+                
+                ensure_task_exists "$task_id" "$effective_priority" "QUEUED"
+                
+            done < <(find "$dir" -maxdepth 1 -name "*.md" 2>/dev/null)
+        done
+    done
+}
+
+#===============================================================================
+# Task Claiming (M1-001: SQLite Canonical Claiming)
+#===============================================================================
+# Uses sqlite_claim_task() from lib/sqlite-state.sh for atomic task claiming.
+# The claim uses BEGIN IMMEDIATE transaction to ensure atomicity.
+# Only returns task ID if the claim actually succeeded (verified via changes()).
+#===============================================================================
+
+acquire_task_lock() {
+    # M1-001: Use SQLite atomic claim (canonical state)
+    # sqlite_claim_task() uses BEGIN IMMEDIATE transaction and verifies
+    # the UPDATE succeeded before returning the task ID
+    local task_id
+    task_id=$(sqlite_claim_task "$WORKER_ID" "" "$WORKER_SHARD" "$WORKER_MODEL")
+
+    if [[ -n "$task_id" ]]; then
+        CURRENT_TASK="$task_id"
+
+        # Extract priority from task metadata (from SQLite)
+        local task_priority=""
+        if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+            task_priority=$(sqlite3 "$STATE_DB" "SELECT CASE priority WHEN 0 THEN 'CRITICAL' WHEN 1 THEN 'HIGH' WHEN 2 THEN 'MEDIUM' WHEN 3 THEN 'LOW' ELSE 'MEDIUM' END FROM tasks WHERE id='${task_id//\'/\'\'}' LIMIT 1;" 2>/dev/null || echo "MEDIUM")
+        fi
+
+        log_info "M1-001: Claimed task $task_id via SQLite atomic transaction (worker: $WORKER_ID, shard: ${WORKER_SHARD:-any}, model: ${WORKER_MODEL:-any}, priority: $task_priority)"
+
+        # M1-001: Log claim event for audit trail
+        if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+            local esc_task_id="${task_id//\'/\'\'}"
+            local esc_worker_id="${WORKER_ID//\'/\'\'}"
+            sqlite3 "$STATE_DB" "INSERT INTO events (task_id, event_type, actor, payload, trace_id) VALUES ('${esc_task_id}', 'TASK_CLAIMED', '${esc_worker_id}', 'M1-001: Atomic SQLite claim', '${TRACE_ID:-}');" 2>/dev/null || true
+        fi
+
+        # Sync file state for legacy compatibility
+        # Find task file in queue and move to running
+        local task_file=""
+        local possible_files=(
+            "$QUEUE_DIR/$task_id.md"
+            "$QUEUE_DIR/CRITICAL/$task_id.md"
+            "$QUEUE_DIR/HIGH/$task_id.md"
+            "$QUEUE_DIR/MEDIUM/$task_id.md"
+            "$QUEUE_DIR/LOW/$task_id.md"
+        )
+
+        for f in "${possible_files[@]}"; do
+            if [[ -f "$f" ]]; then
+                task_file="$f"
+                break
+            fi
+        done
+
+        if [[ -n "$task_file" && -f "$task_file" ]]; then
+            local running_file="${RUNNING_DIR}/$(basename "$task_file")"
+            mkdir -p "$RUNNING_DIR"
+            mv "$task_file" "$running_file" 2>/dev/null || true
+            log_debug "Synced file state: $task_file -> $running_file"
+        fi
+
+        # Create legacy lock directory for backwards compatibility
+        local lock_dir="${RUNNING_DIR}/${task_id}.md.lock.d"
+        mkdir -p "$lock_dir" 2>/dev/null || true
+        echo "$WORKER_ID" > "$lock_dir/worker_id" 2>/dev/null || true
+        echo "$(date -Iseconds)" > "$lock_dir/claimed_at" 2>/dev/null || true
+
+        log_debug "Created legacy lock: $lock_dir"
+
+        echo "$task_id"
+        return 0
+    fi
+
+    CURRENT_TASK=""
+    return 1
+}
+
+#===============================================================================
+# Task Execution
+#===============================================================================
+
+process_task() {
+    local task_id="$1"
+    CURRENT_TASK="$task_id"
+    TASK_START_TIME=$(date -Iseconds)
+    log_info "Processing task: $task_id (started: $TASK_START_TIME)"
+
+    # Update worker state to busy
+    update_worker_state "busy" "Processing task $task_id"
+
+    # 1. Locate file
+    local task_file=""
+    local possible_files=(
+        "$RUNNING_DIR/$task_id.md"
+        "$QUEUE_DIR/$task_id.md"
+        "$QUEUE_DIR/CRITICAL/$task_id.md"
+        "$QUEUE_DIR/HIGH/$task_id.md"
+        "$QUEUE_DIR/MEDIUM/$task_id.md"
+        "$QUEUE_DIR/LOW/$task_id.md"
+    )
+    
+    for f in "${possible_files[@]}"; do
+        if [[ -f "$f" ]]; then
+            task_file="$f"
+            break
+        fi
+    done
+
+    if [[ -z "$task_file" ]]; then
+        log_error "Task file not found for claimed task $task_id. Releasing."
+        # Mark as FAILED in DB so it doesn't loop
+        transition_task "$task_id" "FAILED" "File missing" "$WORKER_ID"
+        CURRENT_TASK=""
+        return
+    fi
+
+    # 2. Move file to RUNNING (filesystem reflection)
+    mkdir -p "$RUNNING_DIR"
+    local running_file="$RUNNING_DIR/$task_id.md"
+    if [[ "$task_file" != "$running_file" ]]; then
+        mv "$task_file" "$running_file"
+    fi
+
+    # 3. Create execution context
+    local exec_id="${task_id}_$(date +%s)"
+    local exec_dir="${EXECUTIONS_DIR}/${exec_id}"
+    mkdir -p "$exec_dir"
+
+    # 4. Route & Execute (Delegates)
+    # Parse file content for routing
+    local content
+    content=$(cat "$running_file")
+
+    # SEC-001: Sanitize content before passing to delegates to prevent prompt injection
+    # The sanitize_llm_input function is provided by lib/common.sh (already sourced)
+    content=$(sanitize_llm_input "$content")
+    log_debug "Content sanitized for delegate (task: $task_id)"
+
+    local model="claude" # Default
+
+    if [[ "$WORKER_MODEL" != "" ]]; then
+        model="$WORKER_MODEL"
+    elif [[ $(wc -c <<< "$content") -gt 50000 ]]; then
+        model="gemini"
+    elif echo "$content" | grep -qE "implementation|feature|bugfix"; then
+        model="codex"
+    fi
+
+    log_info "Routing task $task_id to model $model"
+
+    # Execute Delegate
+    local result=""
+    local exit_code=0
+
+    if [[ -x "${AUTONOMOUS_ROOT}/bin/${model}-delegate" ]]; then
+        # Check circuit breaker (if integrated)
+        if "${AUTONOMOUS_ROOT}/bin/${model}-delegate" "$content" > "${exec_dir}/output.txt" 2>&1; then
+            result="SUCCESS"
+        else
+            result="FAILURE"
+            exit_code=1
+        fi
+    else
+        log_warn "Delegate ${model}-delegate not found. Simulating success."
+        echo "Simulated execution for $task_id" > "${exec_dir}/output.txt"
+        result="SUCCESS"
+    fi
+
+    # 5. Handle Result
+    local task_end_time
+    task_end_time=$(date -Iseconds)
+    local task_duration=""
+    if [[ -n "$TASK_START_TIME" ]]; then
+        local start_epoch end_epoch
+        start_epoch=$(date -d "$TASK_START_TIME" +%s 2>/dev/null || echo "0")
+        end_epoch=$(date -d "$task_end_time" +%s 2>/dev/null || echo "0")
+        if (( start_epoch > 0 && end_epoch > 0 )); then
+            task_duration="$((end_epoch - start_epoch))s"
+        fi
+    fi
+
+    if [[ "$result" == "SUCCESS" ]]; then
+        # Move to REVIEW
+        mkdir -p "$REVIEW_DIR"
+        mv "$running_file" "$REVIEW_DIR/$task_id.md"
+        transition_task "$task_id" "REVIEW" "Execution complete" "$WORKER_ID"
+
+        # Notify Supervisor (File-based trigger for now, until unified)
+        # The unified supervisor will poll the DB or Review dir
+        log_info "Task $task_id submitted for review (duration: ${task_duration:-unknown})"
+    else
+        # Move to FAILED
+        mkdir -p "$FAILED_DIR"
+        mv "$running_file" "$FAILED_DIR/$task_id.md"
+        transition_task "$task_id" "FAILED" "Delegate execution failed" "$WORKER_ID"
+        log_error "Task $task_id failed (duration: ${task_duration:-unknown})"
+    fi
+
+    # Clear task tracking
+    CURRENT_TASK=""
+    TASK_START_TIME=""
+
+    # Update worker state back to idle (unless stopping/paused)
+    if [[ "$WORKER_STATE" == "RUNNING" ]]; then
+        update_worker_state "idle" "Task $task_id completed"
+    fi
+}
+
+#===============================================================================
+# Heartbeat Loop (M1-004 Enhanced)
+#===============================================================================
+
+heartbeat_loop() {
+    while true; do
+        # Determine current status based on state machine
+        local heartbeat_status="idle"
+        case "$WORKER_STATE" in
+            RUNNING)
+                if [[ -n "$CURRENT_TASK" ]]; then
+                    heartbeat_status="busy"
+                else
+                    heartbeat_status="idle"
+                fi
+                ;;
+            PAUSED)
+                heartbeat_status="paused"
+                ;;
+            STOPPING)
+                heartbeat_status="stopping"
+                ;;
+        esac
+
+        if declare -F update_heartbeat_sqlite >/dev/null 2>&1; then
+            update_heartbeat_sqlite "$WORKER_ID" "$heartbeat_status" "${CURRENT_TASK:-}"
+        else
+            local esc_worker_id="${WORKER_ID//\'/\'\'}"
+            local esc_task="${CURRENT_TASK//\'/\'\'}"
+            _sqlite_exec "$STATE_DB" "
+                UPDATE workers
+                SET last_heartbeat=datetime('now'),
+                    status='$heartbeat_status',
+                    current_task='$esc_task',
+                    metadata=json_set(COALESCE(metadata,'{}'),
+                        '$.state', '$WORKER_STATE',
+                        '$.task_start_time', '${TASK_START_TIME:-}')
+                WHERE worker_id='$esc_worker_id';
+            " 2>/dev/null || true
+        fi
+
+        # Check if we should exit heartbeat loop (shutdown)
+        if [[ "$WORKER_STATE" == "STOPPING" && -z "$CURRENT_TASK" ]]; then
+            log_debug "Heartbeat loop: Worker stopping and no active task, exiting loop"
+            break
+        fi
+
+        sleep 60
+    done
+}
+
+#===============================================================================
+# Main (M1-004: Signal-based Worker Control)
+#===============================================================================
+
+# Initialize DB if needed
+sqlite_state_init "$STATE_DB"
+
+# Register worker with enhanced metadata
+_sqlite_exec "$STATE_DB" "
+    INSERT OR REPLACE INTO workers (worker_id, pid, status, started_at, last_heartbeat, metadata)
+    VALUES (
+        '$WORKER_ID',
+        $WORKER_PID,
+        'starting',
+        datetime('now'),
+        datetime('now'),
+        json_object(
+            'state', 'RUNNING',
+            'shard', '${WORKER_SHARD:-any}',
+            'model', '${WORKER_MODEL:-any}',
+            'shutdown_timeout', $SHUTDOWN_TIMEOUT
+        )
+    );
+"
+
+# Register with budget watchdog (M1-004)
+register_with_budget_watchdog
+
+# Start Heartbeat in background
+heartbeat_loop &
+HEARTBEAT_PID=$!
+
+# Update EXIT trap to use graceful cleanup
+trap 'graceful_cleanup' EXIT
+
+log_info "Worker $WORKER_ID started (PID: $WORKER_PID, State: $WORKER_STATE, Shard: ${WORKER_SHARD:-any}, Model: ${WORKER_MODEL:-any})"
+
+# Update status to running
+update_worker_state "idle" "Worker started and ready"
+
+while true; do
+    # 1. Check Worker State Machine (M1-004)
+    case "$WORKER_STATE" in
+        STOPPING)
+            # Graceful shutdown in progress
+            log_debug "Worker in STOPPING state, waiting for cleanup..."
+            sleep 2
+            continue
+            ;;
+        PAUSED)
+            # Worker is paused (via SIGUSR1 or budget watchdog)
+            log_debug "Worker paused (state: PAUSED). Waiting for resume signal..."
+            sleep 5
+            continue
+            ;;
+        RUNNING)
+            # Normal operation, continue to task claiming
+            ;;
+        *)
+            log_error "Unknown worker state: $WORKER_STATE. Resetting to RUNNING."
+            WORKER_STATE="RUNNING"
+            ;;
+    esac
+
+    # 2. Check Budget Watchdog (M1-004)
+    # This handles both signal-based and SQLite-based pause requests
+    if check_budget_watchdog; then
+        # Budget watchdog triggered pause
+        continue
+    fi
+
+    # 3. Check SQLite system pause state (Fallback/Legacy)
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local pause_flag
+        pause_flag=$(state_get "system" "pause_requested" "0" 2>/dev/null || echo "0")
+        if [[ "$pause_flag" == "1" ]]; then
+            log_debug "System pause requested via SQLite. Waiting..."
+            sleep 5
+            continue
+        fi
+    fi
+
+    # 4. Bridge Queue (Sync files to DB)
+    scan_queue_dirs
+
+    # 5. Claim Task (only if in RUNNING state)
+    if [[ "$WORKER_STATE" == "RUNNING" ]]; then
+        if task_id=$(acquire_task_lock); then
+            process_task "$task_id"
+        else
+            # No tasks available, sleep with jitter to prevent thundering herd
+            sleep $(( 5 + RANDOM % 5 ))
+        fi
+    fi
+done

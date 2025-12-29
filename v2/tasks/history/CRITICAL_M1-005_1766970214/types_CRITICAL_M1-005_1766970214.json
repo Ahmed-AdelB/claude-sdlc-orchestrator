@@ -1,0 +1,7 @@
+{
+  "check": "EXE-004",
+  "name": "Type Checking",
+  "errors": 0,
+  "exit_code": 0,
+  "status": "PASS"
+}

@@ -1,0 +1,327 @@
+#!/bin/bash
+# =============================================================================
+# task-auto-picker - Autonomous Task Selection Daemon
+# =============================================================================
+# Automatically picks tasks from the queue based on:
+#   - Priority (CRITICAL > HIGH > MEDIUM > LOW)
+#   - Age (older tasks get escalated)
+#   - Dependencies (respects task dependencies)
+#   - Worker availability (routes to available lanes)
+#   - Model availability (respects circuit breaker states)
+#
+# Runs continuously, selecting and routing tasks to appropriate workers.
+# =============================================================================
+
+set -euo pipefail
+
+# Script location
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LIB_DIR="${AUTONOMOUS_ROOT}/lib"
+
+# Source libraries
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/sqlite-state.sh"
+source "${LIB_DIR}/priority-queue.sh"
+source "${LIB_DIR}/phase-gate.sh" 2>/dev/null || true
+
+# Configuration
+PICKER_INTERVAL_MS="${PICKER_INTERVAL_MS:-1000}"
+MAX_CONCURRENT_TASKS="${MAX_CONCURRENT_TASKS:-3}"
+ENABLE_AUTO_PHASE="${ENABLE_AUTO_PHASE:-true}"
+
+# State
+PICKER_PID=$$ 
+RUNNING=true
+
+# =============================================================================
+# Signal Handlers
+# =============================================================================
+
+handle_shutdown() {
+    log_info "Task auto-picker shutting down..."
+    RUNNING=false
+}
+
+trap handle_shutdown SIGTERM SIGINT
+
+# =============================================================================
+# Task Selection Logic
+# =============================================================================
+
+# Get next task to process
+get_next_task() {
+    # Check if system is paused
+    if declare -f pause_requested >/dev/null && pause_requested 2>/dev/null; then
+        log_debug "System paused, skipping task selection"
+        return 1
+    fi
+
+    # Check current running tasks
+    local running_count
+    running_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM tasks WHERE state = 'RUNNING';")
+
+    if [[ "$running_count" -ge "$MAX_CONCURRENT_TASKS" ]]; then
+        log_debug "Max concurrent tasks reached ($running_count/$MAX_CONCURRENT_TASKS)"
+        return 1
+    fi
+
+    # Get available models (not in OPEN circuit breaker state)
+    local available_models="claude,codex,gemini"
+    if declare -f get_available_models >/dev/null; then
+        available_models=$(get_available_models 2>/dev/null || echo "claude,codex,gemini")
+    fi
+
+    if [[ -z "$available_models" ]]; then
+        log_warn "No models available (all circuit breakers open)"
+        return 1
+    fi
+
+    # Select next task by priority and age
+    local next_task
+    next_task=$(sqlite3 -json "$STATE_DB" <<SQL
+SELECT
+    id,
+    type,
+    priority,
+    CASE priority
+        WHEN 'CRITICAL' THEN 4
+        WHEN 'HIGH' THEN 3
+        WHEN 'MEDIUM' THEN 2
+        WHEN 'LOW' THEN 1
+        ELSE 0
+    END as priority_score,
+    (strftime('%s', 'now') - strftime('%s', created_at)) as age_seconds,
+    metadata
+FROM tasks
+WHERE state = 'QUEUED'
+AND (dependencies IS NULL OR dependencies = '[]' OR
+     NOT EXISTS (
+         SELECT 1 FROM tasks t2
+         WHERE json_extract(tasks.dependencies, '$[*]') LIKE '%' || t2.id || '%'
+         AND t2.state NOT IN ('COMPLETED', 'SKIPPED')
+     ))
+ORDER BY
+    priority_score DESC,
+    age_seconds DESC
+LIMIT 1;
+SQL
+)
+
+    if [[ -z "$next_task" ]] || [[ "$next_task" == "[]" ]]; then
+        return 1
+    fi
+
+    echo "$next_task" | jq -r '.[0] // empty'
+}
+
+# Route task to appropriate model based on type
+route_task() {
+    local task_json="$1"
+
+    local task_id
+    task_id=$(echo "$task_json" | jq -r '.id')
+    local task_type
+    task_type=$(echo "$task_json" | jq -r '.type')
+    local metadata
+    metadata=$(echo "$task_json" | jq -r '.metadata // "{}"')
+
+    # Determine best model for task type
+    local target_model="claude"  # Default
+
+    case "$task_type" in
+        IMPLEMENT|BUILD|FIX|REFACTOR)
+            target_model="codex"
+            ;; 
+        ANALYZE|REVIEW_LARGE|DOCUMENT)
+            target_model="gemini"
+            ;; 
+        ARCHITECT|SECURITY|PLAN|DESIGN)
+            target_model="claude"
+            ;; 
+        TEST)
+            target_model="codex"
+            ;; 
+        *)
+            target_model="claude"
+            ;; 
+    esac
+
+    # Check if target model is available
+    if declare -f should_call_model >/dev/null; then
+        if ! should_call_model "$target_model" 2>/dev/null; then
+            # Fall back to any available model
+            local available
+            available=$(get_available_models | tr ',' ' ')
+            for model in $available; do
+                target_model="$model"
+                break
+            done
+        fi
+    fi
+
+    echo "$target_model"
+}
+
+# Check if task needs phase enforcement
+check_phase_requirements() {
+    local task_id="$1"
+
+    if [[ "$ENABLE_AUTO_PHASE" != "true" ]]; then
+        return 0  # Phase enforcement disabled
+    fi
+
+    if ! declare -f get_current_phase >/dev/null; then
+        return 0
+    fi
+
+    # Check if task has started any phase
+    local current_phase
+    current_phase=$(get_current_phase "$task_id" 2>/dev/null || echo "NONE")
+
+    if [[ "$current_phase" == "NONE" ]]; then
+        # Start with brainstorm phase
+        start_phase "$task_id" "BRAINSTORM" 2>/dev/null || true
+        return 0
+    fi
+
+    # Check if current phase gate is passed
+    local gate_status
+    gate_status=$(sqlite3 "$STATE_DB" <<SQL 2>/dev/null || echo "PENDING"
+SELECT gate_status FROM task_phases
+WHERE task_id = '$task_id'
+AND phase = '$current_phase'
+ORDER BY started_at DESC
+LIMIT 1;
+SQL
+)
+
+    if [[ "$gate_status" == "PASSED" ]]; then
+        # Transition to next phase
+        transition_to_next_phase "$task_id" 2>/dev/null || true
+    fi
+
+    return 0
+}
+
+# Dispatch task to worker
+dispatch_task() {
+    local task_json="$1"
+    local target_model="$2"
+
+    local task_id
+    task_id=$(echo "$task_json" | jq -r '.id')
+    local task_type
+    task_type=$(echo "$task_json" | jq -r '.type')
+
+    log_info "Dispatching task $task_id (type: $task_type) to model: $target_model"
+
+    # Check phase requirements
+    check_phase_requirements "$task_id"
+
+    # Determine worker lane
+    local lane
+    case "$task_type" in
+        IMPLEMENT|BUILD|FIX|REFACTOR|TEST)
+            lane="impl"
+            ;; 
+        REVIEW*|SECURITY|ANALYZE)
+            lane="review"
+            ;; 
+        *)
+            lane="analysis"
+            ;; 
+    esac
+
+    # Find available worker in lane
+    local worker_id
+    worker_id=$(sqlite3 "$STATE_DB" <<SQL
+SELECT worker_id FROM workers
+WHERE status = 'idle'
+AND lane = '$lane'
+LIMIT 1;
+SQL
+)
+
+    if [[ -z "$worker_id" ]]; then
+        # Try any idle worker
+        worker_id=$(sqlite3 "$STATE_DB" "SELECT worker_id FROM workers WHERE status = 'idle' LIMIT 1;")
+    fi
+
+    if [[ -z "$worker_id" ]]; then
+        log_warn "No idle workers available, task $task_id will wait"
+        return 1
+    fi
+
+    # Claim task atomically
+    local claimed
+    claimed=$(claim_task_atomic "$worker_id" "$task_type" "$lane")
+
+    if [[ -n "$claimed" ]]; then
+        log_info "Task $task_id claimed by worker $worker_id"
+
+        # Emit event
+        if declare -f emit_event >/dev/null; then
+            emit_event "TASK_DISPATCHED" "$task_id" "{\"worker_id\":\"$worker_id\",\"model\":\"$target_model\",\"lane\":\"$lane\"}"
+        fi
+
+        return 0
+    else
+        log_warn "Failed to claim task $task_id"
+        return 1
+    fi
+}
+
+# =============================================================================
+# Main Loop
+# =============================================================================
+
+main() {
+    log_info "Task auto-picker starting (PID: $PICKER_PID)"
+    log_info "Configuration: interval=${PICKER_INTERVAL_MS}ms, max_concurrent=${MAX_CONCURRENT_TASKS}"
+
+    # Initialize schema if needed
+    if declare -f init_phase_gate_schema >/dev/null; then
+        init_phase_gate_schema 2>/dev/null || true
+    fi
+
+    local consecutive_empty=0
+
+    while [[ "$RUNNING" == "true" ]]; do
+        # Get next task
+        local task_json
+        task_json=$(get_next_task 2>/dev/null || echo "")
+
+        if [[ -n "$task_json" ]]; then
+            consecutive_empty=0
+
+            # Route and dispatch
+            local target_model
+            target_model=$(route_task "$task_json")
+
+            dispatch_task "$task_json" "$target_model" || true
+        else
+            ((consecutive_empty++)) || true
+
+            # Adaptive sleep: longer when queue is empty
+            if [[ $consecutive_empty -gt 10 ]]; then
+                sleep 5
+            fi
+        fi
+
+        # Convert milliseconds to seconds for sleep
+        local sleep_seconds
+sleep_seconds=$(awk "BEGIN {printf \"%.3f\", $PICKER_INTERVAL_MS / 1000}")
+sleep "$sleep_seconds"
+done
+
+    log_info "Task auto-picker stopped"
+}
+
+main "$@"

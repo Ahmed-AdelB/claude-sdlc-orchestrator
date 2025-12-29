@@ -181,6 +181,26 @@ circuit_breaker:
   half_open_max_calls: 1        # Test calls in half-open state
 
 # =============================================================================
+# Cost Limits (Optional Guardrail)
+# =============================================================================
+# Disabled by default; enable and configure to enforce daily spend limits.
+cost_limits:
+  enabled: false
+  daily_budget_usd: 0           # Set >0 to enable breaker
+  margin_pct: 0.15              # Stop new calls before budget (15% margin)
+  reserve_usd: 1.0              # Buffer per request for variance
+  per_1k_tokens:
+    claude:
+      input: 0
+      output: 0
+    gemini:
+      input: 0
+      output: 0
+    codex:
+      input: 0
+      output: 0
+
+# =============================================================================
 # Logging Configuration
 # =============================================================================
 logging:
@@ -254,13 +274,103 @@ sessions:
 security:
   mask_secrets: true
   mask_patterns:
+    # OpenAI / Anthropic
     - 'sk-[a-zA-Z0-9]{20,}'
+    - 'sk-proj-[a-zA-Z0-9]{20,}'
     - 'ANTHROPIC_API_KEY=[^\s]+'
     - 'OPENAI_API_KEY=[^\s]+'
+
+    # Google
     - 'GOOGLE_API_KEY=[^\s]+'
-    - 'Bearer [a-zA-Z0-9._-]+'
-    - 'ghp_[a-zA-Z0-9]{36}'
-    - 'gho_[a-zA-Z0-9]{36}'
+    - 'AIza[a-zA-Z0-9_-]{35}'
+    - 'GCLOUD_[A-Z_]+=[^\s]+'
+
+    # AWS (SEC-010)
+    - '(A3T|AKIA|ASIA|AGPA|AIDA|ANPA|ANVA|AROA|AIPA|APKA)[A-Z0-9]{16}'
+    - 'AWS_ACCESS_KEY_ID=[A-Z0-9]{20}'
+    - 'aws_access_key_id["\s:=]+[A-Za-z0-9/+=]{20,}'
+    - 'aws_secret_access_key["\s:=]+[A-Za-z0-9/+=]{40,}'
+    - 'AWS_SECRET_ACCESS_KEY=[^\s]+'
+    - 'AWS_[A-Z_]+=[^\s]+'
+
+    # Azure
+    - 'azure[_-]?storage[_-]?key["\s:=]+[A-Za-z0-9/+=]{88}'
+    - 'AZURE_[A-Z_]+=[^\s]+'
+    - 'DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[^;]+'
+
+    # GitHub
+    - 'ghp_[a-zA-Z0-9]{36,}'
+    - 'gho_[a-zA-Z0-9]{36,}'
+    - 'ghs_[a-zA-Z0-9]{36,}'
+    - 'ghr_[a-zA-Z0-9]{36,}'
+    - 'github_pat_[a-zA-Z0-9_]{22,}'
+
+    # GitLab (SEC-010)
+    - 'glpat-[a-zA-Z0-9_-]{20,}'
+
+    # API keys (SEC-010)
+    - 'sk-[a-zA-Z0-9]{20,}'
+    - 'sk_[a-zA-Z0-9]{20,}'
+    - 'pk_(live|test)_[a-zA-Z0-9]{16,}'
+    - 'rk_(live|test)_[a-zA-Z0-9]{16,}'
+    - 'api[_-]?(key|token)["\s:=]+[a-zA-Z0-9._-]{20,}'
+    - 'client[_-]?secret["\s:=]+[a-zA-Z0-9._-]{20,}'
+
+    # Generic tokens (SEC-010)
+    - 'Bearer [a-zA-Z0-9._-]{20,}'
+    - 'token["\s:=]+[a-zA-Z0-9._-]{20,}'
+    - 'api[_-]?key["\s:=]+[a-zA-Z0-9._-]{20,}'
+    - 'secret["\s:=]+[a-zA-Z0-9._-]{20,}'
+    - 'password["\s:=]+[^\s"]{8,}'
+
+    # HTTP Headers (SEC-010)
+    - '[Aa]uthorization:\s*[^\n]+'
+    - '[Xx]-[Aa]pi-[Kk]ey:\s*[^\n]+'
+
+    # JWT tokens (SEC-010)
+    - 'eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'
+
+    # OAuth tokens (SEC-010)
+    - 'oauth[_-]?token["\s:=]+[a-zA-Z0-9._~-]{20,}'
+    - 'oauth[_-]?secret["\s:=]+[a-zA-Z0-9._~-]{20,}'
+    - 'access_token["\s:=]+[a-zA-Z0-9._~-]{20,}'
+    - 'refresh_token["\s:=]+[a-zA-Z0-9._~-]{20,}'
+    - 'id_token["\s:=]+[a-zA-Z0-9._~-]{20,}'
+    - 'ya29\.[a-zA-Z0-9._-]{20,}'
+
+    # Private keys
+    - '-----BEGIN PRIVATE KEY-----'
+    - '-----BEGIN ENCRYPTED PRIVATE KEY-----'
+    - '-----BEGIN RSA PRIVATE KEY-----'
+    - '-----BEGIN EC PRIVATE KEY-----'
+    - '-----BEGIN DSA PRIVATE KEY-----'
+    - '-----BEGIN OPENSSH PRIVATE KEY-----'
+    - '-----BEGIN PGP PRIVATE KEY BLOCK-----'
+
+    # Database connection strings
+    - 'postgres(ql)?://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'mysql://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'mariadb://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'mongodb(\+srv)?://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'rediss?://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'sqlserver://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'mssql://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'oracle://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'cockroachdb://[^\s:@/]+:[^\s@/]+@[^\s]+'
+    - 'jdbc:(postgresql|mysql|mariadb|sqlserver|oracle)://[^\s:@/]+:[^\s@/]+@[^\s]+'
+
+    # Slack
+    - 'xox[baprs]-[a-zA-Z0-9-]+'
+
+    # Stripe
+    - 'sk_live_[a-zA-Z0-9]{24,}'
+    - 'rk_live_[a-zA-Z0-9]{24,}'
+
+    # Twilio
+    - 'SK[a-f0-9]{32}'
+
+    # SendGrid
+    - 'SG\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
 
   # Files to never include in prompts
   excluded_files:

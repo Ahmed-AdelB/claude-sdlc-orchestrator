@@ -15,6 +15,7 @@
 # Ensure we have required directories
 : "${STATE_DIR:=$HOME/.claude/autonomous/state}"
 : "${BREAKERS_DIR:=$STATE_DIR/breakers}"
+: "${LOCKS_DIR:=$STATE_DIR/locks}"
 
 # Default configuration (can be overridden by tri-agent.yaml)
 CB_FAILURE_THRESHOLD="${CB_FAILURE_THRESHOLD:-3}"
@@ -131,9 +132,9 @@ half_open_calls=${half_open_calls}"
 # Returns 0 (allow) or 1 (skip)
 should_call_model() {
     local model="$1"
-    local lock_name="breaker_${model}"
+    local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_name" _should_call_model_locked "$model"
+    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _should_call_model_locked "$model"
 }
 
 _should_call_model_locked() {
@@ -227,9 +228,9 @@ _should_call_model_locked() {
 # Record a successful call
 record_success() {
     local model="$1"
-    local lock_name="breaker_${model}"
+    local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_name" _record_success_locked "$model"
+    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _record_success_locked "$model"
 }
 
 _record_success_locked() {
@@ -294,9 +295,9 @@ _record_success_locked() {
 record_failure() {
     local model="$1"
     local error_type="${2:-UNKNOWN}"
-    local lock_name="breaker_${model}"
+    local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_name" _record_failure_locked "$model" "$error_type"
+    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _record_failure_locked "$model" "$error_type"
 }
 
 _record_failure_locked() {
@@ -387,15 +388,51 @@ record_result() {
 }
 
 # =============================================================================
+# Fallback Logic
+# =============================================================================
+
+# Get the next fallback model in the chain: Claude -> Codex -> Gemini
+# Usage: fallback_to_next_model "current_model"
+# Returns: Next available model name on stdout, or exits with 1 if none
+fallback_to_next_model() {
+    local failed_model="$1"
+    local next_model=""
+
+    case "$failed_model" in
+        "claude") next_model="codex" ;; 
+        "codex") next_model="gemini" ;; 
+        "gemini")
+            log_warn "[${TRACE_ID:-unknown}] End of fallback chain reached (Gemini failed)" 2>/dev/null || true
+            return 1
+            ;;
+        *)
+            log_warn "[${TRACE_ID:-unknown}] Unknown model for fallback: $failed_model" 2>/dev/null || true
+            return 1
+            ;;
+    esac
+
+    # Check if the fallback model is available (Circuit Breaker is CLOSED or HALF_OPEN)
+    if should_call_model "$next_model"; then
+        log_info "[${TRACE_ID:-unknown}] Fallback: Switching from ${failed_model} to ${next_model}" 2>/dev/null || true
+        echo "$next_model"
+        return 0
+    else
+        # If the fallback is also down, try the next one in the chain
+        log_warn "[${TRACE_ID:-unknown}] Fallback model ${next_model} is unavailable (Circuit Breaker OPEN), trying next..." 2>/dev/null || true
+        fallback_to_next_model "$next_model"
+    fi
+}
+
+# =============================================================================
 # Circuit Breaker Queries
 # =============================================================================
 
 # Get circuit breaker status for a model
 get_breaker_status() {
     local model="$1"
-    local lock_name="breaker_${model}"
+    local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_name" _get_breaker_status_locked "$model"
+    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _get_breaker_status_locked "$model"
 }
 
 _get_breaker_status_locked() {
@@ -525,9 +562,9 @@ get_available_models() {
 # Force reset a circuit breaker to CLOSED
 reset_breaker() {
     local model="$1"
-    local lock_name="breaker_${model}"
+    local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_name" _reset_breaker_locked "$model"
+    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _reset_breaker_locked "$model"
 }
 
 _reset_breaker_locked() {
@@ -580,6 +617,97 @@ load_breaker_config() {
 }
 
 # =============================================================================
+# Circuit Breaker Wrapper
+# =============================================================================
+
+# Execute a command with circuit breaker protection
+# Usage: circuit_breaker_call "model" command [args...]
+# Returns:
+#   0: Success
+#   1-125: Command failure
+#   126: Circuit breaker OPEN (Fallback suggested)
+#   127: Command not found or other error
+circuit_breaker_call() {
+    local model="$1"
+    shift
+    
+    # 1. Check breaker state
+    if ! should_call_model "$model"; then
+        log_warn "[${TRACE_ID:-unknown}] Circuit breaker OPEN for ${model}."
+        
+        # Trigger fallback logic (identify next model)
+        local next_model
+        if next_model=$(fallback_to_next_model "$model"); then
+             log_info "[${TRACE_ID:-unknown}] Circuit Breaker Triggered Fallback -> ${next_model}"
+        fi
+        
+        # Return special exit code for Breaker Open
+        return 126 
+    fi
+
+    # 2. Execute command
+    "$@"
+    local exit_code=$?
+
+    # 3. Record result
+    if [[ $exit_code -eq 0 ]]; then
+        record_success "$model"
+    else
+        record_failure "$model" "exit_code_${exit_code}"
+    fi
+
+    return $exit_code
+}
+
+# =============================================================================
+# Quality Gate Circuit Breaker (INC-ARCH-002)
+# =============================================================================
+
+# Quality Gate specific constants
+readonly QG_FAILURE_THRESHOLD=3
+readonly QG_COOLDOWN_SECONDS=300 # 5 minutes
+
+# Handle Quality Gate Circuit Breaker
+# Usage: quality_gate_breaker "gate_type" "action" [args...]
+# Actions:
+#   check: Returns 0 if allowed, 1 if breaker OPEN
+#   success: Records a success
+#   failure: Records a failure
+quality_gate_breaker() {
+    local gate_type="$1"
+    local action="$2"
+    local error_type="${3:-UNKNOWN}"
+    local breaker_name="gate_${gate_type}"
+    
+    # Shadow global config with Quality Gate specific values
+    # These will be picked up by the core functions called within this scope
+    local CB_FAILURE_THRESHOLD=$QG_FAILURE_THRESHOLD
+    local CB_COOLDOWN_SECONDS=$QG_COOLDOWN_SECONDS
+    
+    case "$action" in
+        "check")
+            should_call_model "$breaker_name"
+            ;;
+        "success")
+            record_success "$breaker_name"
+            ;;
+        "failure")
+            record_failure "$breaker_name" "$error_type"
+            ;;
+        "status")
+            get_breaker_status "$breaker_name"
+            ;;
+        *)
+            log_error "Unknown quality_gate_breaker action: $action"
+            return 1
+            ;;
+    esac
+}
+
+# Export for use in other scripts
+export -f quality_gate_breaker
+
+# =============================================================================
 # Export Functions
 # =============================================================================
 export -f should_call_model
@@ -603,3 +731,5 @@ export -f _init_breaker
 export -f _read_breaker_state
 export -f _get_failure_count
 export -f _update_breaker_state
+export -f fallback_to_next_model
+export -f circuit_breaker_call

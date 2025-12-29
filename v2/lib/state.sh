@@ -219,6 +219,11 @@ atomic_write() {
     local tmp
     dest_dir="$(dirname "$dest")"
 
+    # SEC-003A: Reject symlinks to prevent symlink attacks
+    if ! safe_write_check "$dest"; then
+        return 1
+    fi
+
     # Ensure destination directory exists
     mkdir -p "$dest_dir"
 
@@ -269,6 +274,11 @@ atomic_append() {
     local content="$2"
     local lock_name
 
+    # SEC-003A: Reject symlinks to prevent symlink attacks
+    if ! safe_write_check "$file"; then
+        return 1
+    fi
+
     # Use hash of full path to avoid collisions (#85 fix)
     lock_name="$(_lock_name_for_path "append" "$file")"
 
@@ -302,6 +312,11 @@ atomic_increment() {
     local lock_name
     local result_file
     local dest_dir
+
+    # SEC-003A: Reject symlinks to prevent symlink attacks
+    if ! safe_write_check "$file"; then
+        return 1
+    fi
 
     # Use hash of full path to avoid collisions (#85 fix)
     lock_name="$(_lock_name_for_path "counter" "$file")"
@@ -371,6 +386,11 @@ state_set() {
     local value="$3"
     local lock_name
 
+    # SEC-003A: Reject symlinks to prevent symlink attacks
+    if ! safe_write_check "$file"; then
+        return 1
+    fi
+
     lock_name="$(_lock_name_for_path "state" "$file")"
 
     with_lock "$lock_name" _do_state_set "$file" "$key" "$value"
@@ -413,6 +433,11 @@ state_delete() {
 
     if [[ ! -f "$file" ]]; then
         return 0
+    fi
+
+    # SEC-003A: Reject symlinks to prevent symlink attacks
+    if ! safe_write_check "$file"; then
+        return 1
     fi
 
     lock_name="$(_lock_name_for_path "state" "$file")"
@@ -556,6 +581,114 @@ except Exception as e:
 }
 
 # =============================================================================
+# SEC-003A: Symlink Protection Functions
+# =============================================================================
+# Prevents symlink attacks that could overwrite arbitrary system files.
+# All write operations must validate paths before writing.
+# =============================================================================
+
+# Validate that a path stays within an allowed directory
+# Usage: validate_path_in_directory "/path/to/file" "/allowed/base/dir"
+# Returns: 0 if safe, 1 if path escapes the allowed directory
+validate_path_in_directory() {
+    local path="$1"
+    local allowed_dir="$2"
+
+    # Handle empty inputs
+    if [[ -z "$path" ]] || [[ -z "$allowed_dir" ]]; then
+        log_error "SEC-003A: Empty path or allowed_dir provided" 2>/dev/null || true
+        return 1
+    fi
+
+    # Resolve the canonical path (handles .., ., etc.)
+    local canonical
+    canonical=$(realpath -m "$path" 2>/dev/null) || {
+        log_error "SEC-003A: Failed to resolve path: $path" 2>/dev/null || true
+        return 1
+    }
+
+    # Resolve the allowed directory as well
+    local canonical_allowed
+    canonical_allowed=$(realpath -m "$allowed_dir" 2>/dev/null) || {
+        log_error "SEC-003A: Failed to resolve allowed_dir: $allowed_dir" 2>/dev/null || true
+        return 1
+    }
+
+    # Check if canonical path starts with allowed directory
+    # Add trailing slash to prevent prefix matching attacks (e.g., /tmp/state vs /tmp/stateevil)
+    if [[ "$canonical" != "$canonical_allowed" && "$canonical" != "${canonical_allowed}/"* ]]; then
+        log_error "SEC-003A: Path escapes allowed directory: $path -> $canonical (allowed: $canonical_allowed)" 2>/dev/null || true
+        return 1
+    fi
+
+    return 0
+}
+
+# Check if a path is safe for writing (not a symlink, stays within allowed dir)
+# Usage: is_symlink_safe "/path/to/file" ["/allowed/dir"]
+# Returns: 0 if safe to write, 1 if blocked
+is_symlink_safe() {
+    local path="$1"
+    local allowed_dir="${2:-$STATE_DIR}"
+
+    # Handle empty path
+    if [[ -z "$path" ]]; then
+        log_error "SEC-003A: Empty path provided" 2>/dev/null || true
+        return 1
+    fi
+
+    # Reject if it's a symlink
+    if [[ -L "$path" ]]; then
+        log_error "SEC-003A: Blocked write to symlink: $path" 2>/dev/null || true
+        return 1
+    fi
+
+    # Check parent directories for symlinks (prevents parent directory symlink attacks)
+    local current_path="$path"
+    while [[ "$current_path" != "/" && "$current_path" != "." ]]; do
+        if [[ -L "$current_path" ]]; then
+            log_error "SEC-003A: Path component is a symlink: $current_path (in path: $path)" 2>/dev/null || true
+            return 1
+        fi
+        current_path=$(dirname "$current_path")
+    done
+
+    # Validate path stays within allowed directory
+    if ! validate_path_in_directory "$path" "$allowed_dir"; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Safe write wrapper that validates paths before any write operation
+# Usage: safe_write_check "/path/to/file" ["/allowed/dir"]
+# Returns: 0 if write is allowed, 1 if blocked
+safe_write_check() {
+    local path="$1"
+    local allowed_dir="${2:-}"
+
+    # Determine the appropriate allowed directory based on the path
+    if [[ -z "$allowed_dir" ]]; then
+        # Default to STATE_DIR, but allow TASKS_DIR, LOG_DIR, etc.
+        local parent_dir
+        parent_dir=$(dirname "$path")
+
+        # Check if path is within known safe directories
+        case "$parent_dir" in
+            "$STATE_DIR"*|"$TASKS_DIR"*|"$LOG_DIR"*|"$SESSIONS_DIR"*|"$LOCKS_DIR"*)
+                allowed_dir="$AUTONOMOUS_ROOT"
+                ;;
+            *)
+                allowed_dir="$STATE_DIR"
+                ;;
+        esac
+    fi
+
+    is_symlink_safe "$path" "$allowed_dir"
+}
+
+# =============================================================================
 # Cleanup Functions
 # =============================================================================
 
@@ -619,3 +752,8 @@ export -f validate_config
 export -f validate_config_schema
 export -f cleanup_stale_locks
 export -f cleanup_old_state
+
+# SEC-003A: Export symlink protection functions
+export -f validate_path_in_directory
+export -f is_symlink_safe
+export -f safe_write_check

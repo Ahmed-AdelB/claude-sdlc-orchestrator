@@ -18,6 +18,7 @@
 # Ensure we have required directories with safe defaults
 STATE_DIR="${STATE_DIR:-$HOME/.claude/autonomous/state}"
 COST_LOG_DIR="${COST_LOG_DIR:-$HOME/.claude/autonomous/logs/costs}"
+STATE_DB="${STATE_DB:-${STATE_DIR}/tri-agent.db}"
 TRACE_ID="${TRACE_ID:-unknown}"
 
 # Cost data directory
@@ -25,6 +26,76 @@ COST_STATE_DIR="${STATE_DIR}/costs"
 
 # Ensure directories exist
 mkdir -p "$COST_STATE_DIR" "$COST_LOG_DIR" 2>/dev/null || true
+
+# =============================================================================
+# SQLite Cost Persistence (optional)
+# =============================================================================
+
+_cost_sqlite_ready="${_cost_sqlite_ready:-0}"
+
+_sqlite_escape() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
+_ensure_cost_sqlite_schema() {
+    # Only initialize once per process to avoid overhead
+    if [[ "${_cost_sqlite_ready}" == "1" ]]; then
+        return 0
+    fi
+
+    if ! command -v sqlite3 &>/dev/null; then
+        return 1
+    fi
+
+    if [[ -z "${STATE_DB}" ]]; then
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$STATE_DB")" 2>/dev/null || true
+
+    sqlite3 "$STATE_DB" <<'SQL' 2>/dev/null
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=5000;
+
+CREATE TABLE IF NOT EXISTS costs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    model TEXT NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    duration_ms INTEGER,
+    task_type TEXT,
+    trace_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_costs_time ON costs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_costs_model ON costs(model);
+SQL
+
+    _cost_sqlite_ready="1"
+    return 0
+}
+
+_record_request_sqlite() {
+    local model="$1"
+    local input_tokens="$2"
+    local output_tokens="$3"
+    local duration_ms="$4"
+    local task_type="$5"
+    local timestamp="$6"
+    local trace_id="$7"
+
+    _ensure_cost_sqlite_schema || return 0
+
+    local esc_model esc_task_type esc_trace esc_timestamp
+    esc_model=$(_sqlite_escape "$model")
+    esc_task_type=$(_sqlite_escape "$task_type")
+    esc_trace=$(_sqlite_escape "$trace_id")
+    esc_timestamp=$(_sqlite_escape "$timestamp")
+
+    sqlite3 "$STATE_DB" "INSERT INTO costs (timestamp, model, input_tokens, output_tokens, duration_ms, task_type, trace_id) VALUES ('${esc_timestamp}', '${esc_model}', ${input_tokens}, ${output_tokens}, ${duration_ms}, '${esc_task_type}', '${esc_trace}');" 2>/dev/null || true
+}
 
 # =============================================================================
 # Token Estimation Heuristics
@@ -144,6 +215,9 @@ EOF
     local cost_log="${COST_LOG_DIR}/${date_str}.jsonl"
     mkdir -p "$COST_LOG_DIR"
     echo "$log_entry" >> "$cost_log"
+
+    # Persist to SQLite (if available)
+    _record_request_sqlite "$model" "$input_tokens" "$output_tokens" "$duration_ms" "$task_type" "$timestamp" "${TRACE_ID}" || true
 
     # Update daily aggregates
     _update_daily_stats "$model" "$input_tokens" "$output_tokens" "$duration_ms" "$date_str"
