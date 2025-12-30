@@ -998,6 +998,7 @@ requeue_task() {
     fi
 
     _heartbeat_require_sqlite || return 1
+    sqlite_state_init "$STATE_DB" >/dev/null 2>&1 || true
 
     local esc_task="${task_id//\'/\'\'}"
     local esc_worker="${worker_id//\'/\'\'}"

@@ -35,6 +35,7 @@ fail() {
 
 TEST_STATE_DIR=$(mktemp -d)
 TEST_LOG_DIR=$(mktemp -d)
+export AUTONOMOUS_ROOT="$TEST_STATE_DIR"
 export STATE_DIR="$TEST_STATE_DIR"
 export LOCKS_DIR="${TEST_STATE_DIR}/locks"
 export LOG_DIR="$TEST_LOG_DIR"

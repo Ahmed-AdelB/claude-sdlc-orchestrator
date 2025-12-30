@@ -447,6 +447,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     metadata TEXT,
     dlq_reason TEXT,
     dlq_at TEXT,
+    assigned_worker TEXT,
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -700,8 +701,19 @@ migrate_schema() {
         }
     fi
 
+    # FIX-3: Add assigned_worker column if missing
+    local has_assigned_worker
+    has_assigned_worker=$(_sqlite_exec "$db" "SELECT 1 FROM pragma_table_info('tasks') WHERE name='assigned_worker';" 2>/dev/null || echo "")
+
+    if [[ -z "$has_assigned_worker" ]]; then
+        log_info "[MIGRATE] Adding assigned_worker column to tasks table"
+        _sqlite_exec "$db" "ALTER TABLE tasks ADD COLUMN assigned_worker TEXT;" 2>/dev/null || {
+            log_warn "[MIGRATE] Failed to add assigned_worker column (may already exist)"
+        }
+    fi
+
     # Update schema version
-    _sqlite_exec "$db" "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5.2');" 2>/dev/null || true
+    _sqlite_exec "$db" "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5.3');" 2>/dev/null || true
 
     log_info "[MIGRATE] Schema migration complete"
 }
