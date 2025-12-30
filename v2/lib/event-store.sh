@@ -259,9 +259,13 @@ PY
     fi
 }
 
+# Default max events to process (prevents unbounded memory growth)
+EVENT_STORE_MAX_EVENTS="${EVENT_STORE_MAX_EVENTS:-100000}"
+
 event_projection_rebuild() {
     local projection_name="$1"
     local handler="${2:-event_projection_handler_count_by_type}"
+    local max_events="${3:-$EVENT_STORE_MAX_EVENTS}"
 
     if [[ -z "$projection_name" ]]; then
         _event_log ERROR "Projection name required"
@@ -277,16 +281,29 @@ event_projection_rebuild() {
 
     local state="{}"
     local count=0
+    local skipped=0
 
+    # FIX: Added memory bounds to prevent unbounded memory growth (Tri-Agent Round 7)
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
+
+        # Memory protection: stop processing after max_events
+        if [[ $count -ge $max_events ]]; then
+            ((skipped++))
+            continue
+        fi
+
         state=$($handler "$state" "$line") || true
         count=$((count + 1))
     done < "$EVENT_LOG_FILE"
 
+    if [[ $skipped -gt 0 ]]; then
+        _event_log WARN "Event projection truncated: processed $count events, skipped $skipped (max: $max_events)"
+    fi
+
     local projection_file="${EVENT_PROJECTIONS_DIR}/${projection_name}.json"
     cat > "$projection_file" <<PROJEOF
-{"projection":"${projection_name}","rebuilt_at":"$(_event_now)","event_count":${count},"state":${state}}
+{"projection":"${projection_name}","rebuilt_at":"$(_event_now)","event_count":${count},"skipped_count":${skipped},"state":${state}}
 PROJEOF
 
     echo "$projection_file"
@@ -304,29 +321,54 @@ replay_events() {
     local handler="$1"
     local state="${2:-{}}"
     local type_filter="$3"
+    local max_events="${4:-$EVENT_STORE_MAX_EVENTS}"
 
     event_store_init
 
-    # Create a temporary file for event stream to avoid pipe subshell issues
-    local tmp_stream
-    tmp_stream=$(mktemp) || return 1
-    
+    # FIX: Use streaming with limits instead of temp file to prevent memory exhaustion
+    # (Tri-Agent Improvement Round 7)
+    local count=0
+    local skipped=0
+
+    # Stream directly from event store query with limit
     if [[ -n "$type_filter" ]]; then
-        event_store_query "" "" "$type_filter" "" > "$tmp_stream"
+        while IFS= read -r event_json; do
+            [[ -n "$event_json" ]] || continue
+
+            # Memory protection: stop processing after max_events
+            if [[ $count -ge $max_events ]]; then
+                ((skipped++))
+                continue
+            fi
+
+            # Verify JSON validity to prevent injection or errors
+            if _event_is_valid_json "$event_json"; then
+                state=$("$handler" "$state" "$event_json")
+                ((count++))
+            fi
+        done < <(event_store_query "" "" "$type_filter" "")
     else
-        cat "$EVENT_LOG_FILE" > "$tmp_stream"
+        while IFS= read -r event_json; do
+            [[ -n "$event_json" ]] || continue
+
+            # Memory protection: stop processing after max_events
+            if [[ $count -ge $max_events ]]; then
+                ((skipped++))
+                continue
+            fi
+
+            # Verify JSON validity to prevent injection or errors
+            if _event_is_valid_json "$event_json"; then
+                state=$("$handler" "$state" "$event_json")
+                ((count++))
+            fi
+        done < "$EVENT_LOG_FILE"
     fi
 
-    # Process events
-    while IFS= read -r event_json; do
-        [[ -n "$event_json" ]] || continue
-        # Verify JSON validity to prevent injection or errors
-        if _event_is_valid_json "$event_json"; then
-            state=$("$handler" "$state" "$event_json")
-        fi
-    done < "$tmp_stream"
+    if [[ $skipped -gt 0 ]]; then
+        _event_log WARN "Event replay truncated: processed $count events, skipped $skipped (max: $max_events)"
+    fi
 
-    rm -f "$tmp_stream"
     echo "$state"
 }
 

@@ -34,21 +34,30 @@ _get_limit_file() {
     echo "${RATE_LIMIT_DIR}/${safe_key}.json"
 }
 
-# Check if rate limit is exceeded
+# Check if rate limit is exceeded (with atomic locking)
 # Usage: check_rate_limit "key" [limit]
 # Returns: 0 if allowed, 1 if rate limited
+# FIX: Added flock to prevent race conditions (Tri-Agent Improvement Round 7)
 check_rate_limit() {
     local key="$1"
     local limit="${2:-$RATE_LIMIT_DEFAULT}"
     local limit_file
     limit_file=$(_get_limit_file "$key")
+    local lock_file="${limit_file}.lock"
 
     init_rate_limiter
+
+    # Acquire lock for atomic read-modify-write
+    exec 201>"$lock_file"
+    if ! flock -w 5 201; then
+        echo '{"error": "Could not acquire lock", "limited": true}'
+        return 1
+    fi
 
     local now
     now=$(date +%s)
 
-    # Read current state
+    # Read current state (under lock)
     local count=0
     local window_start=$now
 
@@ -70,6 +79,7 @@ check_rate_limit() {
     # Check limit
     if [[ $count -ge $limit ]]; then
         local retry_after=$((RATE_LIMIT_WINDOW - window_age))
+        flock -u 201  # Release lock
         echo "{\"limited\": true, \"retry_after\": $retry_after, \"count\": $count, \"limit\": $limit}"
         return 1
     fi
@@ -77,7 +87,7 @@ check_rate_limit() {
     # Increment counter
     ((count++))
 
-    # Write updated state (atomic write)
+    # Write updated state (atomic write under lock)
     local tmp_file="${limit_file}.tmp.$$"
     cat > "$tmp_file" << EOF
 {
@@ -88,6 +98,9 @@ check_rate_limit() {
 }
 EOF
     mv "$tmp_file" "$limit_file"
+
+    # Release lock
+    flock -u 201
 
     echo "{\"limited\": false, \"remaining\": $((limit - count)), \"count\": $count, \"limit\": $limit}"
     return 0
@@ -162,23 +175,32 @@ get_all_rate_limits() {
     echo "}"
 }
 
-# Token bucket rate limiter (more sophisticated)
+# Token bucket rate limiter (more sophisticated, with atomic locking)
 # Usage: token_bucket_check "key" "rate" "burst"
 # rate: tokens per second, burst: max bucket size
+# FIX: Added flock to prevent race conditions (Tri-Agent Improvement Round 7)
 token_bucket_check() {
     local key="$1"
     local rate="${2:-10}"      # tokens per second
     local burst="${3:-$RATE_LIMIT_BURST}"
     local limit_file
     limit_file=$(_get_limit_file "bucket_${key}")
+    local lock_file="${limit_file}.lock"
 
     init_rate_limiter
+
+    # Acquire lock for atomic read-modify-write
+    exec 202>"$lock_file"
+    if ! flock -w 5 202; then
+        echo '{"error": "Could not acquire lock", "allowed": false}'
+        return 1
+    fi
 
     local now
     now=$(date +%s%N)  # Nanoseconds for precision
     local now_sec=$((now / 1000000000))
 
-    # Read current state
+    # Read current state (under lock)
     local tokens=$burst
     local last_update=$now
 
@@ -201,6 +223,7 @@ token_bucket_check() {
     # Check if we have a token available
     if [[ $new_tokens -lt 1 ]]; then
         local wait_time=$(echo "scale=2; (1 - $new_tokens) / $rate" | bc 2>/dev/null || echo "0.1")
+        flock -u 202  # Release lock
         echo "{\"allowed\": false, \"tokens\": $new_tokens, \"wait_time\": $wait_time}"
         return 1
     fi
@@ -208,7 +231,7 @@ token_bucket_check() {
     # Consume a token
     new_tokens=$((new_tokens - 1))
 
-    # Write updated state
+    # Write updated state (under lock)
     local tmp_file="${limit_file}.tmp.$$"
     cat > "$tmp_file" << EOF
 {
@@ -220,26 +243,38 @@ token_bucket_check() {
 EOF
     mv "$tmp_file" "$limit_file"
 
+    # Release lock
+    flock -u 202
+
     echo "{\"allowed\": true, \"tokens\": $new_tokens, \"rate\": $rate}"
     return 0
 }
 
-# Sliding window rate limiter
+# Sliding window rate limiter (with atomic locking)
 # More accurate than fixed windows, prevents burst at window boundaries
+# FIX: Added flock to prevent race conditions (Tri-Agent Improvement Round 7)
 sliding_window_check() {
     local key="$1"
     local limit="${2:-100}"
     local window="${3:-60}"
     local limit_file
     limit_file=$(_get_limit_file "sliding_${key}")
+    local lock_file="${limit_file}.lock"
 
     init_rate_limiter
+
+    # Acquire lock for atomic read-modify-write
+    exec 203>"$lock_file"
+    if ! flock -w 5 203; then
+        echo '{"error": "Could not acquire lock", "limited": true}'
+        return 1
+    fi
 
     local now
     now=$(date +%s)
     local cutoff=$((now - window))
 
-    # Read timestamps
+    # Read timestamps (under lock)
     local timestamps=()
     if [[ -f "$limit_file" ]]; then
         while IFS= read -r ts; do
@@ -255,6 +290,7 @@ sliding_window_check() {
     if [[ $count -ge $limit ]]; then
         local oldest=${timestamps[0]:-$now}
         local retry_after=$((oldest + window - now))
+        flock -u 203  # Release lock
         echo "{\"limited\": true, \"count\": $count, \"limit\": $limit, \"retry_after\": $retry_after}"
         return 1
     fi
@@ -262,8 +298,11 @@ sliding_window_check() {
     # Add current timestamp
     timestamps+=("$now")
 
-    # Write updated timestamps
+    # Write updated timestamps (under lock)
     printf '%s\n' "${timestamps[@]}" > "$limit_file"
+
+    # Release lock
+    flock -u 203
 
     echo "{\"limited\": false, \"count\": $((count + 1)), \"limit\": $limit, \"remaining\": $((limit - count - 1))}"
     return 0
