@@ -173,6 +173,15 @@ terminate_pid() {
         return 0
     fi
 
+    # Verify PID matches tri-agent pattern before killing (race condition mitigation)
+    local cmd
+    cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    # Check if command matches our allowed pattern
+    if [[ -n "$cmd" ]] && [[ ! "$cmd" =~ $TRI_AGENT_PROCESS_PATTERN ]]; then
+        log_rwarn "PID $pid ($cmd) does not match tri-agent pattern; skipping termination to prevent PID reuse issues"
+        return 0
+    fi
+
     log_rwarn "Terminating $label PID $pid"
     kill -TERM "$pid" 2>/dev/null || true
     local remaining="$timeout"

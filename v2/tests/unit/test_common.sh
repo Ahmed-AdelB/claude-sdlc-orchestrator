@@ -230,6 +230,139 @@ test_parse_delegate_envelope() {
 }
 
 #===============================================================================
+# Test: _sql_escape function
+#===============================================================================
+
+test_sql_escape() {
+    echo ""
+    echo "Testing _sql_escape..."
+
+    if type _sql_escape &>/dev/null; then
+        # Test basic escaping
+        local input="O'Reilly"
+        local expected="O''Reilly"
+        local result
+        result=$(_sql_escape "$input")
+        if [[ "$result" == "$expected" ]]; then
+            pass "_sql_escape: Escapes single quote correctly"
+        else
+            fail "_sql_escape: Expected '$expected', got '$result'"
+        fi
+
+        # Test SQL injection attempt
+        local injection="'; DROP TABLE users; --"
+        local escaped
+        escaped=$(_sql_escape "$injection")
+        if [[ "$escaped" == "''; DROP TABLE users; --" ]]; then
+            pass "_sql_escape: Escapes SQL injection payload"
+        else
+            fail "_sql_escape: SQL injection not properly escaped (got: $escaped)"
+        fi
+
+        # Test empty string
+        result=$(_sql_escape "")
+        if [[ "$result" == "" ]]; then
+            pass "_sql_escape: Handles empty string"
+        else
+            fail "_sql_escape: Empty string should return empty"
+        fi
+    else
+        echo "  [SKIP] _sql_escape: Function not available"
+    fi
+}
+
+#===============================================================================
+# Test: _validate_fd function
+#===============================================================================
+
+test_validate_fd() {
+    echo ""
+    echo "Testing _validate_fd..."
+
+    if type _validate_fd &>/dev/null; then
+        # Test valid fd
+        if _validate_fd "200" 2>/dev/null; then
+            pass "_validate_fd: Accepts valid fd '200'"
+        else
+            fail "_validate_fd: Should accept '200'"
+        fi
+
+        # Test invalid fd (non-numeric)
+        if ! _validate_fd "abc" 2>/dev/null; then
+            pass "_validate_fd: Rejects non-numeric 'abc'"
+        else
+            fail "_validate_fd: Should reject 'abc'"
+        fi
+
+        # Test injection attempt in fd
+        if ! _validate_fd '200; rm -rf /' 2>/dev/null; then
+            pass "_validate_fd: Rejects injection in fd"
+        else
+            fail "_validate_fd: Should reject injection payload"
+        fi
+    else
+        echo "  [SKIP] _validate_fd: Function not available"
+    fi
+}
+
+#===============================================================================
+# Test: Lock functions with malicious filenames
+#===============================================================================
+
+test_lock_malicious_filenames() {
+    echo ""
+    echo "Testing lock functions with malicious filenames..."
+
+    if type acquire_lock &>/dev/null && type release_lock &>/dev/null; then
+        local test_dir
+        test_dir=$(mktemp -d)
+
+        # Test 1: Filename with spaces
+        local lock_with_spaces="${test_dir}/my lock file.lock"
+        if acquire_lock "$lock_with_spaces" 2 202 2>/dev/null; then
+            release_lock 202 2>/dev/null
+            pass "acquire_lock: Handles filename with spaces"
+        else
+            fail "acquire_lock: Should handle filename with spaces"
+        fi
+
+        # Test 2: Filename with quotes
+        local lock_with_quotes="${test_dir}/test'quote.lock"
+        if acquire_lock "$lock_with_quotes" 2 203 2>/dev/null; then
+            release_lock 203 2>/dev/null
+            pass "acquire_lock: Handles filename with quotes"
+        else
+            fail "acquire_lock: Should handle filename with quotes"
+        fi
+
+        # Test 3: Filename with semicolon (command injection attempt)
+        local lock_injection="${test_dir}/test;echo pwned.lock"
+        if acquire_lock "$lock_injection" 2 204 2>/dev/null; then
+            release_lock 204 2>/dev/null
+            # Check no 'pwned' file was created
+            if [[ ! -f "${test_dir}/pwned.lock" ]]; then
+                pass "acquire_lock: Command injection prevented"
+            else
+                fail "acquire_lock: Command injection executed!"
+            fi
+        else
+            pass "acquire_lock: Rejected dangerous filename"
+        fi
+
+        # Test 4: Invalid fd should be rejected
+        if ! acquire_lock "${test_dir}/test.lock" 2 "abc" 2>/dev/null; then
+            pass "acquire_lock: Rejects invalid fd"
+        else
+            fail "acquire_lock: Should reject non-numeric fd"
+        fi
+
+        rm -rf "$test_dir"
+    else
+        echo "  [SKIP] Lock functions not available"
+    fi
+}
+
+#===============================================================================
 # Run Tests
 #===============================================================================
 
@@ -241,6 +374,9 @@ test_command_exists
 test_read_config
 test_validate_numeric
 test_parse_delegate_envelope
+test_sql_escape
+test_validate_fd
+test_lock_malicious_filenames
 
 # Export counters back
 export TESTS_PASSED TESTS_FAILED

@@ -307,13 +307,14 @@ replay_events() {
 
     event_store_init
 
-    # Stream events either filtered or raw
-    local cmd
+    # Create a temporary file for event stream to avoid pipe subshell issues
+    local tmp_stream
+    tmp_stream=$(mktemp) || return 1
+    
     if [[ -n "$type_filter" ]]; then
-        # Use existing query function with no limit
-        cmd="event_store_query \"\" \"\" \"$type_filter\" \"\""
+        event_store_query "" "" "$type_filter" "" > "$tmp_stream"
     else
-        cmd="cat \"$EVENT_LOG_FILE\""
+        cat "$EVENT_LOG_FILE" > "$tmp_stream"
     fi
 
     # Process events
@@ -323,8 +324,9 @@ replay_events() {
         if _event_is_valid_json "$event_json"; then
             state=$("$handler" "$state" "$event_json")
         fi
-    done < <(eval "$cmd")
+    done < "$tmp_stream"
 
+    rm -f "$tmp_stream"
     echo "$state"
 }
 

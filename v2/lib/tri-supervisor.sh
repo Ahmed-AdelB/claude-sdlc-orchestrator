@@ -17,6 +17,14 @@
 : "${STATE_DIR:=$HOME/.claude/autonomous/state}"
 : "${STATE_DB:=$STATE_DIR/tri-agent.db}"
 : "${BIN_DIR:=$HOME/.claude/autonomous/bin}"
+: "${LIB_DIR:=$HOME/.claude/autonomous/lib}"
+
+# Source common utilities
+if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    source "${LIB_DIR}/common.sh"
+else
+    echo "Warning: common.sh not found in ${LIB_DIR}" >&2
+fi
 
 # Consensus configuration
 CONSENSUS_APPROVAL_THRESHOLD=2

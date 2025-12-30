@@ -1015,6 +1015,23 @@ _validate_numeric() {
     return 1
 }
 
+# Validate that a value is a valid file descriptor number
+_validate_fd() {
+    local fd="$1"
+    if ! _validate_numeric "$fd"; then
+        log_error "Invalid file descriptor: $fd"
+        return 1
+    fi
+    return 0
+}
+
+# Escape string for SQLite
+_sql_escape() {
+    local input="$1"
+    # Replace single quotes with two single quotes (standard SQL escaping)
+    echo "${input//\'/\'\'}"
+}
+
 # Validate JSON string
 is_valid_json() {
     local json="$1"
@@ -1570,6 +1587,15 @@ _lock_acquire_with_backoff() {
     local attempts=0
     local deadlock_reported=0
 
+    # Validate fd
+    if ! _validate_fd "$fd"; then
+        return 1
+    fi
+
+    # Prepare safe lock file path for eval
+    local safe_lock_file
+    printf -v safe_lock_file %q "$lock_file"
+
     while true; do
         attempts=$((attempts + 1))
         local now
@@ -1589,7 +1615,7 @@ _lock_acquire_with_backoff() {
             wait="$remaining"
         fi
 
-        eval "exec $fd>>\"$lock_file\""
+        eval "exec $fd>>$safe_lock_file"
 
         if [[ "$mode" == "shared" ]]; then
             if flock -s -w "$wait" "$fd" 2>/dev/null; then
@@ -1654,6 +1680,10 @@ acquire_lock() {
     local timeout="${2:-30}"
     local fd="${3:-200}"
 
+    if ! _validate_fd "$fd"; then
+        return 1
+    fi
+
     # Create lock file directory if needed
     mkdir -p "$(dirname "$lock_file")" 2>/dev/null || true
 
@@ -1676,6 +1706,10 @@ acquire_shared_lock() {
     local timeout="${2:-5}"
     local fd="${3:-201}"
 
+    if ! _validate_fd "$fd"; then
+        return 1
+    fi
+
     mkdir -p "$(dirname "$lock_file")" 2>/dev/null || true
     [[ -f "$lock_file" ]] || : > "$lock_file" 2>/dev/null || true
 
@@ -1692,6 +1726,9 @@ acquire_shared_lock() {
 # Usage: release_lock [file_descriptor]
 release_lock() {
     local fd="${1:-200}"
+    if ! _validate_fd "$fd"; then
+        return 1
+    fi
     flock -u "$fd" 2>/dev/null || true
     eval "exec $fd>&-" 2>/dev/null || true
 }
