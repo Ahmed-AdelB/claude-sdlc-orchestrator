@@ -49,6 +49,8 @@ OPTIONS:
     --dry-run       Show routing decision without executing
     --no-confirm    Skip user confirmation for low confidence
     --verbose       Show detailed routing analysis
+    --fallback      Enable automatic fallback on failure (max 3 attempts)
+    --health        Show model health summary and exit
     -h, --help      Show this help message
     --version       Show version information
 
@@ -68,6 +70,12 @@ EXAMPLES:
 
     # JSON output for scripting
     tri-agent-router --json "Quick analysis"
+
+    # Enable automatic fallback on failure
+    tri-agent-router --fallback "Implement new feature"
+
+    # Check model health status
+    tri-agent-router --health
 
 ROUTING LOGIC:
     Gemini (1M context):
@@ -151,6 +159,8 @@ JSON_OUTPUT=false
 DRY_RUN=false
 NO_CONFIRM=false
 VERBOSE=false
+AUTO_FALLBACK=false
+SHOW_HEALTH=false
 PROMPT=""
 
 parse_arguments() {
@@ -195,6 +205,14 @@ parse_arguments() {
                 ;;
             --verbose|-v)
                 VERBOSE=true
+                shift
+                ;;
+            --fallback|--auto-fallback)
+                AUTO_FALLBACK=true
+                shift
+                ;;
+            --health|--health-check)
+                SHOW_HEALTH=true
                 shift
                 ;;
             -h|--help|--version)
@@ -576,6 +594,89 @@ execute_delegate() {
     esac
 }
 
+# Execute with automatic fallback chain
+# This wraps the prompt with file contents and uses the circuit breaker fallback
+execute_with_fallback() {
+    local primary_model="$1"
+    local prompt="$2"
+    local timeout="${ROUTER_TIMEOUT:-300}"
+
+    local current_model="$primary_model"
+    local attempts=0
+    local max_attempts=3
+    local tried_models=()
+
+    while [[ $attempts -lt $max_attempts ]]; do
+        ((attempts++))
+        tried_models+=("$current_model")
+
+        # Check circuit breaker state
+        local state
+        state=$(check_breaker "$current_model")
+
+        if [[ "$state" == "OPEN" ]]; then
+            log_warn "[${TRACE_ID}] Circuit OPEN for $current_model (attempt $attempts/$max_attempts), finding fallback"
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${YELLOW}[FALLBACK]${RESET} Skipping $current_model (circuit OPEN)" >&2
+            fi
+            current_model=$(get_fallback_model "$current_model" "${tried_models[@]}") || {
+                log_error "[${TRACE_ID}] No available fallback after $attempts attempts"
+                return 1
+            }
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${CYAN}[FALLBACK]${RESET} Trying $current_model instead" >&2
+            fi
+            continue
+        fi
+
+        # Attempt execution
+        local exit_code=0
+        local start_time
+        start_time=$(date +%s)
+
+        log_info "[${TRACE_ID}] Executing with $current_model (attempt $attempts/$max_attempts)"
+        if [[ "$JSON_OUTPUT" != "true" ]] && [[ $attempts -gt 1 ]]; then
+            echo -e "${CYAN}[ATTEMPT $attempts]${RESET} Trying $current_model" >&2
+        fi
+
+        # Execute via the model-specific function
+        execute_delegate "$current_model" "$prompt" || exit_code=$?
+
+        local duration=$(( $(date +%s) - start_time ))
+
+        if [[ $exit_code -eq 0 ]]; then
+            record_success "$current_model"
+            log_info "[${TRACE_ID}] Execution successful with $current_model (${duration}s, attempt $attempts)"
+            return 0
+        else
+            # Check for timeout (exit code 124)
+            local error_type="exit_$exit_code"
+            if [[ $exit_code -eq 124 ]]; then
+                error_type="timeout"
+                log_warn "[${TRACE_ID}] $current_model timed out"
+            fi
+
+            record_failure "$current_model" "$error_type"
+            log_warn "[${TRACE_ID}] $current_model failed (exit $exit_code, ${duration}s), finding fallback"
+
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${YELLOW}[FAILED]${RESET} $current_model failed (exit $exit_code)" >&2
+            fi
+
+            current_model=$(get_fallback_model "$current_model" "${tried_models[@]}") || {
+                log_error "[${TRACE_ID}] All fallback attempts exhausted (tried: ${tried_models[*]})"
+                return 1
+            }
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${CYAN}[FALLBACK]${RESET} Trying $current_model" >&2
+            fi
+        fi
+    done
+
+    log_error "[${TRACE_ID}] Maximum attempts ($max_attempts) exhausted"
+    return 1
+}
+
 # =============================================================================
 # Consensus Mode
 # =============================================================================
@@ -688,6 +789,43 @@ EOF
 main() {
     parse_arguments "$@"
 
+    # Handle health check (no prompt required)
+    if [[ "$SHOW_HEALTH" == "true" ]]; then
+        if [[ "$JSON_OUTPUT" == "true" ]]; then
+            get_model_health_summary
+        else
+            echo -e "${CYAN}[MODEL HEALTH STATUS]${RESET}"
+            echo ""
+            for model in claude codex gemini; do
+                local state
+                local failures
+                state=$(check_breaker "$model")
+                failures=$(get_failure_count "$model")
+
+                local status_color="${GREEN}"
+                local status_icon="✓"
+                if [[ "$state" == "OPEN" ]]; then
+                    status_color="${RED}"
+                    status_icon="✗"
+                elif [[ "$state" == "HALF_OPEN" ]]; then
+                    status_color="${YELLOW}"
+                    status_icon="?"
+                fi
+
+                printf "  %-10s %b%s%b  State: %-10s  Failures: %d\n" \
+                    "$model" "$status_color" "$status_icon" "$RESET" "$state" "$failures"
+            done
+            echo ""
+
+            # Check if all circuits are open
+            if all_circuits_open; then
+                echo -e "${RED}[WARNING] All model circuits are OPEN - system degraded${RESET}"
+                exit 2
+            fi
+        fi
+        exit 0
+    fi
+
     # Validate prompt
     if [[ -z "$PROMPT" ]]; then
         log_error "No prompt provided"
@@ -768,28 +906,75 @@ main() {
     # Log the routing decision
     log_routing_decision "$model" "$confidence" "$reason" true
 
+    # Check circuit breaker state before execution
+    local circuit_state
+    circuit_state=$(check_breaker "$model")
+
+    if [[ "$circuit_state" == "OPEN" ]]; then
+        if [[ "$AUTO_FALLBACK" == "true" ]]; then
+            log_warn "Circuit OPEN for $model, attempting fallback chain"
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${YELLOW}[CIRCUIT OPEN]${RESET} $model unavailable, using fallback chain" >&2
+            fi
+        else
+            log_error "Circuit breaker OPEN for $model - use --fallback to enable automatic fallback"
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${RED}[CIRCUIT OPEN]${RESET} $model is unavailable (circuit breaker tripped)" >&2
+                echo -e "Use --fallback to enable automatic fallback, or --health to check status" >&2
+            fi
+            exit 2
+        fi
+    fi
+
     # Show routing indicator (unless JSON output)
     if [[ "$JSON_OUTPUT" != "true" ]]; then
+        local fallback_indicator=""
+        if [[ "$AUTO_FALLBACK" == "true" ]]; then
+            fallback_indicator=" (fallback enabled)"
+        fi
         case "$model" in
             claude)
-                echo -e "${BLUE}[ROUTE]${RESET} Using Claude Opus 4.5" >&2
+                echo -e "${BLUE}[ROUTE]${RESET} Using Claude Opus 4.5${fallback_indicator}" >&2
                 ;;
             gemini)
-                echo -e "${GREEN}[ROUTE]${RESET} Using Gemini 3 Pro (high thinking)" >&2
+                echo -e "${GREEN}[ROUTE]${RESET} Using Gemini 3 Pro (high thinking)${fallback_indicator}" >&2
                 ;;
             codex)
-                echo -e "${YELLOW}[ROUTE]${RESET} Using Codex GPT-5.2 (xhigh reasoning)" >&2
+                echo -e "${YELLOW}[ROUTE]${RESET} Using Codex GPT-5.2 (xhigh reasoning)${fallback_indicator}" >&2
                 ;;
         esac
     fi
 
-    # Execute delegate
-    execute_delegate "$model" "$PROMPT"
-    local exit_code=$?
+    # Execute with or without fallback
+    if [[ "$AUTO_FALLBACK" == "true" ]]; then
+        # Use automatic fallback chain
+        execute_with_fallback "$model" "$PROMPT"
+        local exit_code=$?
 
-    if [[ $exit_code -ne 0 ]]; then
-        log_error "Delegate execution failed with exit code: $exit_code"
-        exit 3
+        if [[ $exit_code -ne 0 ]]; then
+            log_error "All fallback attempts exhausted"
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${RED}[FAILED]${RESET} All models in fallback chain failed" >&2
+                echo -e "Run 'tri-agent-router --health' to check model status" >&2
+            fi
+            exit 3
+        fi
+    else
+        # Direct execution without fallback
+        execute_delegate "$model" "$PROMPT"
+        local exit_code=$?
+
+        if [[ $exit_code -ne 0 ]]; then
+            record_failure "$model" "exit_$exit_code"
+            log_error "Delegate execution failed with exit code: $exit_code"
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                echo -e "${RED}[FAILED]${RESET} $model failed (exit $exit_code)" >&2
+                echo -e "Use --fallback to enable automatic fallback on failure" >&2
+            fi
+            exit 3
+        else
+            record_success "$model"
+        fi
     fi
 }
 

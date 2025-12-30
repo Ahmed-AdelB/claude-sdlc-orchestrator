@@ -45,6 +45,384 @@
 - Minimum test coverage: 80%
 - Zero critical security vulnerabilities
 
+## ENFORCED MULTI-AGENT PARALLELISM (CRITICAL REQUIREMENT)
+
+### Minimum Agent Requirements
+**ALWAYS run at least 9 CONCURRENT agents** (3 Claude + 3 Codex + 3 Gemini) at ANY time.
+**Total invocations per task: 21 agents across 3 phases.**
+**CRITICAL: At least 9 agents (3×3) MUST be running simultaneously throughout ALL work.**
+
+| Activity Type | Min Concurrent | Distribution (3+3+3) |
+|--------------|----------------|----------------------|
+| **Planning** | 9 | 3 Claude (architecture, security, specs) + 3 Gemini (context, codebase, patterns) + 3 Codex (feasibility, complexity, APIs) |
+| **Implementation** | 9 | 3 Claude (core code, tests, docs) + 3 Codex (implement, optimize, validate) + 3 Gemini (review, context, security) |
+| **Verification** | 9 | 3 Claude (security, logic, edges) + 3 Gemini (context, patterns, regression) + 3 Codex (completeness, coverage, quality) |
+
+**TOTAL PER TASK: 21 agent invocations (7 per phase × 3 phases)**
+
+### How to Launch Parallel Agents
+
+**Option 1: Use Task tool with multiple parallel agents**
+```
+Launch 9 agents in a SINGLE message with multiple Task tool calls:
+- Task 1-3: Claude agents (architecture, security, specs)
+- Task 4-6: Codex via bin/codex-delegate
+- Task 7-9: Gemini via bin/gemini-delegate
+```
+
+**Option 2: Use CLI delegates in parallel**
+```bash
+# Launch all 9 in parallel using & and wait
+gemini -y "Analyze architecture of: [context]" &
+gemini -y "Review security of: [context]" &
+gemini -y "Check patterns of: [context]" &
+codex exec "Implement: [task]" &
+codex exec "Generate tests for: [task]" &
+codex exec "Optimize: [task]" &
+# Claude runs inline as orchestrator (3 Task tool calls)
+wait  # Wait for all background jobs
+```
+
+### Enforcement Checklist (Before Marking ANY Task Complete)
+- [ ] **21 agents** were invoked across 3 phases (7 per phase)
+- [ ] **9+ concurrent** agents ran simultaneously at peak
+- [ ] All three AI models (Claude, Codex, Gemini) participated in EACH phase
+- [ ] Implementation was verified by at least **2 non-implementing AIs**
+- [ ] Security review completed by at least **2 AIs** from different models
+- [ ] Todo was updated throughout the process with phase tracking
+
+## MAXIMUM CAPABILITY USAGE (MANDATORY)
+
+### Gemini Maximum Capability Configuration
+```bash
+# Gemini 3 Pro with full capabilities
+gemini -m gemini-3-pro-preview -y --approval-mode yolo "prompt"
+```
+
+**Gemini Maximum Capabilities:**
+- **1M token context**: Use for full codebase analysis, multi-file review
+- **Pro routing**: Always routes to Gemini 3 Pro for complex tasks
+- **High thinking**: Extended reasoning for architectural decisions
+
+### Codex Maximum Capability Configuration
+```bash
+# Codex with GPT-5.2-Codex and xhigh reasoning
+codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s danger-full-access "task"
+```
+
+**Codex Maximum Capabilities:**
+- **xhigh reasoning**: Maximum reasoning depth for complex problems
+- **400K context**: Large codebase understanding
+- **Full access**: Can modify files, run commands, access system
+
+### Claude Maximum Capability Configuration
+```
+# In Claude Code, use: ultrathink before complex tasks
+# Use Task tool with model="opus" for maximum capability
+```
+
+**Claude Maximum Capabilities:**
+- **ultrathink (32K)**: Maximum reasoning for architecture, security
+- **Opus model**: Deepest analysis and most thorough responses
+
+## TRI-AI ACTIVE TODO MANAGEMENT (CRITICAL)
+
+### All Three AIs MUST Update Todo
+Every AI (Claude, Codex, Gemini) is responsible for:
+
+1. **Adding new requirements discovered during work**
+2. **Updating task status in real-time**
+3. **Breaking down complex tasks into subtasks**
+4. **Flagging blockers and dependencies**
+5. **Recording verification results**
+
+### How Each AI Updates Todo
+
+**Claude (Primary Orchestrator):**
+- Uses TodoWrite tool directly
+- Coordinates todo updates from other AIs
+- Synthesizes requirements from all sources
+
+**Codex (via Claude orchestration):**
+```bash
+# Codex reports findings that Claude adds to todo:
+codex exec "Analyze task and report: 1) New requirements found, 2) Subtasks needed, 3) Dependencies, 4) Blockers. Format as JSON for todo update."
+```
+
+**Gemini (via Claude orchestration):**
+```bash
+# Gemini provides comprehensive analysis for todo:
+gemini -y "Analyze task context and report: 1) Additional requirements from codebase, 2) Hidden dependencies, 3) Security considerations, 4) Test requirements. Format as structured list."
+```
+
+### Active Todo Enforcement
+```
+BEFORE marking ANY task complete, verify:
+- [ ] All user requirements addressed
+- [ ] All Claude-identified requirements addressed
+- [ ] All Codex-identified requirements addressed
+- [ ] All Gemini-identified requirements addressed
+- [ ] Plan file synced with todo
+- [ ] No orphaned requirements
+```
+
+## 24-HOUR CONTINUOUS OPERATION (CRITICAL)
+
+### Session Persistence Architecture
+
+**Progress File Pattern** (Required for context resumption):
+```bash
+# Create/update claude-progress.txt at start of each session
+cat > claude-progress.txt <<EOF
+# Session Progress Log
+## Last Updated: $(date -Iseconds)
+## Session ID: ${SESSION_ID}
+
+### Completed Tasks:
+$(git log --oneline -20)
+
+### Current State:
+- Active branch: $(git branch --show-current)
+- Uncommitted changes: $(git status --short | wc -l)
+- Last checkpoint: ${LAST_CHECKPOINT}
+
+### Next Actions:
+[TODO items from previous session]
+EOF
+```
+
+**State Persistence Locations:**
+| State Type | Location | Backup Frequency |
+|------------|----------|------------------|
+| Task Queue | `state/tri-agent.db` (SQLite) | Real-time WAL |
+| Progress Log | `claude-progress.txt` | Every commit |
+| Checkpoints | `sessions/checkpoints/` | Every 5 minutes |
+| Event Log | `state/event-store/events.jsonl` | Append-only |
+| Git History | `.git/` | Every feature |
+
+### Context Window Management (CRITICAL FOR 24HR)
+
+**Token Budget Per Session:**
+| Model | Context Window | Safe Working Limit | Refresh Trigger |
+|-------|---------------|-------------------|-----------------|
+| Claude Opus | 200K | 160K (80%) | 150K tokens used |
+| Claude Sonnet | 200K | 160K (80%) | 150K tokens used |
+| Gemini 3 Pro | 1M | 800K (80%) | 750K tokens used |
+| Codex GPT-5.2 | 400K | 320K (80%) | 300K tokens used |
+
+**Context Overflow Prevention:**
+```bash
+# Monitor context usage and trigger refresh
+check_context_health() {
+    local tokens_used=$1
+    local model=$2
+
+    case "$model" in
+        claude*) limit=150000 ;;
+        gemini*) limit=750000 ;;
+        codex*)  limit=300000 ;;
+    esac
+
+    if [[ $tokens_used -gt $limit ]]; then
+        # Checkpoint current state
+        create_session_checkpoint
+        # Summarize context with Gemini (largest context)
+        gemini -y "Summarize the current session state for resumption: $(cat claude-progress.txt)"
+        # Refresh session
+        refresh_session
+    fi
+}
+```
+
+**Model Failover Chain (Context Overflow):**
+```
+Claude Sonnet (200K) → Gemini Pro (1M) → Split into sub-tasks
+```
+
+### Session Refresh Protocol (Every 8 Hours)
+
+**Automatic Session Boundaries:**
+```bash
+SESSION_DURATION_HOURS=8
+SESSION_REFRESH_ENABLED=true
+CONTEXT_CHECKPOINT_INTERVAL=300  # 5 minutes
+
+# At session boundary:
+1. Checkpoint all in-progress work
+2. Commit with descriptive message
+3. Update claude-progress.txt
+4. Generate session summary via Gemini
+5. Clear context and reload essentials
+6. Resume from checkpoint
+```
+
+**Session Refresh Command:**
+```bash
+# Force session refresh
+tri-agent session-refresh --checkpoint --summarize
+
+# Resume from last checkpoint
+tri-agent session-resume --from-checkpoint latest
+```
+
+### Watchdog & Auto-Recovery Stack
+
+**3-Layer Supervision:**
+```
+Layer 1: tri-agent-daemon (Parent)
+  ├─ tri-agent-worker (Task executor)
+  ├─ tri-agent-supervisor (Approval flow)
+  └─ budget-watchdog (Cost tracking)
+
+Layer 2: watchdog-master (External supervisor)
+  ├─ Monitors Layer 1 health
+  ├─ Restarts failed daemons
+  └─ Exponential backoff (2^n seconds)
+
+Layer 3: tri-24-monitor (24-hour guardian)
+  ├─ Heartbeat every 30 seconds
+  ├─ System health checks
+  └─ Alerting on failures
+```
+
+**Recovery Hierarchy:**
+| Failure Type | Detection | Recovery Action |
+|--------------|-----------|-----------------|
+| Task Timeout | Heartbeat > threshold | Requeue task, increment retry |
+| Worker Crash | PID check fails | Mark dead, recover tasks |
+| Daemon Crash | watchdog-master | Auto-restart with backoff |
+| Context Overflow | Token tracking | Session refresh |
+| Rate Limit | 429 response | Exponential backoff |
+| Budget Exhausted | cost-tracker | Pause until reset |
+
+**Heartbeat Configuration:**
+```yaml
+heartbeat:
+  interval: 30s
+  stale_threshold: 2m
+  task_timeouts:
+    lint: 5m
+    test: 30m
+    build: 30m
+    default: 15m
+  grace_multiplier: 1.5
+```
+
+### 24-Hour Budget Management
+
+**Daily Token Budgets:**
+| Model | Daily Limit | Hourly Average | Alert Threshold |
+|-------|-------------|----------------|-----------------|
+| Claude Max | ~100M tokens | 4.2M/hour | 80% daily |
+| Gemini Pro | Unlimited* | N/A | API rate limits |
+| Codex | ~50M tokens | 2.1M/hour | 80% daily |
+
+**Cost Tracking Integration:**
+```bash
+# Track costs per session
+cost-tracker --session ${SESSION_ID} --model claude --tokens ${TOKENS_USED}
+
+# Check remaining budget
+cost-tracker --status --daily
+
+# Pause if budget exhausted
+if [[ $(cost-tracker --remaining-percent) -lt 10 ]]; then
+    log_warn "Budget low, pausing expensive operations"
+    EXPENSIVE_OPERATIONS_PAUSED=true
+fi
+```
+
+**Budget Reset Schedule:**
+- Claude: Rolling 5-hour window + 7-day weekly cap
+- Gemini: Daily reset at midnight UTC
+- Codex: Daily reset at midnight UTC
+
+### Progress Tracking Pattern
+
+**Feature List JSON (Structured State):**
+```json
+{
+  "session_id": "tri-24-001",
+  "started_at": "2025-12-30T00:00:00Z",
+  "features": [
+    {"id": "F001", "name": "SQL injection fix", "status": "completed"},
+    {"id": "F002", "name": "DLQ RUNNING state", "status": "completed"},
+    {"id": "F003", "name": "30min threshold", "status": "completed"}
+  ],
+  "current_phase": "verification",
+  "next_actions": ["Run tests", "Deploy to staging"],
+  "blockers": [],
+  "token_usage": {
+    "claude": 45000,
+    "gemini": 120000,
+    "codex": 30000
+  }
+}
+```
+
+**Git Checkpoint Protocol:**
+```bash
+# After each feature completion
+git add -A
+git commit -m "feat(scope): description
+
+Session: ${SESSION_ID}
+Checkpoint: ${CHECKPOINT_NUM}
+Tokens used: ${TOTAL_TOKENS}
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+### 24-Hour Operation Checklist
+
+**Before Starting 24-Hour Session:**
+- [ ] Verify watchdog-master is running
+- [ ] Verify tri-24-monitor is active
+- [ ] Check daily budget availability
+- [ ] Initialize claude-progress.txt
+- [ ] Create initial git checkpoint
+- [ ] Configure session refresh (8-hour intervals)
+
+**During Operation (Automated):**
+- [ ] Heartbeat every 30 seconds
+- [ ] Context checkpoint every 5 minutes
+- [ ] Progress update every commit
+- [ ] Budget check every 100K tokens
+- [ ] Session refresh at 8-hour boundaries
+
+**Recovery Triggers:**
+- [ ] Task timeout → Requeue
+- [ ] Worker crash → Auto-restart
+- [ ] Context overflow → Session refresh
+- [ ] Budget exhaustion → Pause & alert
+- [ ] Rate limit → Exponential backoff
+
+### Commands for 24-Hour Operation
+
+```bash
+# Start 24-hour session
+tri-agent start --mode=24hr --watchdog --monitor
+
+# Check session health
+tri-agent health --verbose
+
+# Force checkpoint
+tri-agent checkpoint --reason="manual"
+
+# Resume from crash
+tri-agent resume --from-checkpoint latest
+
+# View progress
+cat claude-progress.txt
+
+# Check budget
+cost-tracker --status --daily
+
+# Session refresh
+tri-agent session-refresh --summarize
+```
+
 ## Multi-Model Routing
 | Task Type | Primary Model | When to Use |
 |-----------|---------------|-------------|

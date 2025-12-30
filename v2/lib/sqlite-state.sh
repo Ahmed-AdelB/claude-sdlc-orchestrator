@@ -424,7 +424,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority INTEGER DEFAULT 2 CHECK(priority BETWEEN 0 AND 3),
     state TEXT NOT NULL CHECK(state IN (
         'QUEUED','RUNNING','REVIEW','APPROVED','REJECTED','COMPLETED',
-        'FAILED','ESCALATED','TIMEOUT','PAUSED','CANCELLED'
+        'FAILED','ESCALATED','TIMEOUT','PAUSED','CANCELLED','DLQ'
     )),
     lane TEXT,
     shard TEXT,
@@ -445,6 +445,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     last_activity_at TEXT,
     assigned_model TEXT,
     metadata TEXT,
+    dlq_reason TEXT,
+    dlq_at TEXT,
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -767,9 +769,9 @@ transition_task() {
             # Use flock for application-level serialization
             local raw_result
             raw_result=$(
-                flock -w 15 200 2>/dev/null || true
+                flock -w 35 200 2>/dev/null || true  # P1.5: flock timeout (35s) > SQLite timeout (20s)
                 sqlite3 "$STATE_DB" <<SQL 2>&1
-PRAGMA busy_timeout=30000;
+PRAGMA busy_timeout=20000;
 PRAGMA journal_mode=WAL;
 UPDATE tasks SET state='${esc_state}', updated_at=datetime('now')${completed_at} WHERE id='${esc_task}';
 SELECT changes();
@@ -1092,9 +1094,9 @@ claim_task_atomic_filtered() {
             # Filter PRAGMA output at bash level to avoid .output issues
             local raw_result
             raw_result=$(
-                flock -w 15 200 2>/dev/null || true  # Wait up to 15s for lock
+                flock -w 35 200 2>/dev/null || true  # P1.5: flock timeout (35s) > SQLite timeout (20s)
                 sqlite3 "$STATE_DB" <<SQL 2>&1
-PRAGMA busy_timeout=30000;
+PRAGMA busy_timeout=20000;
 PRAGMA journal_mode=WAL;
 BEGIN IMMEDIATE;
 -- Atomic claim: Update first QUEUED task, verify success via changes()
@@ -1296,4 +1298,38 @@ pause_requested() {
     local value
     value=$(state_get "system" "pause_requested" "0")
     [[ "$value" == "1" ]]
+}
+
+# ----------------------------------------------------------------------------
+# Backup and WAL checkpoint helpers (P1.17-P1.18)
+# ----------------------------------------------------------------------------
+
+# P1.17: Create a backup of the SQLite database
+# Usage: sqlite_backup
+# Returns: Path to the backup file
+sqlite_backup() {
+    local backup_dir="${STATE_DIR}/backups"
+    mkdir -p "$backup_dir"
+    local backup_file="${backup_dir}/tri-agent-$(date +%Y%m%d_%H%M%S).db"
+
+    sqlite3 "$STATE_DB" ".backup '$backup_file'"
+
+    # Also backup WAL and SHM files if they exist
+    [[ -f "${STATE_DB}-wal" ]] && cp "${STATE_DB}-wal" "${backup_file}-wal"
+    [[ -f "${STATE_DB}-shm" ]] && cp "${STATE_DB}-shm" "${backup_file}-shm"
+
+    # Retain only last 10 backups (remove older ones)
+    ls -t "$backup_dir"/tri-agent-*.db 2>/dev/null | tail -n +11 | xargs -r rm -f
+    # Also clean up orphaned WAL/SHM files for removed backups
+    ls -t "$backup_dir"/tri-agent-*.db-wal 2>/dev/null | tail -n +11 | xargs -r rm -f
+    ls -t "$backup_dir"/tri-agent-*.db-shm 2>/dev/null | tail -n +11 | xargs -r rm -f
+
+    echo "$backup_file"
+}
+
+# P1.18: Run WAL checkpoint to truncate the WAL file
+# Usage: sqlite_checkpoint
+# Returns: Checkpoint result (pages checkpointed)
+sqlite_checkpoint() {
+    sqlite3 "$STATE_DB" "PRAGMA wal_checkpoint(TRUNCATE);"
 }

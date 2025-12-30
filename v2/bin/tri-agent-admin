@@ -39,6 +39,11 @@ fi
 [[ -f "${LIB_DIR}/rag-context.sh" ]] && source "${LIB_DIR}/rag-context.sh"
 [[ -f "${LIB_DIR}/event-store.sh" ]] && source "${LIB_DIR}/event-store.sh"
 [[ -f "${LIB_DIR}/model-diversity.sh" ]] && source "${LIB_DIR}/model-diversity.sh"
+[[ -f "${LIB_DIR}/sqlite-state.sh" ]] && source "${LIB_DIR}/sqlite-state.sh"
+
+# Task directories (used by recovery commands)
+TASKS_DIR="${TASKS_DIR:-${AUTONOMOUS_ROOT}/tasks}"
+STATE_DB="${STATE_DB:-${AUTONOMOUS_ROOT}/state/tri-agent.db}"
 
 COMPONENT="ADMIN"
 export COMPONENT
@@ -56,6 +61,7 @@ COMMANDS:
     events     Manage event store
     diversity  Check model diversity
     reaper     Process reaper controls
+    recovery   Task recovery and repair operations
     status     Show system summary
 
 Run "tri-agent-admin <command> --help" for command-specific help.
@@ -122,6 +128,36 @@ USAGE:
     tri-agent-admin reaper install-cron
     tri-agent-admin reaper uninstall-cron
     tri-agent-admin reaper status
+EOF
+}
+
+recovery_help() {
+    cat <<EOF
+tri-agent-admin recovery - Task recovery and repair operations
+
+USAGE:
+    tri-agent-admin recovery list-stale [--minutes N]
+        List tasks in running/ older than N minutes (default: 30)
+
+    tri-agent-admin recovery requeue-stale [--minutes N] [--dry-run]
+        Move stale running tasks back to queue (default: 30 min threshold)
+
+    tri-agent-admin recovery retry-failed <task_id> [--max-retries N]
+        Retry a failed task (increment retry count, move to queue)
+
+    tri-agent-admin recovery cleanup-locks [--dry-run]
+        Remove orphaned .lock.d directories in tasks/
+
+    tri-agent-admin recovery sync-db [--dry-run]
+        Resync SQLite database with filesystem task state
+
+    tri-agent-admin recovery process-pending-sync [--dry-run]
+        Process pending-sync markers from failed SQLite transitions
+
+OPTIONS:
+    --dry-run    Show what would be done without making changes
+    --minutes N  Task age threshold in minutes (default: 30)
+    --max-retries N  Maximum retry attempts (default: 3)
 EOF
 }
 
@@ -533,6 +569,306 @@ cmd_reaper() {
     esac
 }
 
+cmd_recovery() {
+    local sub="${1:-}"
+    shift || true
+
+    case "$sub" in
+        list-stale)
+            local minutes=30
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --minutes|-m)
+                        minutes="$2"
+                        shift 2
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            log_info "Listing tasks in running/ older than $minutes minutes..."
+            local count=0
+            while IFS= read -r -d '' task_file; do
+                echo "$task_file"
+                count=$((count + 1))
+            done < <(find "${TASKS_DIR}/running" -type f -name "*.md" -mmin +"$minutes" -print0 2>/dev/null)
+            log_info "Found $count stale task(s)"
+            ;;
+
+        requeue-stale)
+            local minutes=30
+            local dry_run=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --minutes|-m)
+                        minutes="$2"
+                        shift 2
+                        ;;
+                    --dry-run)
+                        dry_run=true
+                        shift
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            log_info "Requeuing tasks in running/ older than $minutes minutes..."
+            local count=0
+            local failed=0
+            while IFS= read -r -d '' task_file; do
+                local task_name
+                task_name=$(basename "$task_file")
+                local queue_file="${TASKS_DIR}/queue/${task_name}"
+                if [[ "$dry_run" == "true" ]]; then
+                    echo "[DRY-RUN] Would move: $task_file -> $queue_file"
+                else
+                    # Clean up locks to allow new worker to claim
+                    rm -f "${task_file}.lock" 2>/dev/null || true
+                    rm -rf "${task_file}.lock.d" 2>/dev/null || true
+
+                    if mv "$task_file" "$queue_file" 2>/dev/null; then
+                        log_info "Requeued: $task_name"
+                        count=$((count + 1))
+                    else
+                        log_warn "Failed to requeue: $task_name"
+                        failed=$((failed + 1))
+                    fi
+                fi
+            done < <(find "${TASKS_DIR}/running" -type f -name "*.md" -mmin +"$minutes" -print0 2>/dev/null)
+            log_info "Requeued $count task(s), $failed failed"
+            ;;
+
+        retry-failed)
+            local task_id="${1:-}"
+            shift || true
+            local max_retries=3
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --max-retries)
+                        max_retries="$2"
+                        shift 2
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            require_arg "$task_id" "task_id"
+            local task_file="${TASKS_DIR}/failed/${task_id}.md"
+            if [[ ! -f "$task_file" ]]; then
+                # Try without .md extension
+                task_file="${TASKS_DIR}/failed/${task_id}"
+                if [[ ! -f "$task_file" ]]; then
+                    log_error "Failed task not found: $task_id"
+                    exit 1
+                fi
+            fi
+            # Get current retry count
+            local retries=0
+            if grep -q "^RETRY_COUNT:" "$task_file" 2>/dev/null; then
+                retries=$(grep "^RETRY_COUNT:" "$task_file" | head -1 | sed 's/^RETRY_COUNT:[[:space:]]*//' | tr -d '[:space:]')
+                retries=${retries:-0}
+            fi
+            if [[ $retries -ge $max_retries ]]; then
+                log_error "Task $task_id has reached max retries ($max_retries)"
+                exit 1
+            fi
+            # Increment retry count
+            retries=$((retries + 1))
+            if grep -q "^RETRY_COUNT:" "$task_file" 2>/dev/null; then
+                sed -i "s/^RETRY_COUNT:.*/RETRY_COUNT: $retries/" "$task_file"
+            else
+                echo "RETRY_COUNT: $retries" >> "$task_file"
+            fi
+            # Clean up potential locks (unlikely in failed/, but good hygiene)
+            rm -f "${task_file}.lock" 2>/dev/null || true
+            rm -rf "${task_file}.lock.d" 2>/dev/null || true
+
+            # Move to queue
+            local queue_file="${TASKS_DIR}/queue/$(basename "$task_file")"
+            if mv "$task_file" "$queue_file"; then
+                log_info "Retrying task $task_id (attempt $retries/$max_retries)"
+            else
+                log_error "Failed to move task to queue"
+                exit 1
+            fi
+            ;;
+
+        cleanup-locks)
+            local dry_run=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run)
+                        dry_run=true
+                        shift
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            log_info "Cleaning up orphaned .lock.d directories..."
+            local count=0
+            while IFS= read -r -d '' lock_dir; do
+                if [[ "$dry_run" == "true" ]]; then
+                    echo "[DRY-RUN] Would remove: $lock_dir"
+                else
+                    rm -rf "$lock_dir"
+                    log_info "Removed: $lock_dir"
+                fi
+                count=$((count + 1))
+            done < <(find "${TASKS_DIR}" -type d -name "*.lock.d" -mmin +60 -print0 2>/dev/null)
+            # Also clean up .lock files older than 1 hour
+            while IFS= read -r -d '' lock_file; do
+                if [[ "$dry_run" == "true" ]]; then
+                    echo "[DRY-RUN] Would remove stale lock: $lock_file"
+                else
+                    rm -f "$lock_file"
+                    log_info "Removed stale lock: $lock_file"
+                fi
+                count=$((count + 1))
+            done < <(find "${TASKS_DIR}" -type f -name "*.lock" -mmin +60 -print0 2>/dev/null)
+            log_info "Cleaned up $count lock artifact(s)"
+            ;;
+
+        sync-db)
+            local dry_run=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run)
+                        dry_run=true
+                        shift
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            if [[ ! -f "$STATE_DB" ]]; then
+                log_warn "SQLite database not found at $STATE_DB"
+                log_info "Creating database..."
+                if [[ "$dry_run" != "true" ]]; then
+                    mkdir -p "$(dirname "$STATE_DB")"
+                    sqlite3 "$STATE_DB" "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, state TEXT, updated_at TEXT);"
+                fi
+            fi
+            log_info "Syncing filesystem state to SQLite..."
+            local count=0
+            local sql_file
+            sql_file=$(mktemp)
+            if [[ "$dry_run" != "true" ]]; then
+                echo "BEGIN TRANSACTION;" > "$sql_file"
+            fi
+
+            for dir in queue running completed failed approved rejected; do
+                local task_dir="${TASKS_DIR}/${dir}"
+                [[ -d "$task_dir" ]] || continue
+                local db_state
+                case "$dir" in
+                    queue) db_state="QUEUED" ;;
+                    running) db_state="RUNNING" ;;
+                    completed) db_state="COMPLETED" ;;
+                    failed) db_state="FAILED" ;;
+                    approved) db_state="APPROVED" ;;
+                    rejected) db_state="REJECTED" ;;
+                    *) db_state=$(echo "$dir" | tr '[:lower:]' '[:upper:]') ;;
+                esac
+                for task_file in "$task_dir"/*.md; do
+                    [[ -f "$task_file" ]] || continue
+                    local task_id
+                    task_id=$(basename "$task_file" .md)
+                    local now
+                    now=$(date -Iseconds)
+                    if [[ "$dry_run" == "true" ]]; then
+                        echo "[DRY-RUN] Would sync: $task_id -> $db_state"
+                    else
+                        echo "INSERT OR REPLACE INTO tasks (id, state, updated_at) VALUES ('$task_id', '$db_state', '$now');" >> "$sql_file"
+                    fi
+                    count=$((count + 1))
+                done
+            done
+
+            if [[ "$dry_run" != "true" ]]; then
+                echo "COMMIT;" >> "$sql_file"
+                sqlite3 "$STATE_DB" < "$sql_file"
+            fi
+            rm -f "$sql_file"
+            log_info "Synced $count task(s) to SQLite"
+            ;;
+
+        process-pending-sync)
+            local dry_run=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run)
+                        dry_run=true
+                        shift
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+            done
+            local pending_dir="${AUTONOMOUS_ROOT}/state/pending-sync"
+            if [[ ! -d "$pending_dir" ]]; then
+                log_info "No pending-sync directory found"
+                return 0
+            fi
+            log_info "Processing pending-sync markers..."
+            local count=0
+            local failed=0
+            for marker in "$pending_dir"/*.json; do
+                [[ -f "$marker" ]] || continue
+                local task_id target_state
+                if command -v jq >/dev/null 2>&1; then
+                    task_id=$(jq -r '.task_id' "$marker")
+                    target_state=$(jq -r '.target_state' "$marker")
+                else
+                    task_id=$(grep -o '"task_id":"[^"]*"' "$marker" | cut -d'"' -f4)
+                    target_state=$(grep -o '"target_state":"[^"]*"' "$marker" | cut -d'"' -f4)
+                fi
+                if [[ -z "$task_id" || -z "$target_state" ]]; then
+                    log_warn "Invalid marker: $marker"
+                    failed=$((failed + 1))
+                    continue
+                fi
+                local now
+                now=$(date -Iseconds)
+                if [[ "$dry_run" == "true" ]]; then
+                    echo "[DRY-RUN] Would sync pending: $task_id -> $target_state"
+                else
+                    if sqlite3 "$STATE_DB" "INSERT OR REPLACE INTO tasks (id, state, updated_at) VALUES ('$task_id', '$target_state', '$now');" 2>/dev/null; then
+                        rm -f "$marker"
+                        log_info "Synced pending: $task_id -> $target_state"
+                        count=$((count + 1))
+                    else
+                        log_warn "Failed to sync: $task_id"
+                        failed=$((failed + 1))
+                    fi
+                fi
+            done
+            log_info "Processed $count pending marker(s), $failed failed"
+            ;;
+
+        --help|-h|"")
+            recovery_help
+            ;;
+        *)
+            log_error "Unknown recovery subcommand: $sub"
+            recovery_help
+            exit 1
+            ;;
+    esac
+}
+
 main() {
     local cmd="${1:-}"
     shift || true
@@ -552,6 +888,9 @@ main() {
             ;;
         reaper)
             cmd_reaper "$@"
+            ;;
+        recovery)
+            cmd_recovery "$@"
             ;;
         status)
             status_summary

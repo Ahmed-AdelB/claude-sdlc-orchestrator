@@ -15,6 +15,7 @@ IFS=$'\n\t'
 AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATE_DIR="${STATE_DIR:-${AUTONOMOUS_ROOT}/state}"
 STATE_DB="${STATE_DB:-${STATE_DIR}/tri-agent.db}"
+WORKERS_DIR="${WORKERS_DIR:-${STATE_DIR}/workers}"
 BIN_DIR="${BIN_DIR:-${AUTONOMOUS_ROOT}/bin}"
 LOG_DIR="${LOG_DIR:-${AUTONOMOUS_ROOT}/logs}"
 TRACE_ID="${TRACE_ID:-pool-$(date +%Y%m%d%H%M%S)-$$}"
@@ -49,10 +50,10 @@ TRI_AGENT_PROCESS_PATTERN="${TRI_AGENT_PROCESS_PATTERN:-tri-agent-worker|tri-age
 # =============================================================================
 WORKER_SHARD="${WORKER_SHARD:-}"
 SHARD_COUNT="${SHARD_COUNT:-3}"
-SHARD_HEALTH_TIMEOUT="${SHARD_HEALTH_TIMEOUT:-120}"  # seconds before shard considered unhealthy
+SHARD_HEALTH_TIMEOUT="${SHARD_HEALTH_TIMEOUT:-60}"  # seconds before shard considered unhealthy
 SHARD_REBALANCE_THRESHOLD="${SHARD_REBALANCE_THRESHOLD:-5}"  # task imbalance threshold
 SHARD_HEARTBEAT_INTERVAL="${SHARD_HEARTBEAT_INTERVAL:-30}"  # seconds between shard heartbeats
-WORKER_STALE_HEARTBEAT_MINUTES="${WORKER_STALE_HEARTBEAT_MINUTES:-5}"
+WORKER_STALE_HEARTBEAT_MINUTES="${WORKER_STALE_HEARTBEAT_MINUTES:-2}"
 WORKER_STALE_GRACE_MULTIPLIER="${WORKER_STALE_GRACE_MULTIPLIER:-1.5}"
 
 # =============================================================================
@@ -629,6 +630,41 @@ cleanup_zombie_processes() {
 
     _pool_log "INFO" "Zombie cleanup complete (processed $processed)"
 }
+
+# =============================================================================
+# P1.16: 3-Check Worker Liveness Probes
+# =============================================================================
+# Performs 3 checks to determine if a worker is alive:
+# 1. Process exists (kill -0 $pid)
+# 2. State file recent (< 60s old)
+# 3. Heartbeat recent (< 120s old)
+# =============================================================================
+
+worker_is_alive() {
+    local worker_id="$1"
+    local worker_pid
+    worker_pid=$(cat "${WORKERS_DIR}/${worker_id}/pid" 2>/dev/null)
+
+    # Check 1: Process exists
+    [[ -n "$worker_pid" ]] && kill -0 "$worker_pid" 2>/dev/null || return 1
+
+    # Check 2: State file recent (< 60s old)
+    local state_file="${WORKERS_DIR}/${worker_id}/state.json"
+    [[ -f "$state_file" ]] || return 1
+    local age=$(($(date +%s) - $(stat -c %Y "$state_file")))
+    [[ $age -lt 60 ]] || return 1
+
+    # Check 3: Heartbeat recent (< 120s old)
+    local heartbeat_file="${WORKERS_DIR}/${worker_id}/heartbeat"
+    [[ -f "$heartbeat_file" ]] || return 1
+    local hb_age=$(($(date +%s) - $(stat -c %Y "$heartbeat_file")))
+    [[ $hb_age -lt 120 ]] || return 1
+
+    return 0
+}
+
+# Export P1.16 function
+export -f worker_is_alive
 
 # =============================================================================
 # M1-006: WORKER_SHARD Environment Variable Support

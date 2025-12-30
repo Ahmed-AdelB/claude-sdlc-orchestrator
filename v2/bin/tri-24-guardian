@@ -15,7 +15,7 @@ mkdir -p "$LOG_DIR" "${ROOT_DIR}/state"
 
 # Configuration
 CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
-MAX_RESTARTS="${MAX_RESTARTS:-5}"
+MAX_RESTARTS="${MAX_RESTARTS:-999999}"  # Effectively unlimited for production resilience
 RESTART_COOLDOWN="${RESTART_COOLDOWN:-300}"
 
 # State

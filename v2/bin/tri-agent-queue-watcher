@@ -325,11 +325,14 @@ scan_queue() {
     return 0
 }
 
-# Sync completed/failed/review directories back to SQLite state
+# Sync completed/failed/review/approved/rejected directories back to SQLite state
+# P0.6: Extended to include approved/rejected directories and pending-sync markers
 sync_task_states() {
     local dirs_and_states=(
         "${AUTONOMOUS_ROOT}/tasks/running:RUNNING"
         "${AUTONOMOUS_ROOT}/tasks/review:REVIEW"
+        "${AUTONOMOUS_ROOT}/tasks/approved:APPROVED"
+        "${AUTONOMOUS_ROOT}/tasks/rejected:REJECTED"
         "${AUTONOMOUS_ROOT}/tasks/completed:COMPLETED"
         "${AUTONOMOUS_ROOT}/tasks/failed:FAILED"
     )
@@ -353,15 +356,134 @@ sync_task_states() {
             if [[ -z "$current_state" ]]; then
                 # Task not in SQLite, register it with current state
                 _sqlite_exec "$STATE_DB" "INSERT OR IGNORE INTO tasks (id, name, state, created_at, updated_at, trace_id) VALUES ('${esc_id}', '${esc_id}', '${expected_state}', datetime('now'), datetime('now'), '${TRACE_ID}');"
+                log_debug "M1-002: Registered missing task $task_id with state $expected_state"
             elif [[ "$current_state" != "$expected_state" ]]; then
-                # State mismatch - file location is canonical for completed/failed
-                if [[ "$expected_state" == "COMPLETED" || "$expected_state" == "FAILED" ]]; then
+                # State mismatch - file location is canonical for terminal/review states
+                # P0.6: Added APPROVED and REJECTED to canonical states
+                if [[ "$expected_state" == "COMPLETED" || "$expected_state" == "FAILED" || \
+                      "$expected_state" == "APPROVED" || "$expected_state" == "REJECTED" ]]; then
                     log_warn "M1-002: State mismatch for $task_id: SQLite=$current_state, File=$expected_state - updating SQLite"
                     _sqlite_exec "$STATE_DB" "UPDATE tasks SET state='${expected_state}', updated_at=datetime('now') WHERE id='${esc_id}';"
                 fi
             fi
         done < <(find "$dir" -maxdepth 1 -name "*.md" -type f -print0 2>/dev/null)
     done
+
+    # P0.6: Process pending-sync markers for failed SQLite transitions
+    process_pending_sync_markers
+}
+
+#===============================================================================
+# P0.6: Pending-Sync Marker Processing
+#===============================================================================
+# Process pending-sync markers created when SQLite transitions fail.
+# These markers are created by supervisor-approver.sh and other components
+# when they cannot write to SQLite (e.g., database locked, disk full).
+# The queue-watcher periodically processes these to ensure eventual consistency.
+#===============================================================================
+
+# Process all pending-sync markers
+process_pending_sync_markers() {
+    local pending_dir="${STATE_DIR}/pending-sync"
+
+    # Skip if directory doesn't exist
+    [[ -d "$pending_dir" ]] || return 0
+
+    local marker_count=0
+    local success_count=0
+    local fail_count=0
+
+    while IFS= read -r -d '' marker_file; do
+        ((marker_count++)) || true
+
+        if process_single_pending_marker "$marker_file"; then
+            ((success_count++)) || true
+        else
+            ((fail_count++)) || true
+        fi
+    done < <(find "$pending_dir" -name "*.pending" -type f -print0 2>/dev/null)
+
+    if [[ $marker_count -gt 0 ]]; then
+        log_info "P0.6: Processed $marker_count pending-sync markers (success: $success_count, failed: $fail_count)"
+    fi
+}
+
+# Process a single pending-sync marker file
+# Marker format: {"task_id":"...","target_state":"...","reason":"...","created_at":"...","trace_id":"..."}
+process_single_pending_marker() {
+    local marker_file="$1"
+
+    if [[ ! -f "$marker_file" ]]; then
+        return 0
+    fi
+
+    # Read and parse marker content
+    local content
+    content=$(cat "$marker_file" 2>/dev/null) || {
+        log_warn "P0.6: Cannot read pending-sync marker: $marker_file"
+        return 1
+    }
+
+    # Extract fields from JSON (simple parsing without jq dependency)
+    local task_id target_state reason
+    task_id=$(echo "$content" | sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
+    target_state=$(echo "$content" | sed -n 's/.*"target_state":"\([^"]*\)".*/\1/p')
+    reason=$(echo "$content" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
+
+    if [[ -z "$task_id" || -z "$target_state" ]]; then
+        log_warn "P0.6: Invalid pending-sync marker format: $marker_file"
+        # Move to failed markers directory for debugging
+        mkdir -p "${STATE_DIR}/pending-sync-failed" 2>/dev/null || true
+        mv "$marker_file" "${STATE_DIR}/pending-sync-failed/" 2>/dev/null || rm -f "$marker_file"
+        return 1
+    fi
+
+    # Validate target state is valid
+    case "$target_state" in
+        QUEUED|RUNNING|REVIEW|APPROVED|REJECTED|COMPLETED|FAILED|ESCALATED|TIMEOUT|PAUSED|CANCELLED)
+            ;;
+        *)
+            log_warn "P0.6: Invalid target state in marker: $target_state for task $task_id"
+            mv "$marker_file" "${STATE_DIR}/pending-sync-failed/" 2>/dev/null || rm -f "$marker_file"
+            return 1
+            ;;
+    esac
+
+    # Escape for SQL
+    local esc_id="${task_id//\'/\'\'}"
+    local esc_state="${target_state//\'/\'\'}"
+    local esc_reason="${reason//\'/\'\'}"
+
+    # Check if task exists in SQLite
+    local current_state
+    current_state=$(_sqlite_exec "$STATE_DB" "SELECT state FROM tasks WHERE id='${esc_id}' LIMIT 1;" 2>/dev/null || echo "")
+
+    if [[ -z "$current_state" ]]; then
+        # Task doesn't exist - create it
+        log_info "P0.6: Creating task $task_id with state $target_state from pending-sync marker"
+        _sqlite_exec "$STATE_DB" "INSERT OR IGNORE INTO tasks (id, name, state, created_at, updated_at, trace_id) VALUES ('${esc_id}', '${esc_id}', '${esc_state}', datetime('now'), datetime('now'), '${TRACE_ID}');" || {
+            log_error "P0.6: Failed to create task $task_id from pending-sync marker"
+            return 1
+        }
+    else
+        # Update existing task state
+        log_info "P0.6: Updating task $task_id from $current_state to $target_state (from pending-sync)"
+        _sqlite_exec "$STATE_DB" "UPDATE tasks SET state='${esc_state}', updated_at=datetime('now') WHERE id='${esc_id}';" || {
+            log_error "P0.6: Failed to update task $task_id to state $target_state"
+            return 1
+        }
+    fi
+
+    # Log event for audit trail
+    _sqlite_exec "$STATE_DB" "INSERT INTO events (task_id, event_type, actor, payload, trace_id) VALUES ('${esc_id}', 'PENDING_SYNC_PROCESSED', 'queue-watcher', '${esc_reason}', '${TRACE_ID}');" 2>/dev/null || true
+
+    # Remove the processed marker
+    rm -f "$marker_file" 2>/dev/null || {
+        log_warn "P0.6: Could not remove processed marker: $marker_file"
+    }
+
+    log_debug "P0.6: Successfully processed pending-sync marker for $task_id -> $target_state"
+    return 0
 }
 
 #===============================================================================

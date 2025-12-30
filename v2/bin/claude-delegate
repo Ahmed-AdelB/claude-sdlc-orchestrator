@@ -3,13 +3,32 @@
 # claude-delegate - Wrapper for Claude CLI with JSON envelope output
 #===============================================================================
 # Wraps Claude CLI execution and outputs structured JSON response envelope.
-# Features:
-# - Circuit Breaker Integration
-# - JSON Output
-# - Cost Tracking
+# Uses Claude CLI (subscription-based) with model selection and thinking modes.
+#
+# Usage:
+#   claude-delegate "Review this code for security issues"
+#   claude-delegate "Should we approve this PR?" --timeout 120
+#   claude-delegate --model opus-4.5 --thinking ultrathink "Complex analysis"
+#   echo "code here" | claude-delegate "Analyze this for bugs"
+#
+# JSON envelope format:
+# {
+#   "model": "claude",
+#   "status": "success|error",
+#   "decision": "APPROVE|REJECT|ABSTAIN",
+#   "confidence": 0.0-1.0,
+#   "reasoning": "...",
+#   "output": "...",
+#   "trace_id": "...",
+#   "duration_ms": N
+# }
+#
+# IMPORTANT: This delegate uses the Claude CLI (subscription-based).
+# NO direct API calls - uses `claude` command with flags.
 #===============================================================================
 
-# Source common utilities
+# Source common utilities (strict mode, trace ID, logging)
+# Resolve symlinks to find actual script location
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 while [[ -L "$SCRIPT_PATH" ]]; do
     SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
@@ -20,6 +39,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
 if [[ -f "${LIB_DIR}/common.sh" ]]; then
+    # shellcheck source=../lib/common.sh
     source "${LIB_DIR}/common.sh"
 else
     echo '{"model":"claude","status":"error","decision":"ABSTAIN","confidence":0.0,"reasoning":"common.sh not found","output":"","trace_id":"unknown","duration_ms":0}'
@@ -35,27 +55,187 @@ if [[ -f "${LIB_DIR}/circuit-breaker.sh" ]]; then
     CB_FAILURE_THRESHOLD="${CB_FAILURE_THRESHOLD:-3}"
 fi
 
+# Set component for logging
 COMPONENT="CLAUDE"
 export COMPONENT
+
+# Ensure TRACE_ID is set even if common.sh failed
 TRACE_ID="${TRACE_ID:-claude-$(date +%Y%m%d%H%M%S)-$$}"
 export TRACE_ID
 
-# Config
-DEFAULT_TIMEOUT=300
+#===============================================================================
+# Configuration
+#===============================================================================
+DEFAULT_TIMEOUT=480  # 8 minutes for ultrathink reasoning
+MAX_TIMEOUT=900      # 15 minutes max for complex tasks
 CLAUDE_CMD="${CLAUDE_CMD:-claude}"
 
-# JSON Output Helper
+# Model configuration (subscription CLI-based)
+# These map to Claude CLI model flags
+CLAUDE_MODEL="${CLAUDE_MODEL:-opus-4.5}"
+CLAUDE_THINKING="${CLAUDE_THINKING:-ultrathink}"
+
+# Thinking token budgets (for reference/logging)
+declare -A THINKING_BUDGETS=(
+    ["think"]=4096
+    ["think_hard"]=10240
+    ["ultrathink"]=32768
+)
+
+# Model ID mappings for CLI
+declare -A MODEL_IDS=(
+    ["opus-4.5"]="claude-opus-4-5-20251101"
+    ["opus"]="claude-opus-4-5-20251101"
+    ["sonnet-4"]="claude-sonnet-4-20250514"
+    ["sonnet"]="claude-sonnet-4-20250514"
+    ["haiku"]="claude-3-5-haiku-20241022"
+)
+
+#===============================================================================
+# Usage
+#===============================================================================
+usage() {
+    cat <<EOF
+Usage: claude-delegate [OPTIONS] "prompt"
+
+Options:
+  --timeout N         Timeout in seconds (default: $DEFAULT_TIMEOUT, max: $MAX_TIMEOUT)
+  --model MODEL       Claude model: opus-4.5, sonnet-4, haiku (default: $CLAUDE_MODEL)
+  --thinking MODE     Thinking mode: think, think_hard, ultrathink (default: $CLAUDE_THINKING)
+  --print             Also print to stderr
+  --help              Show this help message
+
+Models:
+  opus-4.5      Claude Opus 4.5 - Architecture, security, complex reasoning (200K context)
+  sonnet-4      Claude Sonnet 4 - Daily coding, orchestration (200K context)
+  haiku         Claude Haiku - Fast tasks, cost optimization (200K context)
+
+Thinking Modes:
+  think         Standard reasoning (~4K tokens)
+  think_hard    Extended reasoning (~10K tokens)
+  ultrathink    Maximum reasoning (~32K tokens) - Best for architecture/security
+
+Environment Variables:
+  CLAUDE_TIMEOUT      Default timeout in seconds
+  CLAUDE_MODEL        Default model (opus-4.5, sonnet-4, haiku)
+  CLAUDE_THINKING     Default thinking mode
+  CLAUDE_CMD          Claude CLI command path
+
+Examples:
+  claude-delegate "Review this code for security issues"
+  claude-delegate --timeout 120 --model opus-4.5 "Analyze the architecture"
+  claude-delegate --thinking ultrathink "Design the solution"
+  cat code.ts | claude-delegate "Check for bugs"
+
+JSON Output:
+  {"model":"claude","status":"...","decision":"...","confidence":0.0-1.0,"reasoning":"...","output":"...","trace_id":"...","duration_ms":N}
+EOF
+}
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+TIMEOUT=$DEFAULT_TIMEOUT
+MODEL="$CLAUDE_MODEL"
+THINKING="$CLAUDE_THINKING"
+PRINT_STDERR=false
+PROMPT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --timeout)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing timeout value, using default $DEFAULT_TIMEOUT"
+                TIMEOUT=$DEFAULT_TIMEOUT
+                shift
+                continue
+            fi
+            TIMEOUT="$2"
+            # Validate timeout is a positive number
+            if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [[ $TIMEOUT -lt 1 ]]; then
+                log_warn "Invalid timeout value: $TIMEOUT, using default $DEFAULT_TIMEOUT"
+                TIMEOUT=$DEFAULT_TIMEOUT
+            elif [[ $TIMEOUT -gt $MAX_TIMEOUT ]]; then
+                TIMEOUT=$MAX_TIMEOUT
+            fi
+            shift 2
+            ;;
+        --model|-m)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing model value, using default $CLAUDE_MODEL"
+                MODEL="$CLAUDE_MODEL"
+                shift
+                continue
+            fi
+            MODEL="$2"
+            # Validate model
+            if [[ ! "${MODEL_IDS[$MODEL]+isset}" ]]; then
+                log_warn "Invalid model: $MODEL, using default $CLAUDE_MODEL"
+                MODEL="$CLAUDE_MODEL"
+            fi
+            shift 2
+            ;;
+        --thinking|-t)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                log_warn "Missing thinking mode, using default $CLAUDE_THINKING"
+                THINKING="$CLAUDE_THINKING"
+                shift
+                continue
+            fi
+            THINKING="$2"
+            # Validate thinking mode
+            if [[ ! "${THINKING_BUDGETS[$THINKING]+isset}" ]]; then
+                log_warn "Invalid thinking mode: $THINKING, using default $CLAUDE_THINKING"
+                THINKING="$CLAUDE_THINKING"
+            fi
+            shift 2
+            ;;
+        --print)
+            PRINT_STDERR=true
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        -*)
+            log_warn "Unknown option: $1"
+            shift
+            ;;
+        *)
+            PROMPT="$1"
+            shift
+            ;;
+    esac
+done
+
+#===============================================================================
+# Helper Functions
+#===============================================================================
+
+# Output JSON envelope
+# Usage: json_output <status> <decision> <confidence> <reasoning> <output> [duration_ms]
 json_output() {
     local status="$1"
     local decision="$2"
     local confidence="$3"
     local reasoning="$4"
     local output="$5"
-    local duration_ms="${6:-0}"
+    local duration_ms="${6:-}"
 
-    if ! command -v jq >/dev/null; then
-        echo "{\"model\":\"claude\",\"status\":\"$status\",\"decision\":\"$decision\"}"
-        return
+    if [[ -z "$duration_ms" ]]; then
+        # Handle case where START_MS might not be set (e.g., early exit)
+        if [[ -z "${START_MS:-}" ]]; then
+            START_MS=$(epoch_ms)
+        fi
+        duration_ms=$(( $(epoch_ms) - START_MS ))
+    fi
+
+    # Ensure jq is available
+    if ! command_exists jq; then
+        # Fallback to simple echo if jq is missing
+        echo "{\"model\":\"claude\",\"status\":\"error\",\"decision\":\"ABSTAIN\",\"confidence\":0.0,\"reasoning\":\"jq command not found, cannot format JSON.\",\"output\":\"\",\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${duration_ms}}"
+        exit 1
     fi
 
     jq -n \
@@ -70,7 +250,128 @@ json_output() {
         '{model: $model, status: $status, decision: $decision, confidence: ($confidence | tonumber), reasoning: $reasoning, output: $output, trace_id: $trace_id, duration_ms: $duration_ms}'
 }
 
-# Fallback helpers
+# Local wrapper for secret masking (compat with common.sh exports)
+mask_secrets_local() {
+    local input="${1-}"
+    if type -t mask_secrets >/dev/null 2>&1; then
+        mask_secrets "$input"
+    else
+        printf '%s' "$input"
+    fi
+}
+
+# Epoch milliseconds helper
+epoch_ms() {
+    if type -t epoch_ms_common >/dev/null 2>&1; then
+        epoch_ms_common
+    else
+        date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000))
+    fi
+}
+
+# Token estimation
+estimate_tokens_safe() {
+    local content="$1"
+    local model="$2"
+    if type -t estimate_tokens >/dev/null 2>&1; then
+        estimate_tokens "$content" "$model"
+    else
+        # Rough estimate: 1 token ~= 4 characters
+        echo $(( ${#content} / 4 ))
+    fi
+}
+
+estimate_output_tokens_default() {
+    local input_tokens="$1"
+    local multiplier="${COST_OUTPUT_MULTIPLIER:-0.7}"
+    local min_tokens="${COST_OUTPUT_TOKENS_MIN:-256}"
+    local est
+    est=$(awk "BEGIN {printf \"%.0f\", $input_tokens * $multiplier}")
+    if [[ "$est" -lt "$min_tokens" ]]; then
+        est="$min_tokens"
+    fi
+    echo "$est"
+}
+
+record_cost_usage() {
+    local input_tokens="$1"
+    local output_tokens="$2"
+    local duration_ms="$3"
+    if type -t record_request >/dev/null 2>&1; then
+        record_request "claude" "$input_tokens" "$output_tokens" "$duration_ms" "delegate"
+    fi
+}
+
+# Extract decision from output (APPROVE, REJECT, ABSTAIN)
+extract_decision() {
+    local output="$1"
+    local decision="ABSTAIN"
+
+    # Look for explicit decision keywords (case insensitive)
+    if printf '%s\n' "$output" | grep -qiE '\b(APPROVE|APPROVED|LGTM|ACCEPT|YES)\b'; then
+        decision="APPROVE"
+    elif printf '%s\n' "$output" | grep -qiE '\b(REJECT|REJECTED|DENY|DENIED|NO|BLOCK)\b'; then
+        decision="REJECT"
+    elif printf '%s\n' "$output" | grep -qiE '\b(ABSTAIN|UNSURE|UNCLEAR|CANNOT DETERMINE|NEED MORE)\b'; then
+        decision="ABSTAIN"
+    fi
+
+    echo "$decision"
+}
+
+# Calculate confidence from output patterns (0.0 - 1.0)
+calculate_confidence() {
+    local output="$1"
+    local decision="$2"
+    local confidence=0.5  # Default moderate confidence
+
+    # Strong affirmatives increase confidence
+    if printf '%s\n' "$output" | grep -qiE '\b(definitely|certainly|absolutely|clearly|strongly)\b'; then
+        confidence=0.9
+    # Moderate affirmatives
+    elif printf '%s\n' "$output" | grep -qiE '\b(likely|probably|appears|seems|looks)\b'; then
+        confidence=0.7
+    # Weak/uncertain language
+    elif printf '%s\n' "$output" | grep -qiE '\b(maybe|might|could|possibly|perhaps|unsure)\b'; then
+        confidence=0.4
+    # Very uncertain
+    elif printf '%s\n' "$output" | grep -qiE '\b(difficult to say|hard to tell|cannot determine|need more)\b'; then
+        confidence=0.2
+    fi
+
+    # If decision is ABSTAIN, cap confidence
+    if [[ "$decision" == "ABSTAIN" ]]; then
+        confidence=$(echo "$confidence" | awk '{if($1 > 0.3) print 0.3; else print $1}')
+    fi
+
+    printf "%.2f" "$confidence"
+}
+
+# Extract reasoning summary (first few sentences or key points)
+extract_reasoning() {
+    local output="$1"
+    local max_len=500
+
+    # Try to extract reasoning after keywords
+    local reasoning
+    reasoning=$(printf '%s\n' "$output" | grep -iE '(because|reason|rationale|due to|since|therefore):?' | head -3 | tr '\n' ' ')
+
+    if [[ -z "$reasoning" ]]; then
+        # Take first 500 chars as summary
+        reasoning="${output:0:$max_len}"
+    fi
+
+    # Truncate if too long
+    if [[ ${#reasoning} -gt $max_len ]]; then
+        reasoning="${reasoning:0:$max_len}..."
+    fi
+
+    echo "$reasoning"
+}
+
+#===============================================================================
+# Fallback Helpers
+#===============================================================================
 FALLBACK_OUTPUT=""
 FALLBACK_EXIT=0
 FALLBACK_STDIN=""
@@ -95,6 +396,7 @@ attempt_fallback() {
     if declare -f fallback_to_next_model >/dev/null 2>&1; then
         next_model=$(fallback_to_next_model "$failed_model") || return 1
     else
+        # Fallback chain: claude → codex → gemini
         case "$failed_model" in
             "claude") next_model="codex" ;;
             "codex") next_model="gemini" ;;
@@ -129,24 +431,33 @@ attempt_fallback() {
     return 0
 }
 
-# --- Main Logic ---
+#===============================================================================
+# Logging helper
+#===============================================================================
+log_claude() {
+    local level="$1"
+    local event="$2"
+    local message="$3"
+    local metadata="${4:-{}}"
 
-PROMPT="${1:-}"
-TIMEOUT="${DEFAULT_TIMEOUT}"
+    if declare -F log_structured >/dev/null 2>&1; then
+        log_structured "$level" "$COMPONENT" "$event" "$message" "$metadata"
+    else
+        local timestamp
+        timestamp=$(date -Iseconds)
+        echo "[${timestamp}][${level}][${COMPONENT}][${TRACE_ID}] ${event}: ${message}" >&2
+    fi
+}
 
-# Parse args (simplified for brevity, assume PROMPT is last)
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --timeout) TIMEOUT="$2"; shift 2 ;;
-        -*) shift ;;
-        *) PROMPT="$1"; shift ;;
-    esac
-done
-
+#===============================================================================
+# Validate Input (check stdin first if no argument provided)
+#===============================================================================
+# If no argument prompt provided, check stdin (HERE string from worker)
+_STDIN_CONSUMED=""
 if [[ -z "$PROMPT" ]]; then
-    # Check stdin
     if [[ ! -t 0 ]]; then
         PROMPT=$(cat)
+        _STDIN_CONSUMED="1"  # Mark stdin as consumed
     fi
 fi
 
@@ -155,53 +466,220 @@ if [[ -z "$PROMPT" ]]; then
     exit 1
 fi
 
-# 2. Execution
-START_MS=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
-
-# Use circuit_breaker_call if available, otherwise fallback to direct call
-OUTPUT_TMP=$(secure_mktemp "claude-delegate.${TRACE_ID}.stderr") || { json_output "error" "ABSTAIN" "0.0" "Failed to create temp file" "" 0; exit 1; }
-if declare -f circuit_breaker_call >/dev/null; then
-    circuit_breaker_call "claude" timeout "$TIMEOUT" "$CLAUDE_CMD" -p "$PROMPT" > "$OUTPUT_TMP" 2>&1
-    EXIT_CODE=$?
-else
-    timeout "$TIMEOUT" "$CLAUDE_CMD" -p "$PROMPT" > "$OUTPUT_TMP" 2>&1
-    EXIT_CODE=$?
-fi
-OUTPUT=$(cat "$OUTPUT_TMP")
-rm -f "$OUTPUT_TMP"
-
-END_MS=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
-DURATION_MS=$((END_MS - START_MS))
-
-# 3. Result Handling
-if [[ $EXIT_CODE -ne 0 ]]; then
-    failure_reason="Execution failed (exit $EXIT_CODE)"
-    if [[ $EXIT_CODE -eq 126 ]]; then
-        failure_reason="Circuit breaker OPEN"
-    fi
-    if attempt_fallback "claude" "$failure_reason"; then
+# Check if Claude CLI exists
+if ! command_exists "$CLAUDE_CMD"; then
+    if attempt_fallback "claude" "Claude CLI not found"; then
         printf '%s\n' "$FALLBACK_OUTPUT"
         exit "$FALLBACK_EXIT"
     fi
+    json_output "error" "ABSTAIN" "0.0" "Claude CLI not found" "" 0
+    exit 1
 fi
 
+#===============================================================================
+# Main Execution
+#===============================================================================
+
+# Read stdin if available (for piped content) with size limit
+# NOTE: If PROMPT was populated from stdin above, stdin is already consumed
+# This section handles the case where prompt is argument AND stdin has additional content
+MAX_STDIN_SIZE=500000  # 500KB limit to prevent memory issues
+STDIN_CONTENT=""
+# Only read if stdin was not already consumed for PROMPT
+# FIX: Add timeout to prevent indefinite blocking when backgrounded (#STDIN-BLOCK-FIX)
+if [[ ! -t 0 ]] && [[ -z "$_STDIN_CONSUMED" ]]; then
+    # Use timeout to prevent blocking when stdin is connected but empty (e.g., background processes)
+    STDIN_CONTENT=$(timeout 2 head -c $MAX_STDIN_SIZE 2>/dev/null) || true
+    # Check if there was more content (stdin still has data)
+    if [[ -n "$STDIN_CONTENT" ]] && read -n 1 -t 0 2>/dev/null; then
+        log_warn "Stdin truncated to ${MAX_STDIN_SIZE} bytes (500KB limit)"
+    fi
+fi
+FALLBACK_STDIN="$STDIN_CONTENT"
+
+# Build full prompt
+FULL_PROMPT="$PROMPT"
+if [[ -n "$STDIN_CONTENT" ]]; then
+    FULL_PROMPT="$PROMPT
+
+--- INPUT ---
+$STDIN_CONTENT
+--- END INPUT ---"
+fi
+
+# Add tri-agent instruction for clear decision output
+FULL_PROMPT="$FULL_PROMPT
+
+IMPORTANT: When providing your analysis, if a decision is required, please clearly state one of:
+- APPROVE: if the change/code is acceptable
+- REJECT: if the change/code should not proceed
+- ABSTAIN: if you cannot make a determination
+
+Include your reasoning for the decision."
+
+# SEC-006: Sanitize prompt to prevent injection attacks (SEC-006-1, SEC-006-2)
+if declare -f sanitize_llm_input >/dev/null 2>&1; then
+    FULL_PROMPT=$(sanitize_llm_input "$FULL_PROMPT")
+    log_claude "DEBUG" "SEC-006" "Prompt sanitized for injection prevention" "{}"
+fi
+
+# Cost breaker check (pre-execution)
+INPUT_TOKENS=$(estimate_tokens_safe "$FULL_PROMPT" "claude")
+EST_OUTPUT_TOKENS=$(estimate_output_tokens_default "$INPUT_TOKENS")
+if type -t cost_breaker_should_allow >/dev/null 2>&1; then
+    if ! cost_breaker_should_allow "claude" "$INPUT_TOKENS" "$EST_OUTPUT_TOKENS"; then
+        log_claude "WARN" "COST_BREAKER_OPEN" "Cost breaker open, blocking request" \
+            "{\"trace_id\":\"${TRACE_ID}\",\"input_tokens\":${INPUT_TOKENS},\"estimated_output_tokens\":${EST_OUTPUT_TOKENS}}"
+        json_output "error" "ABSTAIN" "0.0" "Cost breaker open: daily budget guardrail reached" "" 0
+        exit 1
+    fi
+fi
+
+# Get thinking budget for logging
+THINKING_BUDGET="${THINKING_BUDGETS[$THINKING]:-32768}"
+
+# Log start
+MASKED_PROMPT=$(mask_secrets_local "$FULL_PROMPT")
+log_claude "INFO" "DELEGATE_START" "Starting Claude delegate" \
+    "{\"trace_id\":\"${TRACE_ID}\",\"prompt_length\":${#FULL_PROMPT},\"timeout\":${TIMEOUT},\"model\":\"${MODEL}\",\"thinking\":\"${THINKING}\",\"thinking_budget\":${THINKING_BUDGET}}"
+
+# Record start time
+START_MS=$(epoch_ms)
+
+# Execute Claude CLI
+# The Claude CLI uses:
+#   -p "prompt"                           - Provide prompt
+#   --dangerously-skip-permissions        - Auto-approve (YOLO mode)
+#   --output-format json                  - JSON output (if supported)
+OUTPUT=""
+EXIT_CODE=0
+STDERR_OUTPUT=""
+
+# Create secure temp file for stderr
+STDERR_TMP=$(secure_mktemp "claude-delegate.${TRACE_ID}.stderr") || { json_output "error" "ABSTAIN" "0.0" "Failed to create temp file" "" 0; exit 1; }
+trap 'rm -f "$STDERR_TMP"' EXIT
+
+# Build Claude CLI arguments
+# Note: Claude CLI may not support all flags - we use what's available
+CLAUDE_ARGS=(
+    --dangerously-skip-permissions
+    -p "$FULL_PROMPT"
+)
+
+# Add output format if supported (try JSON for structured output)
+# Some versions support --output-format json
+CLAUDE_ARGS+=(--output-format json)
+
+# Execute with Circuit Breaker
+if declare -f circuit_breaker_call >/dev/null; then
+    OUTPUT=$(circuit_breaker_call "claude" timeout "$TIMEOUT" "$CLAUDE_CMD" \
+        "${CLAUDE_ARGS[@]}" \
+        2>"$STDERR_TMP") || EXIT_CODE=$?
+else
+    OUTPUT=$(timeout "$TIMEOUT" "$CLAUDE_CMD" \
+        "${CLAUDE_ARGS[@]}" \
+        2>"$STDERR_TMP") || EXIT_CODE=$?
+fi
+
+STDERR_OUTPUT=$(cat "$STDERR_TMP" 2>/dev/null || echo "")
+
+# Calculate duration
+END_MS=$(epoch_ms)
+DURATION_MS=$((END_MS - START_MS))
+
+# Handle results
 if [[ $EXIT_CODE -eq 126 ]]; then
     # Breaker open
-    json_output "error" "ABSTAIN" "0.0" "Circuit breaker OPEN" "" 0
+    log_claude "WARN" "CIRCUIT_BREAKER" "Circuit breaker open for claude" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+    record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
+    if attempt_fallback "claude" "Circuit breaker OPEN"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
+    json_output "error" "ABSTAIN" "0.0" "Circuit breaker OPEN" "" "$DURATION_MS"
     exit 1
-elif [[ $EXIT_CODE -eq 0 ]]; then
-    # Success (record_success handled by wrapper)
-    
-    # Simple heuristic parsing
-    DECISION="ABSTAIN"
-    if echo "$OUTPUT" | grep -qiE "APPROVE|YES|AGREE"; then DECISION="APPROVE"; fi
-    if echo "$OUTPUT" | grep -qiE "REJECT|NO|DISAGREE"; then DECISION="REJECT"; fi
-    
-    json_output "success" "$DECISION" "0.9" "Executed successfully" "$OUTPUT" "$DURATION_MS"
-    exit 0
-else
-    # Failure (record_failure handled by wrapper)
-    
-    json_output "error" "ABSTAIN" "0.0" "Execution failed (exit $EXIT_CODE)" "$OUTPUT" "$DURATION_MS"
+elif [[ $EXIT_CODE -eq 124 ]]; then
+    # Timeout
+    log_claude "ERROR" "DELEGATE_TIMEOUT" "Claude delegate timed out" \
+        "{\"trace_id\":\"${TRACE_ID}\",\"timeout\":${TIMEOUT},\"duration_ms\":${DURATION_MS}}"
+
+    record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
+    if attempt_fallback "claude" "Request timed out after ${TIMEOUT}s"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
+    json_output "error" "ABSTAIN" "0.0" "Request timed out after ${TIMEOUT}s" "" "$DURATION_MS"
+    exit 1
+
+elif [[ $EXIT_CODE -ne 0 ]]; then
+    error_reason="Unknown error (exit code: $EXIT_CODE)"
+
+    # Check for rate limit
+    if printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
+        log_claude "WARN" "RATE_LIMIT" "Claude rate limit hit" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Rate limit exceeded. Please try again later."
+    # Check for auth issues
+    elif printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401|api.key)'; then
+        log_claude "ERROR" "AUTH_ERROR" "Claude authentication failed" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Authentication failed. Check Claude CLI login status."
+    # Check for model not found
+    elif printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(model.*not found|invalid model|unknown model)'; then
+        log_claude "ERROR" "MODEL_ERROR" "Claude model not available" "{\"trace_id\":\"${TRACE_ID}\",\"model\":\"${MODEL}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Model ${MODEL} not available. Try a different model."
+    # Check for context length exceeded
+    elif printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(context.*length|token.*limit|too long)'; then
+        log_claude "ERROR" "CONTEXT_OVERFLOW" "Claude context length exceeded" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Context length exceeded. Try with smaller input or use Gemini (1M context)."
+    # Check for permission denied
+    elif printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(permission|denied|not allowed)'; then
+        log_claude "ERROR" "PERMISSION_ERROR" "Claude permission denied" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
+        error_reason="Permission denied. Check Claude CLI permissions."
+    else
+        # General error
+        log_claude "ERROR" "DELEGATE_ERROR" "Claude delegate failed" "{\"trace_id\":\"${TRACE_ID}\",\"exit_code\":${EXIT_CODE},\"duration_ms\":${DURATION_MS}}"
+        error_reason="${STDERR_OUTPUT:-Unknown error (exit code: $EXIT_CODE)}"
+    fi
+
+    masked_reason=$(mask_secrets_local "$error_reason")
+    record_cost_usage "$INPUT_TOKENS" "0" "$DURATION_MS"
+    if attempt_fallback "claude" "$masked_reason"; then
+        printf '%s\n' "$FALLBACK_OUTPUT"
+        exit "$FALLBACK_EXIT"
+    fi
+    json_output "error" "ABSTAIN" "0.0" "$masked_reason" "" "$DURATION_MS"
     exit 1
 fi
+
+# Success - parse output
+# Try to extract from JSON if output is JSON formatted
+RAW_OUTPUT="$OUTPUT"
+if printf '%s' "$OUTPUT" | jq -e . >/dev/null 2>&1; then
+    # Output is valid JSON - try to extract result/content
+    EXTRACTED=$(printf '%s' "$OUTPUT" | jq -r '.result // .content // .response // .message // .' 2>/dev/null)
+    if [[ -n "$EXTRACTED" && "$EXTRACTED" != "null" ]]; then
+        RAW_OUTPUT="$EXTRACTED"
+    fi
+fi
+
+DECISION=$(extract_decision "$RAW_OUTPUT")
+CONFIDENCE=$(calculate_confidence "$RAW_OUTPUT" "$DECISION")
+REASONING_TEXT=$(extract_reasoning "$RAW_OUTPUT")
+OUTPUT_TOKENS=$(estimate_tokens_safe "$RAW_OUTPUT" "claude")
+
+# Log completion
+log_claude "INFO" "DELEGATE_COMPLETE" "Claude delegate completed" \
+    "{\"trace_id\":\"${TRACE_ID}\",\"decision\":\"${DECISION}\",\"confidence\":${CONFIDENCE},\"duration_ms\":${DURATION_MS},\"model\":\"${MODEL}\",\"thinking\":\"${THINKING}\"}"
+
+record_cost_usage "$INPUT_TOKENS" "$OUTPUT_TOKENS" "$DURATION_MS"
+
+# Output JSON to stdout
+json_output "success" "$DECISION" "$CONFIDENCE" "$REASONING_TEXT" "$RAW_OUTPUT" "$DURATION_MS"
+
+# Also print to stderr if requested
+if [[ "$PRINT_STDERR" == "true" ]]; then
+    echo "[CLAUDE] Model: $MODEL (thinking: $THINKING)" >&2
+    echo "[CLAUDE] Decision: $DECISION (confidence: $CONFIDENCE)" >&2
+    echo "[CLAUDE] Duration: ${DURATION_MS}ms" >&2
+fi
+
+exit 0

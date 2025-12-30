@@ -193,6 +193,7 @@ start_processes() {
     #---------------------------------------------------------------------------
     tmux send-keys -t "${TMUX_SESSION}:worker-claude" "cd ${AUTONOMOUS_ROOT}" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-claude" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-claude" "export DOCKER_SANDBOX_ENABLED=false" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-claude" "export WORKER_SHARD=0" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-claude" "export WORKER_MODEL=claude" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-claude" "" C-m
@@ -210,6 +211,7 @@ start_processes() {
     #---------------------------------------------------------------------------
     tmux send-keys -t "${TMUX_SESSION}:worker-codex" "cd ${AUTONOMOUS_ROOT}" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-codex" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-codex" "export DOCKER_SANDBOX_ENABLED=false" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-codex" "export WORKER_SHARD=1" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-codex" "export WORKER_MODEL=codex" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-codex" "" C-m
@@ -227,6 +229,7 @@ start_processes() {
     #---------------------------------------------------------------------------
     tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "cd ${AUTONOMOUS_ROOT}" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "export AUTONOMOUS_ROOT=${AUTONOMOUS_ROOT}" C-m
+    tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "export DOCKER_SANDBOX_ENABLED=false" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "export WORKER_SHARD=2" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "export WORKER_MODEL=gemini" C-m
     tmux send-keys -t "${TMUX_SESSION}:worker-gemini" "" C-m

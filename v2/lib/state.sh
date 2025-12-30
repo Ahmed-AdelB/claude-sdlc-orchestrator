@@ -259,6 +259,9 @@ atomic_write() {
     # Sync to disk before move (optional, for durability)
     sync "$tmp" 2>/dev/null || true
 
+    # SEC-003-1: Final symlink check before mv to prevent TOCTOU attacks
+    [[ -L "$tmp" ]] && { log_error "[${TRACE_ID:-unknown}] SEC-003-1: Symlink attack detected on temp file: $tmp" 2>/dev/null || true; rm -f "$tmp" 2>/dev/null || true; return 1; }
+
     # Atomic move
     mv "$tmp" "$dest" || {
         log_error "[${TRACE_ID:-unknown}] Failed to move temp file to destination" 2>/dev/null || true
@@ -420,6 +423,9 @@ _do_state_set() {
     # Add the new/updated entry
     echo "${key}=${value}" >> "$tmp"
 
+    # SEC-003-1: Final symlink check before mv to prevent TOCTOU attacks
+    [[ -L "$tmp" ]] && { log_error "[${TRACE_ID:-unknown}] SEC-003-1: Symlink attack detected on temp file: $tmp" 2>/dev/null || true; rm -f "$tmp" 2>/dev/null || true; return 1; }
+
     # Atomic replace
     mv "$tmp" "$file"
 }
@@ -456,6 +462,10 @@ _do_state_delete() {
     trap "rm -f '$tmp' 2>/dev/null || true" RETURN
 
     grep -v -E "^${key}=" "$file" > "$tmp" 2>/dev/null || true
+
+    # SEC-003-1: Final symlink check before mv to prevent TOCTOU attacks
+    [[ -L "$tmp" ]] && { log_error "[${TRACE_ID:-unknown}] SEC-003-1: Symlink attack detected on temp file: $tmp" 2>/dev/null || true; rm -f "$tmp" 2>/dev/null || true; return 1; }
+
     mv "$tmp" "$file"
 }
 

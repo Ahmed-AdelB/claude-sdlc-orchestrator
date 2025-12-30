@@ -21,6 +21,10 @@ HEALING_INTERVAL_SECONDS=60
 MAX_HEALING_RETRIES=3
 HEALING_BACKOFF_BASE=2
 
+# HIGH-3 FIX: Configurable stuck threshold (was hardcoded 30 minutes)
+# Default to 30 minutes, but can be overridden via environment
+STUCK_THRESHOLD_MINUTES="${STUCK_THRESHOLD_MINUTES:-30}"
+
 # =============================================================================
 # Health Check Functions
 # =============================================================================
@@ -176,7 +180,7 @@ check_worker_pool_health() {
     stale_count=$(sqlite3 "$STATE_DB" <<SQL 2>/dev/null || echo "0"
 SELECT COUNT(*) FROM workers
 WHERE status = 'busy'
-AND last_heartbeat < datetime('now', '-30 minutes');
+AND last_heartbeat < datetime('now', '-' || $STUCK_THRESHOLD_MINUTES || ' minutes');
 SQL
 )
 
@@ -220,7 +224,7 @@ check_task_queue_health() {
     stuck_count=$(sqlite3 "$STATE_DB" <<SQL 2>/dev/null || echo "0"
 SELECT COUNT(*) FROM tasks
 WHERE state = 'RUNNING'
-AND started_at < datetime('now', '-2 hours');
+AND started_at < datetime('now', '-' || $STUCK_THRESHOLD_MINUTES || ' minutes');
 SQL
 )
 
@@ -451,7 +455,7 @@ heal_worker_pool() {
 UPDATE workers
 SET status = 'dead'
 WHERE status = 'busy'
-AND last_heartbeat < datetime('now', '-30 minutes');
+AND last_heartbeat < datetime('now', '-' || $STUCK_THRESHOLD_MINUTES || ' minutes');
 SQL
 
     # Re-queue tasks from dead workers
@@ -479,7 +483,7 @@ SET state = 'QUEUED',
     worker_id = NULL,
     retry_count = retry_count + 1
 WHERE state = 'RUNNING'
-AND started_at < datetime('now', '-2 hours')
+AND started_at < datetime('now', '-' || $STUCK_THRESHOLD_MINUTES || ' minutes')
 AND retry_count < 3;
 SELECT changes();
 SQL

@@ -48,8 +48,8 @@ check_rate_limit() {
     init_rate_limiter
 
     # Acquire lock for atomic read-modify-write
-    exec 201>"$lock_file"
-    if ! flock -w 5 201; then
+    exec 211>"$lock_file"
+    if ! flock -w 5 211; then
         echo '{"error": "Could not acquire lock", "limited": true}'
         return 1
     fi
@@ -79,7 +79,7 @@ check_rate_limit() {
     # Check limit
     if [[ $count -ge $limit ]]; then
         local retry_after=$((RATE_LIMIT_WINDOW - window_age))
-        flock -u 201  # Release lock
+        flock -u 211  # Release lock
         echo "{\"limited\": true, \"retry_after\": $retry_after, \"count\": $count, \"limit\": $limit}"
         return 1
     fi
@@ -100,7 +100,7 @@ EOF
     mv "$tmp_file" "$limit_file"
 
     # Release lock
-    flock -u 201
+    flock -u 211
 
     echo "{\"limited\": false, \"remaining\": $((limit - count)), \"count\": $count, \"limit\": $limit}"
     return 0
@@ -190,8 +190,8 @@ token_bucket_check() {
     init_rate_limiter
 
     # Acquire lock for atomic read-modify-write
-    exec 202>"$lock_file"
-    if ! flock -w 5 202; then
+    exec 212>"$lock_file"
+    if ! flock -w 5 212; then
         echo '{"error": "Could not acquire lock", "allowed": false}'
         return 1
     fi
@@ -223,7 +223,7 @@ token_bucket_check() {
     # Check if we have a token available
     if [[ $new_tokens -lt 1 ]]; then
         local wait_time=$(echo "scale=2; (1 - $new_tokens) / $rate" | bc 2>/dev/null || echo "0.1")
-        flock -u 202  # Release lock
+        flock -u 212  # Release lock
         echo "{\"allowed\": false, \"tokens\": $new_tokens, \"wait_time\": $wait_time}"
         return 1
     fi
@@ -244,7 +244,7 @@ EOF
     mv "$tmp_file" "$limit_file"
 
     # Release lock
-    flock -u 202
+    flock -u 212
 
     echo "{\"allowed\": true, \"tokens\": $new_tokens, \"rate\": $rate}"
     return 0
@@ -264,8 +264,8 @@ sliding_window_check() {
     init_rate_limiter
 
     # Acquire lock for atomic read-modify-write
-    exec 203>"$lock_file"
-    if ! flock -w 5 203; then
+    exec 213>"$lock_file"
+    if ! flock -w 5 213; then
         echo '{"error": "Could not acquire lock", "limited": true}'
         return 1
     fi
@@ -290,7 +290,7 @@ sliding_window_check() {
     if [[ $count -ge $limit ]]; then
         local oldest=${timestamps[0]:-$now}
         local retry_after=$((oldest + window - now))
-        flock -u 203  # Release lock
+        flock -u 213  # Release lock
         echo "{\"limited\": true, \"count\": $count, \"limit\": $limit, \"retry_after\": $retry_after}"
         return 1
     fi
@@ -302,7 +302,7 @@ sliding_window_check() {
     printf '%s\n' "${timestamps[@]}" > "$limit_file"
 
     # Release lock
-    flock -u 203
+    flock -u 213
 
     echo "{\"limited\": false, \"count\": $((count + 1)), \"limit\": $limit, \"remaining\": $((limit - count - 1))}"
     return 0
@@ -318,8 +318,8 @@ distributed_rate_check() {
     init_rate_limiter
 
     # Acquire lock
-    exec 200>"$lock_file"
-    if ! flock -w 5 200; then
+    exec 210>"$lock_file"
+    if ! flock -w 5 210; then
         echo '{"error": "Could not acquire lock", "limited": true}'
         return 1
     fi
@@ -330,7 +330,7 @@ distributed_rate_check() {
     local status=$?
 
     # Release lock
-    flock -u 200
+    flock -u 210
 
     echo "$result"
     return $status

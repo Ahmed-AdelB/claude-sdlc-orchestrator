@@ -300,18 +300,17 @@ _perform_daily_update() {
             --argjson output "$output_tokens" \
             --argjson duration "$duration_ms" \
             --arg date "$date_str" \
-            '\
-            .date = $date |\
-            .models[$model] = (\
-                (.models[$model] // {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_duration_ms": 0}) |\
-                .requests += 1 |\
-                .input_tokens += $input |\
-                .output_tokens += $output |\
-                .total_duration_ms += $duration\
-            ) |\
-            .total_requests = ((.total_requests // 0) + 1) |\
-            .total_input_tokens = ((.total_input_tokens // 0) + $input) |\
-            .total_output_tokens = ((.total_output_tokens // 0) + $output) |\
+            '.date = $date |
+            .models[$model] = (
+                (.models[$model] // {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_duration_ms": 0}) |
+                .requests += 1 |
+                .input_tokens += $input |
+                .output_tokens += $output |
+                .total_duration_ms += $duration
+            ) |
+            .total_requests = ((.total_requests // 0) + 1) |
+            .total_input_tokens = ((.total_input_tokens // 0) + $input) |
+            .total_output_tokens = ((.total_output_tokens // 0) + $output) |
             .last_updated = (now | todate)
             ' > "${stats_file}.tmp" && mv "${stats_file}.tmp" "$stats_file"
     elif command -v python3 &>/dev/null; then
@@ -385,13 +384,12 @@ _perform_model_update() {
             --argjson input "$input_tokens" \
             --argjson output "$output_tokens" \
             --argjson duration "$duration_ms" \
-            '\
-            .model = $model |\
-            .total_requests = ((.total_requests // 0) + 1) |\
-            .total_input_tokens = ((.total_input_tokens // 0) + $input) |\
-            .total_output_tokens = ((.total_output_tokens // 0) + $output) |\
-            .total_duration_ms = ((.total_duration_ms // 0) + $duration) |\
-            .avg_duration_ms = ((.total_duration_ms // 0) / ((.total_requests // 0) + 1)) |\
+            '.model = $model |
+            .total_requests = ((.total_requests // 0) + 1) |
+            .total_input_tokens = ((.total_input_tokens // 0) + $input) |
+            .total_output_tokens = ((.total_output_tokens // 0) + $output) |
+            .total_duration_ms = ((.total_duration_ms // 0) + $duration) |
+            .avg_duration_ms = ((.total_duration_ms // 0) / ((.total_requests // 0) + 1)) |
             .last_used = (now | todate)
             ' > "${stats_file}.tmp" && mv "${stats_file}.tmp" "$stats_file"
     elif command -v python3 &>/dev/null; then
@@ -456,14 +454,13 @@ _perform_totals_update() {
             --argjson input "$input_tokens" \
             --argjson output "$output_tokens" \
             --argjson duration "$duration_ms" \
-            '\
-            .total_requests = ((.total_requests // 0) + 1) |\
-            .total_input_tokens = ((.total_input_tokens // 0) + $input) |\
-            .total_output_tokens = ((.total_output_tokens // 0) + $output) |\
-            .total_duration_ms = ((.total_duration_ms // 0) + $duration) |\
-            .by_model[$model].requests = (((.by_model[$model].requests) // 0) + 1) |\
-            .by_model[$model].input_tokens = (((.by_model[$model].input_tokens) // 0) + $input) |\
-            .by_model[$model].output_tokens = (((.by_model[$model].output_tokens) // 0) + $output) |\
+            '.total_requests = ((.total_requests // 0) + 1) |
+            .total_input_tokens = ((.total_input_tokens // 0) + $input) |
+            .total_output_tokens = ((.total_output_tokens // 0) + $output) |
+            .total_duration_ms = ((.total_duration_ms // 0) + $duration) |
+            .by_model[$model].requests = (((.by_model[$model].requests) // 0) + 1) |
+            .by_model[$model].input_tokens = (((.by_model[$model].input_tokens) // 0) + $input) |
+            .by_model[$model].output_tokens = (((.by_model[$model].output_tokens) // 0) + $output) |
             .last_updated = (now | todate)
             ' > "${stats_file}.tmp" && mv "${stats_file}.tmp" "$stats_file"
     elif command -v python3 &>/dev/null; then

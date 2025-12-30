@@ -32,6 +32,145 @@ CONSENSUS_MIN_CONFIDENCE=0.7
 CONSENSUS_REJECT_CONFIDENCE=0.9
 CONSENSUS_TIMEOUT_SECONDS=300
 
+# =============================================================================
+# JSON Validation Functions (SEC-009-1 Fix)
+# =============================================================================
+
+# Validate model response JSON structure
+# Returns 0 if valid, 1 if invalid
+# Sets global VALIDATION_ERROR with error message on failure
+validate_model_response_json() {
+    local json_string="$1"
+    VALIDATION_ERROR=""
+
+    # Check if jq is available
+    if ! command -v jq >/dev/null 2>&1; then
+        VALIDATION_ERROR="jq not found - cannot validate JSON"
+        return 1
+    fi
+
+    # Check if input is valid JSON
+    if ! echo "$json_string" | jq -e . >/dev/null 2>&1; then
+        VALIDATION_ERROR="Invalid JSON structure"
+        return 1
+    fi
+
+    # Check for required fields
+    local decision confidence
+    decision=$(echo "$json_string" | jq -r '.decision // empty' 2>/dev/null)
+    confidence=$(echo "$json_string" | jq -r '.confidence // empty' 2>/dev/null)
+
+    if [[ -z "$decision" ]]; then
+        VALIDATION_ERROR="Missing required field: decision"
+        return 1
+    fi
+
+    # Validate decision is one of allowed values
+    case "$decision" in
+        APPROVE|REJECT|ABSTAIN|REQUEST_CHANGES)
+            ;;
+        *)
+            VALIDATION_ERROR="Invalid decision value: '$decision'. Must be APPROVE, REJECT, ABSTAIN, or REQUEST_CHANGES"
+            return 1
+            ;;
+    esac
+
+    # Validate confidence if present (not strictly required for ABSTAIN)
+    if [[ -n "$confidence" ]]; then
+        # Check if confidence is a valid number
+        if ! echo "$confidence" | grep -qE '^-?[0-9]*\.?[0-9]+$'; then
+            VALIDATION_ERROR="Invalid confidence value: '$confidence'. Must be a number"
+            return 1
+        fi
+
+        # Check confidence range (0.0 to 1.0)
+        local in_range
+        in_range=$(echo "$confidence >= 0 && $confidence <= 1" | bc -l 2>/dev/null || echo 0)
+        if [[ "$in_range" != "1" ]]; then
+            VALIDATION_ERROR="Confidence out of range: '$confidence'. Must be between 0.0 and 1.0"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# Validate vote JSON from temp file
+# Returns 0 if valid, 1 if invalid
+validate_vote_json() {
+    local json_string="$1"
+    VALIDATION_ERROR=""
+
+    # Check if jq is available
+    if ! command -v jq >/dev/null 2>&1; then
+        VALIDATION_ERROR="jq not found - cannot validate JSON"
+        return 1
+    fi
+
+    # Check if input is valid JSON
+    if ! echo "$json_string" | jq -e . >/dev/null 2>&1; then
+        VALIDATION_ERROR="Invalid JSON structure in vote file"
+        return 1
+    fi
+
+    # Extract and validate required fields
+    local model decision confidence
+    model=$(echo "$json_string" | jq -r '.model // empty' 2>/dev/null)
+    decision=$(echo "$json_string" | jq -r '.decision // empty' 2>/dev/null)
+    confidence=$(echo "$json_string" | jq -r '.confidence // empty' 2>/dev/null)
+
+    # Validate model field
+    if [[ -z "$model" ]]; then
+        VALIDATION_ERROR="Missing required field: model"
+        return 1
+    fi
+
+    # Validate model is one of expected values
+    case "$model" in
+        claude|codex|gemini)
+            ;;
+        *)
+            VALIDATION_ERROR="Invalid model value: '$model'. Must be claude, codex, or gemini"
+            return 1
+            ;;
+    esac
+
+    # Validate decision field
+    if [[ -z "$decision" ]]; then
+        VALIDATION_ERROR="Missing required field: decision"
+        return 1
+    fi
+
+    case "$decision" in
+        APPROVE|REJECT|ABSTAIN|REQUEST_CHANGES)
+            ;;
+        *)
+            VALIDATION_ERROR="Invalid decision value: '$decision'. Must be APPROVE, REJECT, ABSTAIN, or REQUEST_CHANGES"
+            return 1
+            ;;
+    esac
+
+    # Validate confidence is a number in range
+    if [[ -z "$confidence" ]]; then
+        VALIDATION_ERROR="Missing required field: confidence"
+        return 1
+    fi
+
+    if ! echo "$confidence" | grep -qE '^-?[0-9]*\.?[0-9]+$'; then
+        VALIDATION_ERROR="Invalid confidence value: '$confidence'. Must be a number"
+        return 1
+    fi
+
+    local in_range
+    in_range=$(echo "$confidence >= 0 && $confidence <= 1" | bc -l 2>/dev/null || echo 0)
+    if [[ "$in_range" != "1" ]]; then
+        VALIDATION_ERROR="Confidence out of range: '$confidence'. Must be between 0.0 and 1.0"
+        return 1
+    fi
+
+    return 0
+}
+
 # Model roles for different review types
 declare -A MODEL_ROLES=(
     [ARCHITECTURE]="claude gemini"
@@ -122,7 +261,7 @@ request_tri_supervisor_approval() {
     # Create consensus request
     sqlite3 "$db" <<SQL
 INSERT INTO consensus_requests (id, task_id, review_type, subject, context, status, timeout_at)
-VALUES ('$request_id', '$(_sql_escape "$task_id")', '$review_type', '$task_id', '$(_sql_escape "$context")', 'PENDING', '$timeout_at');
+VALUES ('$(_sql_escape "$request_id")', '$(_sql_escape "$task_id")', '$(_sql_escape "$review_type")', '$(_sql_escape "$task_id")', '$(_sql_escape "$context")', 'PENDING', '$(_sql_escape "$timeout_at")');
 SQL
 
     log_info "Created consensus request $request_id for task $task_id (type: $review_type)"
@@ -132,7 +271,7 @@ SQL
 
     # Update status to IN_PROGRESS
     sqlite3 "$db" <<SQL
-UPDATE consensus_requests SET status = 'IN_PROGRESS' WHERE id = '$request_id';
+UPDATE consensus_requests SET status = 'IN_PROGRESS' WHERE id = '$(_sql_escape "$request_id")';
 SQL
 
     # Collect votes from each model in parallel
@@ -184,16 +323,30 @@ SQL
         if [[ -f "${temp_dir}/${model}.json" ]]; then
             local vote
             vote=$(cat "${temp_dir}/${model}.json")
+
+            # SEC-009-1: Validate vote JSON structure before processing
+            if ! validate_vote_json "$vote"; then
+                log_warn "Invalid vote JSON from model $model: $VALIDATION_ERROR"
+                # Treat invalid JSON as abstention - do not count towards consensus
+                ((abstentions++)) || true
+                failures+=("{\"model\":\"$model\",\"reason\":\"Malformed response: $VALIDATION_ERROR\"}")
+                continue
+            fi
+
             local decision
-            decision=$(echo "$vote" | jq -r '.decision // "ABSTAIN"')
+            decision=$(echo "$vote" | jq -r '.decision')
             local confidence
-            confidence=$(echo "$vote" | jq -r '.confidence // 0')
+            confidence=$(echo "$vote" | jq -r '.confidence')
 
             case "$decision" in
                 APPROVE)
                     if (( $(echo "$confidence >= $CONSENSUS_MIN_CONFIDENCE" | bc -l 2>/dev/null || echo 0) )); then
                         ((approvals++)) || true
                         vote_models+=("$model")
+                    else
+                        # Low confidence approval treated as abstention
+                        ((abstentions++)) || true
+                        log_info "Low confidence approval from $model ($confidence < $CONSENSUS_MIN_CONFIDENCE)"
                     fi
                     ;;
                 REJECT)
@@ -209,6 +362,10 @@ SQL
                     ((abstentions++)) || true
                     ;;
             esac
+        else
+            # Missing vote file - count as abstention
+            ((abstentions++)) || true
+            log_warn "No vote file found for model $model"
         fi
     done
 
@@ -229,16 +386,16 @@ SQL
         final_status="APPROVED"
     fi
 
-    # Update consensus request
+    # Update consensus request (SQL injection fixed - all string params escaped)
     sqlite3 "$db" <<SQL
 UPDATE consensus_requests
-SET status = '$final_status',
-    final_decision = '$final_decision',
+SET status = '$(_sql_escape "$final_status")',
+    final_decision = '$(_sql_escape "$final_decision")',
     approvals = $approvals,
     rejections = $rejections,
     abstentions = $abstentions,
     completed_at = datetime('now')
-WHERE id = '$request_id';
+WHERE id = '$(_sql_escape "$request_id")';
 SQL
 
     # Build result JSON
@@ -327,45 +484,54 @@ collect_model_vote() {
     local required_changes=""
 
     if [[ $exit_code -eq 0 ]] && [[ -n "$response" ]]; then
+        # SEC-009-1: Validate model response JSON structure before processing
         # Try to extract structured decision from response (assuming JSON envelope or internal JSON)
         # Delegates return JSON envelope. Direct calls might not.
-        
-        # Check if response is valid JSON
-        if echo "$response" | jq -e . >/dev/null 2>&1; then
-             # Check if it's our envelope format
-             if echo "$response" | jq -e '.decision' >/dev/null 2>&1; then
-                decision=$(echo "$response" | jq -r '.decision // "ABSTAIN"')
-                confidence=$(echo "$response" | jq -r '.confidence // 0')
-                reasoning=$(echo "$response" | jq -r '.reasoning // ""')
-                # required_changes might not be in standard envelope, check output
-                # or check separate field if added
-             else
-                # Maybe model output JSON directly
-                decision="ABSTAIN"
-                reasoning="Parsed JSON but no decision field found"
-             fi
+
+        # Check if response is valid JSON with required structure
+        if validate_model_response_json "$response"; then
+            # Response passed validation - safe to extract fields
+            decision=$(echo "$response" | jq -r '.decision')
+            confidence=$(echo "$response" | jq -r '.confidence // 0')
+            reasoning=$(echo "$response" | jq -r '.reasoning // ""')
+            required_changes=$(echo "$response" | jq -r '.required_changes // ""')
+            log_info "Valid JSON response from $model: decision=$decision, confidence=$confidence"
+        elif echo "$response" | jq -e . >/dev/null 2>&1; then
+            # Valid JSON but missing/invalid required fields
+            log_warn "JSON from $model missing required fields: $VALIDATION_ERROR"
+            decision="ABSTAIN"
+            confidence=0
+            reasoning="Response validation failed: $VALIDATION_ERROR. Original: $(echo "$response" | head -c 200)"
         else
-            # Parse unstructured response using grep/regex
-            if echo "$response" | grep -qi "approve\|looks good\|lgtm"; then
-                decision="APPROVE"
-                confidence=0.8
-            elif echo "$response" | grep -qi "reject\|critical issue\|security vulnerability"; then
-                decision="REJECT"
-                confidence=0.85
-            elif echo "$response" | grep -qi "changes needed\|suggest\|should be"; then
-                decision="REQUEST_CHANGES"
-                confidence=0.75
-            fi
-            reasoning="$response"
+            # Not valid JSON - reject unstructured responses for security
+            # SEC-009-1: Do NOT use grep-based parsing as it can be manipulated
+            log_warn "Non-JSON response from $model rejected (SEC-009-1)"
+            decision="ABSTAIN"
+            confidence=0
+            reasoning="Non-JSON response rejected for security. Raw response: $(echo "$response" | head -c 200)"
         fi
     else
-        reasoning="Model error: $response"
+        log_warn "Model $model returned error (exit code: $exit_code)"
+        decision="ABSTAIN"
+        confidence=0
+        reasoning="Model error (exit $exit_code): $(echo "$response" | head -c 200)"
     fi
 
-    # Record vote
+    # Final validation: Ensure decision is valid (defense in depth)
+    case "$decision" in
+        APPROVE|REJECT|ABSTAIN|REQUEST_CHANGES)
+            ;;
+        *)
+            log_error "Invalid decision value after parsing: '$decision' - forcing ABSTAIN"
+            decision="ABSTAIN"
+            confidence=0
+            ;;
+    esac
+
+    # Record vote (SQL injection fixed - all string params escaped)
     sqlite3 "$db" <<SQL
 INSERT OR REPLACE INTO consensus_votes (request_id, model, decision, confidence, reasoning, required_changes, latency_ms)
-VALUES ('$request_id', '$model', '$decision', $confidence, '$(_sql_escape "$reasoning")', '$(_sql_escape "$required_changes")', $latency_ms);
+VALUES ('$(_sql_escape "$request_id")', '$(_sql_escape "$model")', '$(_sql_escape "$decision")', $confidence, '$(_sql_escape "$reasoning")', '$(_sql_escape "$required_changes")', $latency_ms);
 SQL
 
     # Return vote result
@@ -421,7 +587,7 @@ is_consensus_valid() {
 
     local status
     status=$(sqlite3 "$db" <<SQL
-SELECT status FROM consensus_requests WHERE id = '$request_id';
+SELECT status FROM consensus_requests WHERE id = '$(_sql_escape "$request_id")';
 SQL
 )
 
@@ -452,6 +618,8 @@ SQL
 }
 
 # Export functions
+export -f validate_model_response_json
+export -f validate_vote_json
 export -f init_consensus_schema
 export -f generate_request_id
 export -f request_tri_supervisor_approval

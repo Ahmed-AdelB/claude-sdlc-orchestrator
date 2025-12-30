@@ -688,6 +688,24 @@ sanitize_git_log() {
     printf '%s' "$input"
 }
 
+# SEC-001-1: Enhanced sanitization for multi-line input bypass
+# Prevents attacks that use multi-line sequences to bypass single-line sanitization
+# Usage: sanitized_output=$(git log -1 | sanitize_git_log_v2)
+# Or:    sanitize_git_log_v2 "$git_output"
+#
+# Security measures:
+# - Collapses multi-line input to single line
+# - Removes duplicate spaces
+# - Then applies existing sanitize_git_log
+sanitize_git_log_v2() {
+    local input="$1"
+    # Collapse multi-line sequences that bypass single-line sanitization
+    local collapsed
+    collapsed=$(printf '%s' "$input" | tr '\n' ' ' | sed 's/  */ /g')
+    # Then apply existing sanitization
+    sanitize_git_log "$collapsed"
+}
+
 # Validate git ref format (branch, tag, or commit hash)
 # Only allows alphanumeric, slashes, dots, dashes, underscores, tildes, and carets
 # Usage: if validate_git_ref "$ref"; then ...
@@ -1360,13 +1378,13 @@ is_delegate_success() {
 # Default lock timeout increased to prevent contention under load
 LEDGER_LOCK_TIMEOUT="${LEDGER_LOCK_TIMEOUT:-10}"
 LOG_FILE_LOCK_TIMEOUT="${LOG_FILE_LOCK_TIMEOUT:-5}"
-DEFAULT_LOCK_TIMEOUT="${DEFAULT_LOCK_TIMEOUT:-10}"
-MAX_LOCK_RETRIES="${MAX_LOCK_RETRIES:-3}"
+DEFAULT_LOCK_TIMEOUT="${DEFAULT_LOCK_TIMEOUT:-30}"  # P1.2: Increased from 10 to prevent contention
+MAX_LOCK_RETRIES="${MAX_LOCK_RETRIES:-7}"
 
 # INC-ARCH-005: Lock timeout optimization and stale lock handling
 LOCK_BACKOFF_INITIAL="${LOCK_BACKOFF_INITIAL:-1}"
-LOCK_BACKOFF_MAX="${LOCK_BACKOFF_MAX:-8}"
-LOCK_STALE_TIMEOUT_SECONDS="${LOCK_STALE_TIMEOUT_SECONDS:-300}"
+LOCK_BACKOFF_MAX="${LOCK_BACKOFF_MAX:-16}"
+LOCK_STALE_TIMEOUT_SECONDS="${LOCK_STALE_TIMEOUT_SECONDS:-60}"
 LOCK_AUTO_RELEASE_STALE="${LOCK_AUTO_RELEASE_STALE:-1}"
 LOCK_DEADLOCK_WARN_SECONDS="${LOCK_DEADLOCK_WARN_SECONDS:-$LOCK_STALE_TIMEOUT_SECONDS}"
 LOCK_METRICS_ENABLED="${LOCK_METRICS_ENABLED:-1}"
@@ -1851,6 +1869,7 @@ export -f ensure_dir
 export -f ensure_all_dirs
 export -f mask_secrets
 export -f sanitize_git_log
+export -f sanitize_git_log_v2
 export -f sanitize_llm_input
 
 # SEC-001: Export git security functions

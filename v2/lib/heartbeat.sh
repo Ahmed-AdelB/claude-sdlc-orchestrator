@@ -1140,6 +1140,306 @@ SQL
     echo "  Heartbeat timeout:    ${HEARTBEAT_TIMEOUT_SECONDS}s"
 }
 
+#===============================================================================
+# P2.6: Dead Letter Queue (DLQ) Functions
+#===============================================================================
+# Tasks that permanently fail (exceed max retries) are moved to a DLQ directory
+# for manual inspection and debugging. This prevents infinite retry loops.
+#===============================================================================
+
+# P2.6: Configuration
+MAX_TASK_RETRIES="${MAX_TASK_RETRIES:-3}"
+DLQ_DIR="${AUTONOMOUS_ROOT}/tasks/dlq"
+
+# P2.6: Ensure DLQ directory exists
+ensure_dlq_dir() {
+    if [[ ! -d "$DLQ_DIR" ]]; then
+        mkdir -p "$DLQ_DIR"
+        if declare -F log_info >/dev/null 2>&1; then
+            log_info "[DLQ] Created dead letter queue directory: $DLQ_DIR"
+        else
+            echo "[INFO] [DLQ] Created dead letter queue directory: $DLQ_DIR" >&2
+        fi
+    fi
+}
+
+# P2.6: Move task to Dead Letter Queue
+# Usage: move_to_dlq TASK_ID REASON [SOURCE_DIR]
+# Moves permanently failed tasks to tasks/dlq/ for manual inspection
+move_to_dlq() {
+    local task_id="$1"
+    local reason="${2:-exceeded max retries}"
+    local source_dir="${3:-}"
+
+    if [[ -z "$task_id" ]]; then
+        echo "Error: task_id required for move_to_dlq" >&2
+        return 1
+    fi
+
+    # P2-FIX-1: Validate task_id to prevent path traversal attacks
+    # Reject if contains path separators or traversal sequences
+    if [[ "$task_id" =~ [/\\] ]] || [[ "$task_id" == *".."* ]]; then
+        if declare -F log_error >/dev/null 2>&1; then
+            log_error "[DLQ] SEC-003B: Path traversal attempt blocked in task_id: $task_id"
+        else
+            echo "[ERROR] [DLQ] SEC-003B: Path traversal attempt blocked in task_id: $task_id" >&2
+        fi
+        return 1
+    fi
+
+    # Ensure DLQ directory exists
+    ensure_dlq_dir
+
+    if declare -F log_warn >/dev/null 2>&1; then
+        log_warn "[DLQ] Moving task to dead letter queue: $task_id (reason: $reason)"
+    else
+        echo "[WARN] [DLQ] Moving task to dead letter queue: $task_id (reason: $reason)" >&2
+    fi
+
+    local task_file=""
+    local found_dir=""
+
+    # Search for task file in multiple locations
+    local search_dirs=("${AUTONOMOUS_ROOT}/tasks/running" "${AUTONOMOUS_ROOT}/tasks/queue" "${AUTONOMOUS_ROOT}/tasks/failed")
+    if [[ -n "$source_dir" ]]; then
+        search_dirs=("$source_dir" "${search_dirs[@]}")
+    fi
+
+    for dir in "${search_dirs[@]}"; do
+        if [[ -f "${dir}/${task_id}" ]]; then
+            task_file="${dir}/${task_id}"
+            found_dir="$dir"
+            break
+        fi
+        # Try with .md extension
+        if [[ -f "${dir}/${task_id}.md" ]]; then
+            task_file="${dir}/${task_id}.md"
+            found_dir="$dir"
+            break
+        fi
+        # Try pattern matching
+        local matched
+        matched=$(find "$dir" -maxdepth 1 -name "*${task_id}*" -type f 2>/dev/null | head -1)
+        if [[ -n "$matched" && -f "$matched" ]]; then
+            task_file="$matched"
+            found_dir="$dir"
+            break
+        fi
+    done
+
+    # Move file to DLQ if found
+    if [[ -n "$task_file" && -f "$task_file" ]]; then
+        local task_name
+        task_name=$(basename "$task_file")
+        local dlq_file="${DLQ_DIR}/${task_name}"
+        local timestamp
+        timestamp=$(date +%Y%m%d_%H%M%S)
+
+        # Add timestamp suffix if file already exists in DLQ
+        if [[ -f "$dlq_file" ]]; then
+            dlq_file="${DLQ_DIR}/${task_name%.md}_${timestamp}.md"
+        fi
+
+        # Move the task file
+        if mv "$task_file" "$dlq_file" 2>/dev/null; then
+            # Remove any associated locks
+            rm -f "${task_file}.lock" 2>/dev/null || true
+            rmdir "${task_file}.lock.d" 2>/dev/null || true
+
+            if declare -F log_info >/dev/null 2>&1; then
+                log_info "[DLQ] Task moved: $task_name -> $dlq_file"
+            else
+                echo "[INFO] [DLQ] Task moved: $task_name -> $dlq_file" >&2
+            fi
+        else
+            if declare -F log_error >/dev/null 2>&1; then
+                log_error "[DLQ] Failed to move task file: $task_file"
+            else
+                echo "[ERROR] [DLQ] Failed to move task file: $task_file" >&2
+            fi
+        fi
+    fi
+
+    # Update SQLite state if available
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local esc_task_id esc_reason
+        esc_task_id="${task_id//\'/\'\'}"
+        esc_reason="${reason//\'/\'\'}"
+
+        sqlite3 "$STATE_DB" <<SQL
+-- Update task state to DLQ
+UPDATE tasks
+SET state = 'DLQ',
+    worker_id = NULL,
+    updated_at = datetime('now'),
+    dlq_reason = '${esc_reason}',
+    dlq_at = datetime('now')
+WHERE id = '${esc_task_id}';
+
+-- Log DLQ event
+INSERT INTO events (task_id, event_type, actor, payload, trace_id)
+VALUES (
+    '${esc_task_id}',
+    'TASK_MOVED_TO_DLQ',
+    'heartbeat',
+    '{"reason": "${esc_reason}", "max_retries": $MAX_TASK_RETRIES}',
+    '${TRACE_ID}'
+);
+SQL
+    fi
+
+    # Log to ledger file
+    local ledger_file="${AUTONOMOUS_ROOT}/logs/ledger.jsonl"
+    mkdir -p "$(dirname "$ledger_file")"
+    printf '{"timestamp":"%s","event":"TASK_MOVED_TO_DLQ","task":"%s","reason":"%s","max_retries":%d,"trace_id":"%s"}\n' \
+        "$(date -Iseconds)" "$task_id" "$reason" "$MAX_TASK_RETRIES" "$TRACE_ID" >> "$ledger_file"
+
+    return 0
+}
+
+# P2.6: Check if task should be moved to DLQ based on retry count
+# Usage: should_move_to_dlq TASK_ID [MAX_RETRIES]
+# Returns: 0 (true) if should move, 1 (false) otherwise
+should_move_to_dlq() {
+    local task_id="$1"
+    local max_retries="${2:-$MAX_TASK_RETRIES}"
+
+    if [[ -z "$task_id" ]]; then
+        return 1
+    fi
+
+    if ! command -v sqlite3 &>/dev/null || [[ ! -f "$STATE_DB" ]]; then
+        return 1
+    fi
+
+    local retry_count
+    retry_count=$(sqlite3 "$STATE_DB" "SELECT COALESCE(retry_count, 0) FROM tasks WHERE id='${task_id//\'/\'\'}' LIMIT 1;")
+
+    if [[ -n "$retry_count" ]] && [[ "$retry_count" =~ ^[0-9]+$ ]] && [[ "$retry_count" -ge "$max_retries" ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# P2.6: Check tasks for DLQ eligibility and move them
+# Usage: process_dlq_candidates [MAX_RETRIES]
+process_dlq_candidates() {
+    local max_retries="${1:-$MAX_TASK_RETRIES}"
+    local moved=0
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[DLQ] Scanning for tasks exceeding max retries ($max_retries)..."
+    else
+        echo "[INFO] [DLQ] Scanning for tasks exceeding max retries ($max_retries)..." >&2
+    fi
+
+    if ! command -v sqlite3 &>/dev/null || [[ ! -f "$STATE_DB" ]]; then
+        if declare -F log_warn >/dev/null 2>&1; then
+            log_warn "[DLQ] SQLite not available, skipping DLQ processing"
+        fi
+        echo "0"
+        return 0
+    fi
+
+    # Find tasks that have exceeded max retries
+    local candidates
+    candidates=$(sqlite3 "$STATE_DB" -separator '|' <<SQL
+SELECT id, retry_count, state
+FROM tasks
+WHERE retry_count >= $max_retries
+  AND state NOT IN ('COMPLETED', 'DLQ', 'RUNNING')  -- HIGH-2 FIX: Don't kill tasks mid-execution
+ORDER BY updated_at ASC;
+SQL
+)
+
+    while IFS='|' read -r task_id retry_count state; do
+        [[ -z "$task_id" ]] && continue
+
+        local reason="exceeded max retries (${retry_count}/${max_retries})"
+        move_to_dlq "$task_id" "$reason"
+        ((moved++)) || true
+    done <<< "$candidates"
+
+    if declare -F log_info >/dev/null 2>&1; then
+        log_info "[DLQ] Processing complete: $moved tasks moved to DLQ"
+    else
+        echo "[INFO] [DLQ] Processing complete: $moved tasks moved to DLQ" >&2
+    fi
+
+    echo "$moved"
+}
+
+# P2.6: List tasks in DLQ
+list_dlq_tasks() {
+    ensure_dlq_dir
+
+    echo "Dead Letter Queue Tasks:"
+    echo "========================"
+
+    # List file-based tasks
+    if [[ -d "$DLQ_DIR" ]]; then
+        local file_count=0
+        for task_file in "$DLQ_DIR"/*.md; do
+            [[ -f "$task_file" ]] || continue
+            local task_name
+            task_name=$(basename "$task_file")
+            local mtime
+            mtime=$(stat -c %Y "$task_file" 2>/dev/null || stat -f %m "$task_file" 2>/dev/null)
+            local mtime_human
+            mtime_human=$(date -d "@$mtime" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "$mtime" "+%Y-%m-%d %H:%M:%S" 2>/dev/null)
+            echo "  [FILE] $task_name (moved: $mtime_human)"
+            ((file_count++)) || true
+        done
+        echo ""
+        echo "File-based DLQ tasks: $file_count"
+    fi
+
+    # List SQLite-based tasks
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        local db_tasks
+        db_tasks=$(sqlite3 "$STATE_DB" -separator '|' <<SQL
+SELECT id, type, retry_count, dlq_reason, dlq_at
+FROM tasks
+WHERE state = 'DLQ'
+ORDER BY dlq_at DESC;
+SQL
+)
+        local db_count=0
+        while IFS='|' read -r task_id task_type retry_count dlq_reason dlq_at; do
+            [[ -z "$task_id" ]] && continue
+            echo "  [DB] $task_id (type: $task_type, retries: $retry_count, reason: $dlq_reason, at: $dlq_at)"
+            ((db_count++)) || true
+        done <<< "$db_tasks"
+        echo ""
+        echo "Database DLQ tasks: $db_count"
+    fi
+}
+
+# P2.6: Get DLQ statistics
+get_dlq_stats() {
+    ensure_dlq_dir
+
+    local file_count=0
+    if [[ -d "$DLQ_DIR" ]]; then
+        file_count=$(find "$DLQ_DIR" -maxdepth 1 -type f -name "*.md" 2>/dev/null | wc -l)
+    fi
+
+    local db_count=0
+    local dlq_last_hour=0
+    if command -v sqlite3 &>/dev/null && [[ -f "$STATE_DB" ]]; then
+        db_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM tasks WHERE state='DLQ';")
+        dlq_last_hour=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM events WHERE event_type='TASK_MOVED_TO_DLQ' AND timestamp > datetime('now', '-1 hour');")
+    fi
+
+    echo "P2.6 Dead Letter Queue Statistics:"
+    echo "  DLQ directory:        $DLQ_DIR"
+    echo "  File-based tasks:     $file_count"
+    echo "  Database DLQ tasks:   $db_count"
+    echo "  Moved (last hour):    $dlq_last_hour"
+    echo "  Max task retries:     $MAX_TASK_RETRIES"
+}
+
 export -f recover_stale_tasks recover_stale_task recover_zombie_tasks
 export -f start_recovery_daemon stop_recovery_daemon is_worker_alive
 export -f force_recover_task get_recovery_stats run_recovery_check
@@ -1148,3 +1448,7 @@ export -f force_recover_task get_recovery_stats run_recovery_check
 export -f update_heartbeat detect_dead_workers recover_crashed_worker
 export -f requeue_task recover_all_stale_tasks should_respawn_worker
 export -f reset_worker_for_respawn get_crash_recovery_stats
+
+# P2.6: Export DLQ functions
+export -f ensure_dlq_dir move_to_dlq should_move_to_dlq
+export -f process_dlq_candidates list_dlq_tasks get_dlq_stats

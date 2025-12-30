@@ -21,29 +21,29 @@ source "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" 2>/dev/null || true
 # =============================================================================
 
 # Artifact types for classification
-readonly ARTIFACT_TYPE_DOCUMENT="document"
-readonly ARTIFACT_TYPE_CODE="code"
-readonly ARTIFACT_TYPE_TEST="test"
-readonly ARTIFACT_TYPE_CONFIG="config"
-readonly ARTIFACT_TYPE_OTHER="other"
+if [[ -z "${ARTIFACT_TYPE_DOCUMENT:-}" ]]; then readonly ARTIFACT_TYPE_DOCUMENT="document"
+if [[ -z "${ARTIFACT_TYPE_CODE:-}" ]]; then readonly ARTIFACT_TYPE_CODE="code"
+if [[ -z "${ARTIFACT_TYPE_TEST:-}" ]]; then readonly ARTIFACT_TYPE_TEST="test"
+if [[ -z "${ARTIFACT_TYPE_CONFIG:-}" ]]; then readonly ARTIFACT_TYPE_CONFIG="config"
+if [[ -z "${ARTIFACT_TYPE_OTHER:-}" ]]; then readonly ARTIFACT_TYPE_OTHER="other"
 
 # =============================================================================
 # SDLC Phase Constants
 # =============================================================================
 # The 5 phases of the development discipline
-readonly PHASE_BRAINSTORM="BRAINSTORM"   # Phase 1: Gather requirements, clarifying questions
-readonly PHASE_DOCUMENT="DOCUMENT"        # Phase 2: Create specifications with acceptance criteria
-readonly PHASE_PLAN="PLAN"                # Phase 3: Technical design, mission breakdown (AB Method)
-readonly PHASE_EXECUTE="EXECUTE"          # Phase 4: Implement with parallel/sequential agents
-readonly PHASE_TRACK="TRACK"              # Phase 5: Monitor progress, update stakeholders
+if [[ -z "${PHASE_BRAINSTORM:-}" ]]; then readonly PHASE_BRAINSTORM="BRAINSTORM"   # Phase 1: Gather requirements, clarifying questions
+if [[ -z "${PHASE_DOCUMENT:-}" ]]; then readonly PHASE_DOCUMENT="DOCUMENT"        # Phase 2: Create specifications with acceptance criteria
+if [[ -z "${PHASE_PLAN:-}" ]]; then readonly PHASE_PLAN="PLAN"                # Phase 3: Technical design, mission breakdown (AB Method)
+if [[ -z "${PHASE_EXECUTE:-}" ]]; then readonly PHASE_EXECUTE="EXECUTE"          # Phase 4: Implement with parallel/sequential agents
+if [[ -z "${PHASE_TRACK:-}" ]]; then readonly PHASE_TRACK="TRACK"              # Phase 5: Monitor progress, update stakeholders
 
 # Additional terminal states
-readonly PHASE_COMPLETE="COMPLETE"        # Final state: Task completed successfully
-readonly PHASE_BLOCKED="BLOCKED"          # Task is blocked pending external input
-readonly PHASE_FAILED="FAILED"            # Task failed and requires intervention
+if [[ -z "${PHASE_COMPLETE:-}" ]]; then readonly PHASE_COMPLETE="COMPLETE"        # Final state: Task completed successfully
+if [[ -z "${PHASE_BLOCKED:-}" ]]; then readonly PHASE_BLOCKED="BLOCKED"          # Task is blocked pending external input
+if [[ -z "${PHASE_FAILED:-}" ]]; then readonly PHASE_FAILED="FAILED"            # Task failed and requires intervention
 
 # Ordered list of phases for iteration
-readonly SDLC_PHASES=("BRAINSTORM" "DOCUMENT" "PLAN" "EXECUTE" "TRACK" "COMPLETE")
+if [[ -z "${SDLC_PHASES:-}" ]]; then readonly SDLC_PHASES=("BRAINSTORM" "DOCUMENT" "PLAN" "EXECUTE" "TRACK" "COMPLETE")
 
 # Phase indices for comparison
 declare -A PHASE_ORDER=(
@@ -791,7 +791,7 @@ except Exception:
 # =============================================================================
 
 # Default coverage threshold for EXECUTE phase
-readonly COVERAGE_THRESHOLD="${COVERAGE_THRESHOLD:-80}"
+if [[ -z "${COVERAGE_THRESHOLD:-}" ]]; then readonly COVERAGE_THRESHOLD="${COVERAGE_THRESHOLD:-80}"
 
 # validate_phase_gate(task_id, phase)
 # Runs phase-specific validation checks to enforce quality gates.

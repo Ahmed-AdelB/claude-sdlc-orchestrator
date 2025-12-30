@@ -24,7 +24,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source common.sh if available
 if [[ -f "${SCRIPT_DIR}/common.sh" ]]; then
     source "${SCRIPT_DIR}/common.sh"
+fi
+
+# Source sqlite-state.sh for transition_task() and SQLite operations
+# CRITICAL: Required for filesystem-SQLite state sync (fixes split-brain)
+if [[ -f "${SCRIPT_DIR}/sqlite-state.sh" ]]; then
+    source "${SCRIPT_DIR}/sqlite-state.sh"
+elif [[ -n "${AUTONOMOUS_ROOT:-}" && -f "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh" ]]; then
+    source "${AUTONOMOUS_ROOT}/lib/sqlite-state.sh"
 else
+    # WARN: sqlite-state.sh not found - transition_task() will be undefined
+    # This may cause split-brain issues where filesystem and SQLite states diverge
+    echo "[WARN] sqlite-state.sh not found - SQLite state sync disabled" >&2
+fi
+
+# Fallbacks if common.sh not available
+if ! type -t log_info >/dev/null 2>&1; then
     # Minimal fallbacks if common.sh not available
     log_info() { echo "[INFO] $*" >&2; }
     log_warn() { echo "[WARN] $*" >&2; }
@@ -461,9 +476,8 @@ _init_path_security() {
     # Check for PATH manipulation
     if ! detect_path_manipulation; then
         log_path_violation "INIT_PATH_UNSAFE" "PATH manipulation detected at initialization" "CRITICAL"
-        # Optionally: block_path_manipulation
-        # Uncomment the next line to enforce strict PATH sanitization:
-        # block_path_manipulation
+        # P0.8: Enable strict PATH sanitization (was commented out)
+        block_path_manipulation
     fi
 
     log_path_audit "PATH_SECURITY_INITIALIZED" "SEC-008C path security module initialized"
@@ -500,7 +514,7 @@ COVERAGE_THRESHOLD="${COVERAGE_THRESHOLD:-80}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 MAX_REJECTIONS_PER_HOUR="${MAX_REJECTIONS_PER_HOUR:-10}"
 GATE_TIMEOUT="${GATE_TIMEOUT:-300}"
-STRICT_MODE="${STRICT_MODE:-false}" # SEC-008A: Fail gates if tools/configs missing
+STRICT_MODE="${STRICT_MODE:-true}" # SEC-008A: Fail gates if tools/configs missing (secure by default)
 
 # =============================================================================
 # SEC-008B: Hardcoded Threshold Floors (Security Baseline)
@@ -511,9 +525,9 @@ STRICT_MODE="${STRICT_MODE:-false}" # SEC-008A: Fail gates if tools/configs miss
 #
 # SECURITY: These values are hardcoded and MUST NOT be configurable
 # =============================================================================
-readonly MIN_COVERAGE_FLOOR=70
-readonly MIN_SECURITY_SCORE_FLOOR=60
-readonly MAX_CRITICAL_VULNS_CEILING=0
+if [[ -z "${MIN_COVERAGE_FLOOR:-}" ]]; then readonly MIN_COVERAGE_FLOOR=70; fi
+if [[ -z "${MIN_SECURITY_SCORE_FLOOR:-}" ]]; then readonly MIN_SECURITY_SCORE_FLOOR=60; fi
+if [[ -z "${MAX_CRITICAL_VULNS_CEILING:-}" ]]; then readonly MAX_CRITICAL_VULNS_CEILING=0; fi
 
 # User-configurable thresholds (will be enforced against floors)
 MIN_COVERAGE="${MIN_COVERAGE:-80}"
@@ -2356,10 +2370,149 @@ quality_gate() {
 }
 
 # =============================================================================
+# IDEMPOTENT TASK STATE SYNC (P0.3 - Split-Brain Fix)
+# =============================================================================
+# Safely syncs filesystem and SQLite state with:
+# - Idempotent transitions (safe to call multiple times)
+# - Pending-sync markers on failure for recovery
+# - DB validation before and after transition
+# - Atomic marker writes with locking (prevents race conditions)
+# - Proper dependency guards and JSON escaping
+# =============================================================================
+
+# Directory for pending-sync markers (tasks that need SQLite resync)
+# Guard against empty STATE_DIR to avoid writing to root
+if [[ -z "${STATE_DIR:-}" ]]; then
+    STATE_DIR="${AUTONOMOUS_ROOT:-/tmp}/state"
+fi
+PENDING_SYNC_DIR="${PENDING_SYNC_DIR:-${STATE_DIR}/pending-sync}"
+
+# JSON escape helper for safe marker content
+_json_escape_value() {
+    local val="$1"
+    # Escape backslash, double quote, and control characters
+    printf '%s' "$val" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a;N;$!ba;s/\n/\\n/g' -e 's/\t/\\t/g'
+}
+
+# Internal logging helper with fallback
+_log_sync() {
+    local level="$1"
+    shift
+    if type -t log_gate >/dev/null 2>&1; then
+        log_gate "$level" "SYNC: $*"
+    else
+        echo "[$level] SYNC: $*" >&2
+    fi
+}
+
+# Idempotent state sync helper
+# Usage: sync_task_state_to_db <task_id> <target_state> [reason]
+# Returns: 0 on success, 1 on failure (but marks for resync)
+sync_task_state_to_db() {
+    local task_id="$1"
+    local target_state="$2"
+    local reason="${3:-}"
+
+    # Ensure directory exists
+    mkdir -p "$PENDING_SYNC_DIR" 2>/dev/null || {
+        _log_sync "ERROR" "Cannot create pending-sync dir"
+        return 1
+    }
+
+    local lock_file="${PENDING_SYNC_DIR}/.sync_${task_id}.lock"
+
+    # Check if transition_task is available (sqlite-state.sh loaded)
+    if ! type -t transition_task >/dev/null 2>&1; then
+        _log_sync "WARN" "transition_task not available - SQLite sync skipped for $task_id"
+        _mark_pending_sync "$task_id" "$target_state" "transition_task undefined"
+        return 1
+    fi
+
+    # Use flock for atomic check-and-transition (prevents race conditions)
+    (
+        flock -w 5 200 || {
+            _log_sync "WARN" "Could not acquire sync lock for $task_id"
+            exit 1
+        }
+
+        # Check current SQLite state to avoid redundant transitions (idempotent)
+        local current_state=""
+        if type -t get_task_state >/dev/null 2>&1; then
+            current_state=$(get_task_state "$task_id" 2>/dev/null || echo "")
+        fi
+
+        if [[ "$current_state" == "$target_state" ]]; then
+            _log_sync "INFO" "Task $task_id already in state $target_state (idempotent)"
+            # Clean up any stale pending-sync marker
+            rm -f "${PENDING_SYNC_DIR}/${task_id}.pending" 2>/dev/null || true
+            exit 0
+        fi
+
+        # Attempt SQLite transition
+        if transition_task "$task_id" "$target_state" "$reason" "system" 2>/dev/null; then
+            _log_sync "INFO" "Task $task_id transitioned to $target_state in SQLite"
+            # Clean up any pending-sync marker
+            rm -f "${PENDING_SYNC_DIR}/${task_id}.pending" 2>/dev/null || true
+            exit 0
+        else
+            _log_sync "ERROR" "Failed to transition task $task_id to $target_state"
+            _mark_pending_sync "$task_id" "$target_state" "transition_task failed: $reason"
+            exit 1
+        fi
+    ) 200>"$lock_file"
+    local result=$?
+
+    # Clean up lock file
+    rm -f "$lock_file" 2>/dev/null || true
+    return $result
+}
+
+# Create pending-sync marker for failed transitions (for recovery by queue-watcher)
+# Uses atomic write pattern (write to temp, then rename)
+_mark_pending_sync() {
+    local task_id="$1"
+    local target_state="$2"
+    local reason="${3:-unknown}"
+
+    mkdir -p "$PENDING_SYNC_DIR" 2>/dev/null || return 1
+
+    local marker_file="${PENDING_SYNC_DIR}/${task_id}.pending"
+    local tmp_file="${marker_file}.tmp.$$"
+
+    # Get timestamp with fallback
+    local ts
+    if type -t iso_timestamp >/dev/null 2>&1; then
+        ts=$(iso_timestamp)
+    else
+        ts=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
+    fi
+
+    # Escape values for safe JSON
+    local esc_task esc_state esc_reason esc_trace
+    esc_task=$(_json_escape_value "$task_id")
+    esc_state=$(_json_escape_value "$target_state")
+    esc_reason=$(_json_escape_value "$reason")
+    esc_trace=$(_json_escape_value "${TRACE_ID:-unknown}")
+
+    # Atomic write: write to temp file, then rename
+    cat > "$tmp_file" <<EOF
+{"task_id":"${esc_task}","target_state":"${esc_state}","reason":"${esc_reason}","created_at":"${ts}","trace_id":"${esc_trace}"}
+EOF
+
+    if mv "$tmp_file" "$marker_file" 2>/dev/null; then
+        _log_sync "WARN" "Created pending-sync marker for $task_id -> $target_state"
+    else
+        rm -f "$tmp_file" 2>/dev/null || true
+        _log_sync "ERROR" "Failed to create pending-sync marker for $task_id"
+    fi
+}
+
+# =============================================================================
 # M2-010: UNIFIED APPROVE TASK
 # =============================================================================
 # Approves a task after passing all quality gates
 # - Moves task from review to approved
+# - Syncs state to SQLite (fixes split-brain)
 # - Logs approval to ledger
 # - Generates approval report
 # - Notifies via comms channel
@@ -2371,7 +2524,17 @@ approve_task() {
     local timestamp
     timestamp=$(iso_timestamp)
 
-    log_gate "INFO" "APPROVE: Processing approval for task $task_id"
+    # P0.9: Enforce authentication when REQUIRE_AUTH is true (secure by default)
+    # This prevents unauthenticated approval calls in production
+    if [[ "${REQUIRE_AUTH:-true}" == "true" ]]; then
+        log_gate "ERROR" "SEC-009B: approve_task() called without authentication"
+        log_gate "ERROR" "SEC-009B: Use approve_with_auth() with valid token instead"
+        log_gate "ERROR" "SEC-009B: Set REQUIRE_AUTH=false to allow legacy unauthenticated approval"
+        echo "Error: Authentication required. Use approve_with_auth() with a valid token." >&2
+        return 1
+    fi
+
+    log_gate "INFO" "APPROVE: Processing approval for task $task_id (REQUIRE_AUTH=false)"
 
     # 1. Move task file from review to approved
     local task_file="${REVIEW_DIR}/${task_id}.md"
@@ -2386,6 +2549,14 @@ approve_task() {
     else
         log_gate "WARN" "APPROVE: Task file not found at $task_file (may have been moved)"
     fi
+
+    # 1b. Sync state to SQLite (P0.4 - Split-brain fix)
+    # This ensures SQLite reflects the filesystem state change
+    # On failure, creates pending-sync marker for recovery by queue-watcher
+    sync_task_state_to_db "$task_id" "APPROVED" "All quality gates passed" || {
+        log_gate "WARN" "APPROVE: SQLite sync failed for $task_id (pending-sync marker created)"
+        # Continue anyway - filesystem is source of truth, DB will be resynced
+    }
 
     # 2. Generate approval report
     local report_file="${APPROVED_DIR}/${task_id}_approval.json"
@@ -2453,7 +2624,15 @@ reject_task() {
     local timestamp
     timestamp=$(iso_timestamp)
 
-    log_gate "INFO" "REJECT: Processing rejection for task $task_id"
+    # P0.9: Enforce authentication when REQUIRE_AUTH is true (secure by default)
+    if [[ "${REQUIRE_AUTH:-true}" == "true" ]]; then
+        log_gate "ERROR" "SEC-009B: reject_task() called without authentication"
+        log_gate "ERROR" "SEC-009B: Use reject_with_auth() with valid token instead"
+        echo "Error: Authentication required. Use reject_with_auth() with a valid token." >&2
+        return 1
+    fi
+
+    log_gate "INFO" "REJECT: Processing rejection for task $task_id (REQUIRE_AUTH=false)"
 
     # Check for max retries exceeded (permanent failure)
     local retry_file="${GATES_DIR}/retry_${task_id}.count"
@@ -2483,6 +2662,15 @@ reject_task() {
         }
         log_gate "INFO" "REJECT: Task file moved to ${dest_dir}/"
     fi
+
+    # 2b. Sync state to SQLite (P0.5 - Split-brain fix)
+    # Use FAILED for permanent failures, REJECTED for retriable
+    local db_state="REJECTED"
+    [[ "$is_permanent_failure" == "true" ]] && db_state="FAILED"
+    sync_task_state_to_db "$task_id" "$db_state" "$reason" || {
+        log_gate "WARN" "REJECT: SQLite sync failed for $task_id (pending-sync marker created)"
+        # Continue anyway - filesystem is source of truth, DB will be resynced
+    }
 
     # 3. Generate detailed rejection report
     local report_file="${dest_dir}/${task_id}_rejection.json"

@@ -20,7 +20,7 @@ WATCHDOG_PID_FILE="$HOME/.claude/autonomous/watchdog.pid"
 WATCHDOG_LOG="$HOME/.claude/autonomous/logs/watchdog.log"
 TMUX_SESSION="claude-autonomous"
 CHECK_INTERVAL=30  # seconds
-MAX_RESTARTS=10    # Maximum restarts before giving up
+MAX_RESTARTS=999999  # Effectively unlimited for production resilience
 RESTART_COOLDOWN=60 # Seconds between restarts
 
 # Colors
@@ -91,6 +91,15 @@ run_watchdog() {
     while true; do
         sleep "$CHECK_INTERVAL"
 
+        # P2-FIX-3: Reset counter in main loop (not subshell) after 10min stability
+        if [[ $restart_count -gt 0 ]] && [[ $last_restart -gt 0 ]]; then
+            local stable_time=$(($(date +%s) - last_restart))
+            if [[ $stable_time -gt 600 ]] && is_session_running; then
+                log "Session stable for 10m, reset restart counter (was: $restart_count)"
+                restart_count=0
+            fi
+        fi
+
         if ! is_session_running; then
             local now=$(date +%s)
             local since_last=$((now - last_restart))
@@ -114,15 +123,7 @@ run_watchdog() {
             if restart_session "$project_dir"; then
                 restart_count=$((restart_count + 1))
                 last_restart=$now
-
-                # Reset counter if session runs for 10 minutes
-                (
-                    sleep 600
-                    if is_session_running; then
-                        restart_count=0
-                        log "Session stable for 10m, reset restart counter"
-                    fi
-                ) &
+                # Note: Counter reset now happens in main loop (P2-FIX-3)
             fi
         fi
     done

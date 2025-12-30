@@ -29,8 +29,12 @@
 # =============================================================================
 
 # Security score constraints (readonly)
-readonly MIN_VALID_SCORE=0
-readonly MAX_VALID_SCORE=100
+if [[ -z "${MIN_VALID_SCORE:-}" ]]; then
+    readonly MIN_VALID_SCORE=0
+fi
+if [[ -z "${MAX_VALID_SCORE:-}" ]]; then
+    readonly MAX_VALID_SCORE=100
+fi
 
 # Validate a security/validation score value
 validate_security_score() {
