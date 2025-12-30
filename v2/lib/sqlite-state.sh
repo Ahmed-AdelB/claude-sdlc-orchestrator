@@ -657,6 +657,62 @@ SQL
 }
 
 # ----------------------------------------------------------------------------
+# FIX-2 (MEDIUM): Schema migration for existing databases
+# ----------------------------------------------------------------------------
+# Adds missing columns to existing databases without dropping tables
+# This ensures backward compatibility when updating from older schema versions
+migrate_schema() {
+    local db="${1:-$STATE_DB}"
+
+    if [[ ! -f "$db" ]]; then
+        return 0  # Nothing to migrate
+    fi
+
+    log_info "[MIGRATE] Checking schema for migrations: $db"
+
+    # Check if tasks table exists
+    local has_tasks
+    has_tasks=$(_sqlite_exec "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks';" 2>/dev/null || echo "")
+
+    if [[ -z "$has_tasks" ]]; then
+        return 0  # No tasks table, nothing to migrate
+    fi
+
+    # FIX-2: Add dlq_reason column if missing
+    local has_dlq_reason
+    has_dlq_reason=$(_sqlite_exec "$db" "SELECT 1 FROM pragma_table_info('tasks') WHERE name='dlq_reason';" 2>/dev/null || echo "")
+
+    if [[ -z "$has_dlq_reason" ]]; then
+        log_info "[MIGRATE] Adding dlq_reason column to tasks table"
+        _sqlite_exec "$db" "ALTER TABLE tasks ADD COLUMN dlq_reason TEXT;" 2>/dev/null || {
+            log_warn "[MIGRATE] Failed to add dlq_reason column (may already exist)"
+        }
+    fi
+
+    # FIX-2: Add dlq_at column if missing
+    local has_dlq_at
+    has_dlq_at=$(_sqlite_exec "$db" "SELECT 1 FROM pragma_table_info('tasks') WHERE name='dlq_at';" 2>/dev/null || echo "")
+
+    if [[ -z "$has_dlq_at" ]]; then
+        log_info "[MIGRATE] Adding dlq_at column to tasks table"
+        _sqlite_exec "$db" "ALTER TABLE tasks ADD COLUMN dlq_at TEXT;" 2>/dev/null || {
+            log_warn "[MIGRATE] Failed to add dlq_at column (may already exist)"
+        }
+    fi
+
+    # Update schema version
+    _sqlite_exec "$db" "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5.2');" 2>/dev/null || true
+
+    log_info "[MIGRATE] Schema migration complete"
+}
+
+# Ensure database is initialized and migrated
+_ensure_db_migrated() {
+    _ensure_db
+    migrate_schema "$STATE_DB"
+}
+
+# ----------------------------------------------------------------------------
 # Key/value state helpers (compatible with state.sh interface)
 # ----------------------------------------------------------------------------
 state_get() {

@@ -66,7 +66,8 @@ export TRACE_ID
 #===============================================================================
 # Configuration
 #===============================================================================
-DEFAULT_TIMEOUT=480  # 8 minutes for ultrathink reasoning
+# FIX-5: Wire CLAUDE_TIMEOUT env var
+DEFAULT_TIMEOUT="${CLAUDE_TIMEOUT:-480}"  # 8 minutes for ultrathink reasoning
 MAX_TIMEOUT=900      # 15 minutes max for complex tasks
 CLAUDE_CMD="${CLAUDE_CMD:-claude}"
 
@@ -434,20 +435,24 @@ attempt_fallback() {
 #===============================================================================
 # Logging helper
 #===============================================================================
-log_claude() {
-    local level="$1"
-    local event="$2"
-    local message="$3"
-    local metadata="${4:-{}}"
+# FIX-4 (LOW): Only define log_claude if not already provided by lib/logging.sh
+# This ensures consistency with centralized logging format
+if ! declare -F log_claude >/dev/null 2>&1; then
+    log_claude() {
+        local level="$1"
+        local event="$2"
+        local message="$3"
+        local metadata="${4:-{}}"
 
-    if declare -F log_structured >/dev/null 2>&1; then
-        log_structured "$level" "$COMPONENT" "$event" "$message" "$metadata"
-    else
-        local timestamp
-        timestamp=$(date -Iseconds)
-        echo "[${timestamp}][${level}][${COMPONENT}][${TRACE_ID}] ${event}: ${message}" >&2
-    fi
-}
+        if declare -F log_structured >/dev/null 2>&1; then
+            log_structured "$level" "$COMPONENT" "$event" "$message" "$metadata"
+        else
+            local timestamp
+            timestamp=$(date -Iseconds)
+            echo "[${timestamp}][${level}][${COMPONENT}][${TRACE_ID}] ${event}: ${message}" >&2
+        fi
+    }
+fi
 
 #===============================================================================
 # Validate Input (check stdin first if no argument provided)
@@ -565,6 +570,15 @@ CLAUDE_ARGS=(
     --dangerously-skip-permissions
     -p "$FULL_PROMPT"
 )
+
+# FIX-1 (HIGH): Pass --model to Claude CLI with correct model ID
+# Map friendly model names to actual model IDs
+ACTUAL_MODEL_ID="${MODEL_IDS[$MODEL]:-}"
+if [[ -n "$ACTUAL_MODEL_ID" ]]; then
+    CLAUDE_ARGS+=(--model "$ACTUAL_MODEL_ID")
+    log_claude "DEBUG" "MODEL_SET" "Using model: $MODEL -> $ACTUAL_MODEL_ID" \
+        "{\"trace_id\":\"${TRACE_ID}\",\"model\":\"${MODEL}\",\"model_id\":\"${ACTUAL_MODEL_ID}\"}"
+fi
 
 # Add output format if supported (try JSON for structured output)
 # Some versions support --output-format json

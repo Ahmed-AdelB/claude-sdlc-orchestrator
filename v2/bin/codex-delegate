@@ -398,6 +398,28 @@ attempt_fallback() {
 }
 
 #===============================================================================
+# Logging helper
+#===============================================================================
+# Only define log_codex if not already provided by lib/logging.sh
+# This ensures consistency with centralized logging format
+if ! declare -F log_codex >/dev/null 2>&1; then
+    log_codex() {
+        local level="$1"
+        local event="$2"
+        local message="$3"
+        local metadata="${4:-{}}"
+
+        if declare -F log_structured >/dev/null 2>&1; then
+            log_structured "$level" "$COMPONENT" "$event" "$message" "$metadata"
+        else
+            local timestamp
+            timestamp=$(date -Iseconds)
+            echo "[${timestamp}][${level}][${COMPONENT}][${TRACE_ID}] ${event}: ${message}" >&2
+        fi
+    }
+fi
+
+#===============================================================================
 # Validate Input (check stdin first if no argument provided)
 #===============================================================================
 # If no argument prompt provided, check stdin (HERE string from worker)

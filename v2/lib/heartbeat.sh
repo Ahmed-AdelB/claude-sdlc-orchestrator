@@ -1227,6 +1227,9 @@ move_to_dlq() {
         fi
     done
 
+    # FIX-3 (MEDIUM): Track move success for proper error handling
+    local move_success=false
+
     # Move file to DLQ if found
     if [[ -n "$task_file" && -f "$task_file" ]]; then
         local task_name
@@ -1245,6 +1248,7 @@ move_to_dlq() {
             # Remove any associated locks
             rm -f "${task_file}.lock" 2>/dev/null || true
             rmdir "${task_file}.lock.d" 2>/dev/null || true
+            move_success=true
 
             if declare -F log_info >/dev/null 2>&1; then
                 log_info "[DLQ] Task moved: $task_name -> $dlq_file"
@@ -1257,6 +1261,8 @@ move_to_dlq() {
             else
                 echo "[ERROR] [DLQ] Failed to move task file: $task_file" >&2
             fi
+            # FIX-3: Return error immediately on file move failure
+            return 1
         fi
     fi
 
@@ -1357,8 +1363,14 @@ SQL
         [[ -z "$task_id" ]] && continue
 
         local reason="exceeded max retries (${retry_count}/${max_retries})"
-        move_to_dlq "$task_id" "$reason"
-        ((moved++)) || true
+        # FIX-3: Only increment counter if move_to_dlq succeeds
+        if move_to_dlq "$task_id" "$reason"; then
+            ((moved++)) || true
+        else
+            if declare -F log_warn >/dev/null 2>&1; then
+                log_warn "[DLQ] Failed to move task to DLQ: $task_id"
+            fi
+        fi
     done <<< "$candidates"
 
     if declare -F log_info >/dev/null 2>&1; then
