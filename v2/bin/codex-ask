@@ -94,17 +94,21 @@ $FILE_CONTENT
 fi
 
 # Check for stdin (piped content) with size limit
+# FIX: Add timeout to prevent indefinite blocking when backgrounded (#STDIN-BLOCK-FIX)
 if [[ ! -t 0 ]]; then
-    STDIN_CONTENT=$(head -c $MAX_STDIN_SIZE)
+    # Use timeout to prevent blocking when stdin is connected but empty
+    STDIN_CONTENT=$(timeout 2 head -c $MAX_STDIN_SIZE 2>/dev/null) || true
     # Warn if truncated
-    if read -n 1 -t 0 2>/dev/null; then
+    if [[ -n "$STDIN_CONTENT" ]] && read -n 1 -t 0 2>/dev/null; then
         echo "[CODEX] Warning: Stdin truncated to ${MAX_STDIN_SIZE} bytes (500KB limit)" >&2
     fi
-    FULL_PROMPT="$PROMPT
+    if [[ -n "$STDIN_CONTENT" ]]; then
+        FULL_PROMPT="$PROMPT
 
 --- CONTENT ---
 $STDIN_CONTENT
 --- END CONTENT ---"
+    fi
 fi
 
 # Log the request

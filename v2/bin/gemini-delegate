@@ -333,11 +333,11 @@ extract_decision() {
     local decision="ABSTAIN"
 
     # Look for explicit decision keywords (case insensitive)
-    if echo "$output" | grep -qiE '\b(APPROVE|APPROVED|LGTM|ACCEPT|YES)\b'; then
+    if printf '%s\n' "$output" | grep -qiE '\b(APPROVE|APPROVED|LGTM|ACCEPT|YES)\b'; then
         decision="APPROVE"
-    elif echo "$output" | grep -qiE '\b(REJECT|REJECTED|DENY|DENIED|NO|BLOCK)\b'; then
+    elif printf '%s\n' "$output" | grep -qiE '\b(REJECT|REJECTED|DENY|DENIED|NO|BLOCK)\b'; then
         decision="REJECT"
-    elif echo "$output" | grep -qiE '\b(ABSTAIN|UNSURE|UNCLEAR|CANNOT DETERMINE|NEED MORE)\b'; then
+    elif printf '%s\n' "$output" | grep -qiE '\b(ABSTAIN|UNSURE|UNCLEAR|CANNOT DETERMINE|NEED MORE)\b'; then
         decision="ABSTAIN"
     fi
 
@@ -351,16 +351,16 @@ calculate_confidence() {
     local confidence=0.5  # Default moderate confidence
 
     # Strong affirmatives increase confidence
-    if echo "$output" | grep -qiE '\b(definitely|certainly|absolutely|clearly|strongly)\b'; then
+    if printf '%s\n' "$output" | grep -qiE '\b(definitely|certainly|absolutely|clearly|strongly)\b'; then
         confidence=0.9
     # Moderate affirmatives
-    elif echo "$output" | grep -qiE '\b(likely|probably|appears|seems|looks)\b'; then
+    elif printf '%s\n' "$output" | grep -qiE '\b(likely|probably|appears|seems|looks)\b'; then
         confidence=0.7
     # Weak/uncertain language
-    elif echo "$output" | grep -qiE '\b(maybe|might|could|possibly|perhaps|unsure)\b'; then
+    elif printf '%s\n' "$output" | grep -qiE '\b(maybe|might|could|possibly|perhaps|unsure)\b'; then
         confidence=0.4
     # Very uncertain
-    elif echo "$output" | grep -qiE '\b(difficult to say|hard to tell|cannot determine|need more)\b'; then
+    elif printf '%s\n' "$output" | grep -qiE '\b(difficult to say|hard to tell|cannot determine|need more)\b'; then
         confidence=0.2
     fi
 
@@ -379,7 +379,7 @@ extract_reasoning() {
 
     # Try to extract reasoning after keywords
     local reasoning
-    reasoning=$(echo "$output" | grep -iE '(because|reason|rationale|due to|since|therefore):?' | head -3 | tr '\n' ' ')
+    reasoning=$(printf '%s\n' "$output" | grep -iE '(because|reason|rationale|due to|since|therefore):?' | head -3 | tr '\n' ' ')
 
     if [[ -z "$reasoning" ]]; then
         # Take first 500 chars as summary
@@ -504,10 +504,12 @@ fi
 MAX_STDIN_SIZE=500000  # 500KB limit to prevent memory issues
 STDIN_CONTENT=""
 # Only read if stdin was not already consumed for PROMPT
+# FIX: Add timeout to prevent indefinite blocking when backgrounded (#GEMINI-DELEGATE-STDIN-BLOCK)
 if [[ ! -t 0 ]] && [[ -z "$_STDIN_CONSUMED" ]]; then
-    STDIN_CONTENT=$(head -c $MAX_STDIN_SIZE)
+    # Use timeout to prevent blocking when stdin is connected but empty (e.g., background processes)
+    STDIN_CONTENT=$(timeout 2 head -c $MAX_STDIN_SIZE 2>/dev/null) || true
     # Check if there was more content (stdin still has data)
-    if read -n 1 -t 0 2>/dev/null; then
+    if [[ -n "$STDIN_CONTENT" ]] && read -n 1 -t 0 2>/dev/null; then
         log_warn "Stdin truncated to ${MAX_STDIN_SIZE} bytes (500KB limit)"
     fi
 fi
@@ -532,6 +534,12 @@ IMPORTANT: When providing your analysis, if a decision is required, please clear
 - ABSTAIN: if you cannot make a determination
 
 Include your reasoning for the decision."
+
+# SEC-006: Sanitize prompt to prevent injection attacks (SEC-006-1, SEC-006-2)
+if declare -f sanitize_llm_input >/dev/null 2>&1; then
+    FULL_PROMPT=$(sanitize_llm_input "$FULL_PROMPT")
+    log_debug "[${TRACE_ID}] SEC-006: Prompt sanitized for injection prevention"
+fi
 
 # Cost breaker check (pre-execution)
 INPUT_TOKENS=$(estimate_tokens_safe "$FULL_PROMPT" "gemini")
@@ -628,17 +636,17 @@ elif [[ $EXIT_CODE -ne 0 ]]; then
     error_reason="Unknown error (exit code: $EXIT_CODE)"
 
     # Check for rate limit
-    if echo "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
+    if printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(rate limit|quota|429|too many requests)'; then
         log_gemini "WARN" "RATE_LIMIT" "Gemini rate limit hit" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
         error_reason="Rate limit exceeded. Please try again later."
     # Check for auth issues
-    elif echo "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401)'; then
+    elif printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(auth|authentication|unauthorized|401)'; then
         log_gemini "ERROR" "AUTH_ERROR" "Gemini authentication failed" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
         error_reason="Authentication failed. Run 'gemini' interactively to re-authenticate."
     # Check for context too long (#127)
-    elif echo "$STDERR_OUTPUT" | grep -qiE '(context.*(too long|exceeded|limit)|token.*(limit|exceeded)|input.*(too large|too long)|max.*tokens)'; then
+    elif printf '%s\n' "$STDERR_OUTPUT" | grep -qiE '(context.*(too long|exceeded|limit)|token.*(limit|exceeded)|input.*(too large|too long)|max.*tokens)'; then
         log_gemini "ERROR" "CONTEXT_TOO_LONG" "Gemini context limit exceeded" "{\"trace_id\":\"${TRACE_ID}\",\"duration_ms\":${DURATION_MS}}"
-        error_reason="Context too long. Consider splitting the input or using --session to maintain context across calls."
+        error_reason="Context too long. Consider splitting the input or using --session to maintain context calls."
     else
         # General error
         log_gemini "ERROR" "DELEGATE_ERROR" "Gemini delegate failed" \
