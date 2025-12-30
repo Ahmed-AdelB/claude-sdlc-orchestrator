@@ -133,7 +133,7 @@ _sqlite_exec() {
     if command -v sqlite3 >/dev/null 2>&1; then
         # Standard CLI with busy_timeout and WAL pragmas
         while (( attempt < max_retries )); do
-            ((attempt++))
+            ((++attempt))  # Use pre-increment to avoid exit code 1 when attempt=0
 
             local raw_result
             if [[ $# -eq 0 ]]; then
@@ -833,7 +833,7 @@ transition_task() {
 
     if command -v sqlite3 >/dev/null 2>&1; then
         while (( attempt < max_retries )); do
-            ((attempt++))
+            ((++attempt))  # Use pre-increment to avoid exit code 1 when attempt=0
             # Use flock for application-level serialization
             local raw_result
             raw_result=$(
@@ -1156,7 +1156,7 @@ claim_task_atomic_filtered() {
         # Added: flock + busy_timeout + retry logic for concurrent access
         # Research: https://berthub.eu/articles/posts/a-brief-post-on-sqlite3-database-locked-despite-timeout/
         while (( attempt < max_retries )); do
-            ((attempt++))
+            ((++attempt))  # Use pre-increment to avoid exit code 1 when attempt=0
             # Use flock for application-level serialization
             # M1-001-FIX: Atomic claim with direct UPDATE
             # Filter PRAGMA output at bash level to avoid .output issues

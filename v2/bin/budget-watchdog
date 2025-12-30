@@ -131,7 +131,15 @@ sqlite_available() {
 
 ensure_sqlite_state() {
     if command -v sqlite3 &>/dev/null && type -t sqlite_state_init >/dev/null 2>&1; then
+        # FIX: sqlite_state_init validates db path against STATE_DIR
+        # Budget-watchdog sets STATE_DIR to state/budget, but db is at state/
+        # Temporarily set STATE_DIR to db's parent for validation
+        local saved_state_dir="${STATE_DIR:-}"
+        local db_parent
+        db_parent=$(dirname "$STATE_DB")
+        STATE_DIR="$db_parent"
         sqlite_state_init "$STATE_DB" 2>/dev/null || log_warn "sqlite_state_init failed"
+        STATE_DIR="$saved_state_dir"
     fi
 }
 

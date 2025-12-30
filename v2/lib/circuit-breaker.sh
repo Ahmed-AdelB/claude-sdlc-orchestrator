@@ -573,7 +573,7 @@ execute_with_auto_fallback() {
     local tried_models=()
 
     while [[ $attempts -lt $max_attempts ]]; do
-        ((attempts++))
+        ((++attempts))  # Use pre-increment to avoid exit code 1 when attempts=0
         tried_models+=("$current_model")
 
         # Check circuit breaker state
