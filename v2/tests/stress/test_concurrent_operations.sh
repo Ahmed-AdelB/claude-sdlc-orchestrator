@@ -50,25 +50,39 @@ info() {
 # Setup test environment
 #===============================================================================
 
-TEST_STATE_DIR=$(mktemp -d)
-TEST_LOG_DIR=$(mktemp -d)
-export STATE_DIR="$TEST_STATE_DIR"
-export LOCKS_DIR="${TEST_STATE_DIR}/locks"
-export BREAKERS_DIR="${TEST_STATE_DIR}/breakers"
-export LOG_DIR="$TEST_LOG_DIR"
+TEST_ROOT_DIR=$(mktemp -d)
+
+# IMPORTANT: Preserve LIB_DIR before setting AUTONOMOUS_ROOT
+# Otherwise common.sh will look for libs in the temp directory
+export LIB_DIR="${LIB_DIR:-${PROJECT_ROOT}/lib}"
+
+# Set AUTONOMOUS_ROOT to allow writes to temp directories
+# This ensures safe_write_check validates against the temp directory structure
+# All test directories must be under AUTONOMOUS_ROOT for safe_write_check to pass
+export AUTONOMOUS_ROOT="$TEST_ROOT_DIR"
+export STATE_DIR="${TEST_ROOT_DIR}/state"
+export LOCKS_DIR="${STATE_DIR}/locks"
+export BREAKERS_DIR="${STATE_DIR}/breakers"
+export LOG_DIR="${TEST_ROOT_DIR}/logs"
+export TASKS_DIR="${TEST_ROOT_DIR}/tasks"
+export SESSIONS_DIR="${TEST_ROOT_DIR}/sessions"
 export TRACE_ID="stress-$$"
 
-mkdir -p "$LOCKS_DIR" "$BREAKERS_DIR"
+# Backward compatibility
+TEST_STATE_DIR="$STATE_DIR"
+TEST_LOG_DIR="$LOG_DIR"
+
+mkdir -p "$LOCKS_DIR" "$BREAKERS_DIR" "$TASKS_DIR" "$SESSIONS_DIR" "$LOG_DIR"
 
 cleanup() {
     # Kill any remaining background processes
     jobs -p | xargs -r kill 2>/dev/null || true
     wait 2>/dev/null || true
-    rm -rf "$TEST_STATE_DIR" "$TEST_LOG_DIR" 2>/dev/null || true
+    rm -rf "$TEST_ROOT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# Source dependencies
+# Source dependencies (LIB_DIR preserved above)
 source "${LIB_DIR}/common.sh"
 
 #===============================================================================

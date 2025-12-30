@@ -134,7 +134,7 @@ should_call_model() {
     local model="$1"
     local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _should_call_model_locked "$model"
+    with_lock_file "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _should_call_model_locked "$model"
 }
 
 _should_call_model_locked() {
@@ -230,7 +230,7 @@ record_success() {
     local model="$1"
     local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _record_success_locked "$model"
+    with_lock_file "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _record_success_locked "$model"
 }
 
 _record_success_locked() {
@@ -297,7 +297,7 @@ record_failure() {
     local error_type="${2:-UNKNOWN}"
     local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _record_failure_locked "$model" "$error_type"
+    with_lock_file "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _record_failure_locked "$model" "$error_type"
 }
 
 _record_failure_locked() {
@@ -623,7 +623,7 @@ get_breaker_status() {
     local model="$1"
     local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _get_breaker_status_locked "$model"
+    with_lock_file "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _get_breaker_status_locked "$model"
 }
 
 _get_breaker_status_locked() {
@@ -755,7 +755,7 @@ reset_breaker() {
     local model="$1"
     local lock_file="${LOCKS_DIR}/breaker_${model}.lock"
 
-    with_lock "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _reset_breaker_locked "$model"
+    with_lock_file "$lock_file" "${DEFAULT_LOCK_TIMEOUT:-10}" _reset_breaker_locked "$model"
 }
 
 _reset_breaker_locked() {

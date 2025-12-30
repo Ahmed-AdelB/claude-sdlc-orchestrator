@@ -39,14 +39,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default to parent of lib directory if not set (portable mode)
 AUTONOMOUS_ROOT="${AUTONOMOUS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 
-# Directory paths
-CONFIG_DIR="${AUTONOMOUS_ROOT}/config"
-LIB_DIR="${AUTONOMOUS_ROOT}/lib"
-BIN_DIR="${AUTONOMOUS_ROOT}/bin"
-LOG_DIR="${AUTONOMOUS_ROOT}/logs"
-STATE_DIR="${AUTONOMOUS_ROOT}/state"
-TASKS_DIR="${AUTONOMOUS_ROOT}/tasks"
-SESSIONS_DIR="${AUTONOMOUS_ROOT}/sessions"
+# Directory paths (respect existing values for test isolation)
+CONFIG_DIR="${CONFIG_DIR:-${AUTONOMOUS_ROOT}/config}"
+LIB_DIR="${LIB_DIR:-${AUTONOMOUS_ROOT}/lib}"
+BIN_DIR="${BIN_DIR:-${AUTONOMOUS_ROOT}/bin}"
+LOG_DIR="${LOG_DIR:-${AUTONOMOUS_ROOT}/logs}"
+STATE_DIR="${STATE_DIR:-${AUTONOMOUS_ROOT}/state}"
+TASKS_DIR="${TASKS_DIR:-${AUTONOMOUS_ROOT}/tasks}"
+SESSIONS_DIR="${SESSIONS_DIR:-${AUTONOMOUS_ROOT}/sessions}"
 
 # Subdirectories
 LOCKS_DIR="${STATE_DIR}/locks"
@@ -1734,9 +1734,10 @@ release_lock() {
 }
 
 # Execute command with exclusive lock
-# Usage: with_lock "lockfile" timeout_seconds command [args...]
-# Example: with_lock "/tmp/myfile.lock" 10 echo "hello" >> /tmp/myfile
-with_lock() {
+# Usage: with_lock_file "lockfile" timeout_seconds command [args...]
+# Example: with_lock_file "/tmp/myfile.lock" 10 echo "hello" >> /tmp/myfile
+# NOTE: Use this for explicit lock file paths. For named locks, use with_lock from state.sh
+with_lock_file() {
     local lock_file="$1"
     local timeout="$2"
     shift 2
@@ -1747,7 +1748,7 @@ with_lock() {
         release_lock
         return $result
     else
-        log_error "SEC-007: with_lock failed to acquire lock: $lock_file"
+        log_error "SEC-007: with_lock_file failed to acquire lock: $lock_file"
         return 1
     fi
 }
@@ -1886,7 +1887,7 @@ export -f log_security_event
 export -f acquire_lock
 export -f acquire_shared_lock
 export -f release_lock
-export -f with_lock
+export -f with_lock_file
 export -f atomic_append
 export -f atomic_read
 
