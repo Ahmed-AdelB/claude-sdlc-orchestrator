@@ -53,6 +53,38 @@ trap cleanup EXIT
 
 # Source dependencies
 source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/circuit-breaker.sh" 2>/dev/null || {
+    echo "Error: Could not source circuit-breaker.sh"
+    exit 1
+}
+
+# Helper functions to adapt test API to actual API
+get_breaker_state() {
+    local model="$1"
+    local json_output
+    json_output=$(get_breaker_status "$model" 2>/dev/null) || {
+        echo "CLOSED"
+        return
+    }
+    # Parse state from JSON output
+    echo "$json_output" | grep '"state"' | sed 's/.*"state": *"\([^"]*\)".*/\1/'
+}
+
+set_breaker_state() {
+    local model="$1"
+    local state="$2"
+    local breaker_file="${BREAKERS_DIR}/${model}.state"
+    mkdir -p "$BREAKERS_DIR"
+    echo "state=$state" > "$breaker_file"
+    echo "failures=0" >> "$breaker_file"
+    echo "last_failure=" >> "$breaker_file"
+    echo "half_open_until=" >> "$breaker_file"
+}
+
+check_circuit() {
+    local model="$1"
+    should_call_model "$model"
+}
 
 #===============================================================================
 # Tests

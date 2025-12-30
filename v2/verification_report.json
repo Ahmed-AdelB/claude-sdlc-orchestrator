@@ -1,11 +1,11 @@
 {
-  "timestamp": "2025-12-29T08:00:58+00:00",
+  "timestamp": "2025-12-30T18:33:31+00:00",
   "checks": [
     {
       "name": "Library Integrity",
-      "status": "PASS",
-      "message": "All libraries syntax checked and sourced successfully",
-      "details": ""
+      "status": "FAIL",
+      "message": "Found 1 library errors",
+      "details": "Syntax error in lib/sdlc-phases.sh; "
     }
 ,
     {
@@ -59,9 +59,9 @@
 ,
     {
       "name": "Integration: Budget Watchdog",
-      "status": "PASS",
-      "message": "Budget watchdog status command runs",
-      "details": ""
+      "status": "FAIL",
+      "message": "Budget watchdog status command failed",
+      "details": "Exit code 1"
     }
   ]
 }
