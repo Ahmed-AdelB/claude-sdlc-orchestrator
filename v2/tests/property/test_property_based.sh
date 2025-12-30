@@ -141,11 +141,11 @@ test_property_mask_secrets_always_masks() {
             echo "    Violation: API key leaked: $api_key"
         fi
 
-        # Property: Output should contain MASKED marker
-        if [[ "$masked" != *"MASKED"* ]] && [[ "$input" != "$masked" ]]; then
-            # If input was changed but doesn't contain MASKED, that's suspicious
+        # Property: Output should contain REDACTED marker (function uses [REDACTED])
+        if [[ "$masked" != *"REDACTED"* ]] && [[ "$input" != "$masked" ]]; then
+            # If input was changed but doesn't contain REDACTED, that's suspicious
             ((violations++)) || true
-            echo "    Violation: No MASKED marker in: $masked"
+            echo "    Violation: No REDACTED marker in: $masked"
         fi
     done
 

@@ -114,28 +114,29 @@ test_mask_secrets() {
     local masked
     masked=$(mask_secrets "$input")
 
-    if [[ "$masked" != *"sk-1234567890"* && "$masked" == *"MASKED"* ]]; then
+    # Function uses [REDACTED] marker
+    if [[ "$masked" != *"sk-1234567890abcdefghij"* && "$masked" == *"REDACTED"* ]]; then
         pass "mask_secrets: Masks OpenAI API keys"
     else
         fail "mask_secrets: Should mask API key, got '$masked'"
     fi
 
     # Test with ANTHROPIC_API_KEY
-    input="ANTHROPIC_API_KEY=sk-ant-123456"
+    input="ANTHROPIC_API_KEY=sk-ant-api1234567890abcdef"
     masked=$(mask_secrets "$input")
-    if [[ "$masked" == *"MASKED"* ]]; then
+    if [[ "$masked" == *"REDACTED"* ]]; then
         pass "mask_secrets: Masks ANTHROPIC_API_KEY"
     else
-        fail "mask_secrets: Should mask ANTHROPIC_API_KEY"
+        fail "mask_secrets: Should mask ANTHROPIC_API_KEY, got '$masked'"
     fi
 
     # Test with Bearer token
-    input="Authorization: Bearer abc123def456"
+    input="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
     masked=$(mask_secrets "$input")
-    if [[ "$masked" == *"MASKED"* ]]; then
+    if [[ "$masked" == *"REDACTED"* ]]; then
         pass "mask_secrets: Masks Bearer tokens"
     else
-        fail "mask_secrets: Should mask Bearer tokens"
+        fail "mask_secrets: Should mask Bearer tokens, got '$masked'"
     fi
 }
 
