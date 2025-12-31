@@ -1,55 +1,23 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/pre-commit.sh"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/post-edit.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/post-edit.sh"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/quality-gate.sh"
-          }
-        ]
-      }
-    ]
-  },
   "env": {
-    "CLAUDE_HOOK_MODE": "ask",
-    "TRI_AGENT_REVIEW": "false",
-    "MIN_TEST_COVERAGE": "80",
-    "REQUIRE_TESTS": "true",
-    "REQUIRE_DOCS": "false",
-    "AUTO_FORMAT": "true",
-    "AUTO_LINT_FIX": "true"
+    "MAX_THINKING_TOKENS": "32000",
+    "ANTHROPIC_MODEL": "opus",
+    "MCP_TIMEOUT": "15000",
+    "MAX_MCP_OUTPUT_TOKENS": "50000",
+    "MCP_TOOL_TIMEOUT": "60000",
+    "BASH_DEFAULT_TIMEOUT_MS": "120000",
+    "BASH_MAX_TIMEOUT_MS": "600000",
+    "BASH_MAX_OUTPUT_LENGTH": "150000",
+    "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16000",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+    "TRI_AGENT_REVIEW": "true",
+    "SESSION_CHECKPOINT_INTERVAL": "300",
+    "CONTEXT_REFRESH_THRESHOLD": "150000",
+    "MAX_CONCURRENT_AGENTS": "15",
+    "HEARTBEAT_INTERVAL_SECONDS": "30",
+    "STUCK_TASK_THRESHOLD_MINUTES": "30",
+    "SESSION_MAX_DURATION_HOURS": "8"
   },
   "permissions": {
     "allow": [
@@ -111,12 +79,20 @@
       "Bash(black:*)",
       "Bash(isort:*)",
       "Bash(mypy:*)",
-      "Bash(terraform:*)",
-      "Bash(kubectl:*)",
-      "Bash(helm:*)",
-      "Bash(aws:*)",
-      "Bash(gcloud:*)",
-      "Bash(az:*)",
+      "Bash(rg:*)",
+      "Bash(fd:*)",
+      "Bash(ripgrep:*)",
+      "Bash(safety:*)",
+      "Bash(bandit:*)",
+      "Bash(tri-agent:*)",
+      "Bash(tri-agent-router:*)",
+      "Bash(tri-agent-consensus:*)",
+      "Bash(tri-agent-preflight:*)",
+      "Bash(health-check:*)",
+      "Bash(cost-tracker:*)",
+      "Bash(claude-delegate:*)",
+      "Bash(gemini-delegate:*)",
+      "Bash(codex-delegate:*)",
       "Read(**)",
       "Write(./src/**)",
       "Write(./lib/**)",
@@ -147,48 +123,312 @@
       "WebFetch(domain:ai.google.dev)",
       "WebFetch(domain:pypi.org)",
       "WebFetch(domain:npmjs.com)",
-      "WebFetch(domain:crates.io)"
+      "WebFetch(domain:crates.io)",
+      "mcp__sequential-thinking__*",
+      "mcp__memory__*",
+      "mcp__fetch__*",
+      "mcp__git__*",
+      "mcp__redis__*"
     ],
     "deny": [
       "Bash(rm -rf /)",
       "Bash(rm -rf ~)",
       "Bash(rm -rf /*)",
-      "Bash(sudo rm -rf *)",
-      "Bash(sudo *)",
-      "Bash(chmod 777 *)",
-      "Bash(chown *)",
-      "Bash(*prod*)",
-      "Bash(*production*)",
-      "Bash(shutdown *)",
-      "Bash(reboot *)",
-      "Bash(mkfs *)",
-      "Bash(dd if=*)",
+      "Bash(sudo rm -rf:*)",
+      "Bash(sudo:*)",
+      "Bash(chmod 777:*)",
+      "Bash(chown:*)",
+      "Bash(shutdown:*)",
+      "Bash(reboot:*)",
+      "Bash(mkfs:*)",
+      "Bash(dd if:*)",
+      "Bash(eval:*)",
       "Write(.env)",
       "Write(.env.*)",
+      "Write(.env.local)",
+      "Write(.env.production)",
+      "Write(.env.development)",
       "Write(*secret*)",
       "Write(*credential*)",
       "Write(*password*)",
       "Write(*token*)",
       "Write(*apikey*)",
       "Write(*api_key*)",
+      "Write(*api-key*)",
       "Write(~/.ssh/*)",
       "Write(~/.aws/*)",
-      "Write(~/.config/gcloud/*)"
+      "Write(~/.config/gcloud/*)",
+      "Write(~/.azure/*)",
+      "Write(~/.kube/*)",
+      "Write(*id_rsa*)",
+      "Write(*id_ed25519*)",
+      "Write(*.pem)",
+      "Write(*.key)",
+      "Write(*private*key*)",
+      "Write(*oauth*)",
+      "Write(*auth*token*)",
+      "Write(*refresh*token*)",
+      "Write(*access*token*)",
+      "Write(*jwt*)",
+      "Write(*session*secret*)",
+      "Write(*signing*key*)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(~/.ssh/id_*)",
+      "Read(~/.aws/credentials)",
+      "Read(~/.config/gcloud/credentials*)"
     ],
-    "ask": [
-      "Bash(git push *)",
-      "Bash(git commit *)",
-      "Bash(git merge *)",
-      "Bash(git rebase *)",
-      "Bash(git reset *)",
-      "Bash(*deploy*)",
-      "Bash(*migrate*)",
-      "Bash(npm publish *)",
-      "Bash(pip upload *)",
-      "Write(./package.json)",
-      "Write(./pyproject.toml)",
-      "Write(./Cargo.toml)"
+    "ask": [],
+    "defaultMode": "bypassPermissions"
+  },
+  "sandbox": {
+    "enabled": false
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/triagent-userprompt.sh"
+          }
+        ]
+      }
     ],
-    "defaultMode": "acceptEdits"
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/session-end.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/pre-compact.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/triagent-subagent-stop.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash(git commit:*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/pre-commit.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/guard-bash.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/guard-files.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/guard-files.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/guard-files.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/guard-web.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/guard-web.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/triagent-pre-task.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-pretool.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-pretool.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-pretool.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-pretool.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/post-edit.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/post-edit.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-posttool.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-posttool.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-posttool.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/audit-posttool.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/quality-gate.sh"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/notify-log.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "alwaysThinkingEnabled": true,
+  "_security_notes": {
+    "P1.1": "disableBypassPermissionsMode: Prevents bypass of permission checks",
+    "P1.2": "sandbox.allowUnsandboxedCommands=false: Forces sandboxed execution",
+    "P1.3": "Cloud CLIs moved to ask: aws, gcloud, az, terraform, kubectl, helm",
+    "P1.4": "Added 24hr env vars: timeouts, tokens, session management",
+    "P1.5": "Enhanced deny patterns: .env.*, keys, tokens, oauth, jwt",
+    "P2.1-P2.5": "Added all hook events: Session, PreCompact, SubagentStop, guards, audit"
   }
 }
