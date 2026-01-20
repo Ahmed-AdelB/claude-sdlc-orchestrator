@@ -13,11 +13,11 @@ codex exec "Implement: $(cat /tmp/ctx.txt)"
 
 ## Partial Failure Strategy
 
-| Scenario | Action |
-|----------|--------|
-| 1-2 agents fail | Quarantine failed tasks, commit successful results, retry with alternate model |
-| 3+ agents fail | Pause, diagnose root cause, escalate to user before continuing |
-| Verification conflict | Third AI tie-breaker, majority wins |
+| Scenario              | Action                                                                         |
+| --------------------- | ------------------------------------------------------------------------------ |
+| 1-2 agents fail       | Quarantine failed tasks, commit successful results, retry with alternate model |
+| 3+ agents fail        | Pause, diagnose root cause, escalate to user before continuing                 |
+| Verification conflict | Third AI tie-breaker, majority wins                                            |
 
 ## Credential Security
 
@@ -35,17 +35,17 @@ codex exec "Implement: $(cat /tmp/ctx.txt)"
 
 ## Rate Limit Thresholds
 
-| Usage | Action |
-|-------|--------|
-| 70% | `WARN` - Alert, reduce concurrency to 6 agents |
-| 85% | `PAUSE` - Queue new tasks, complete in-flight only |
-| 95% | `STOP` - Hard stop, notify user, wait for reset |
+| Usage | Action                                             |
+| ----- | -------------------------------------------------- |
+| 70%   | `WARN` - Alert, reduce concurrency to 6 agents     |
+| 85%   | `PAUSE` - Queue new tasks, complete in-flight only |
+| 95%   | `STOP` - Hard stop, notify user, wait for reset    |
 
 ## Anti-Patterns to Avoid
 
 - **Agent count**: Use tiered approach: 1 (trivial), 3 (standard), 9 (complex) - not always 9
 - **Git resets**: Prefer `git revert` over `git reset --hard` (recoverable)
-- **Verification**: Allow INCONCLUSIVE with escalation path, not just PASS/FAIL
+- **Verification**: INCONCLUSIVE allowed with escalation to third AI or user (see CLAUDE.md)
 
 ## Pre-Flight Validations
 
@@ -56,11 +56,11 @@ codex exec "Implement: $(cat /tmp/ctx.txt)"
 
 ## Better Defaults
 
-| Setting | Default | Reason |
-|---------|---------|--------|
-| Codex sandbox | `workspace-write` | Least privilege |
-| Gemini approval | `manual` | Safety first |
-| Agent concurrency | 3 | Scale up as needed |
+| Setting           | Default           | Reason             |
+| ----------------- | ----------------- | ------------------ |
+| Codex sandbox     | `workspace-write` | Least privilege    |
+| Gemini approval   | `manual`          | Safety first       |
+| Agent concurrency | 3                 | Scale up as needed |
 
 ## Debugging Aids
 
@@ -70,8 +70,8 @@ codex exec "Implement: $(cat /tmp/ctx.txt)"
 
 ## Key Metrics
 
-| Metric | Target | Alert |
-|--------|--------|-------|
-| Verification pass rate | >95% | <90% |
-| Cost per task | Track by model | >$0.50/task |
-| Test coverage delta | +/- 0 | Negative |
+| Metric                 | Target         | Alert       |
+| ---------------------- | -------------- | ----------- |
+| Verification pass rate | >95%           | <90%        |
+| Cost per task          | Track by model | >$0.50/task |
+| Test coverage delta    | +/- 0          | Negative    |

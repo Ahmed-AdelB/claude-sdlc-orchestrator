@@ -11,17 +11,20 @@
 **NEVER read PDF files directly with the Read tool.** This causes encoding issues and corrupted output.
 
 **Instead, use the PDF analysis system:**
+
 1. Extract text first: `pdftotext file.pdf file.txt` or use docx extraction
 2. For images in PDFs: Use image extraction tools
 3. If `.extracted.txt` or `.docx.txt` exists, read that instead
 4. For complex PDFs: Ask user to provide extracted content
 
 **Why this matters:**
+
 - Direct PDF reads produce garbled binary output
 - Wastes context tokens on unusable data
 - May crash or hang the session
 
 **Allowed PDF operations:**
+
 - `pdftotext`, `pdf2txt.py`, `pdfplumber` for text extraction
 - `pdfimages` for image extraction
 - Reading pre-extracted `.txt` files
@@ -58,19 +61,21 @@
 ## ENFORCED MULTI-AGENT PARALLELISM (CRITICAL REQUIREMENT)
 
 ### Minimum Agent Requirements
+
 **Standard:** 9 concurrent agents (3 Claude + 3 Codex + 3 Gemini), 27 total per task.
 **Tiered by complexity:** 1 (trivial) → 3 (standard) → 9 (complex tasks).
 **Exception:** Degraded mode allows minimum 3 agents (see Graceful Degradation).
 
-| Activity Type | Min Concurrent | Distribution (3+3+3) |
-|--------------|----------------|----------------------|
-| **Planning** | 9 | 3 Claude (architecture, security, specs) + 3 Gemini (context, codebase, patterns) + 3 Codex (feasibility, complexity, APIs) |
-| **Implementation** | 9 | 3 Claude (core code, tests, docs) + 3 Codex (implement, optimize, validate) + 3 Gemini (review, context, security) |
-| **Verification** | 9 | 3 Claude (security, logic, edges) + 3 Gemini (context, patterns, regression) + 3 Codex (completeness, coverage, quality) |
+| Activity Type      | Min Concurrent | Distribution (3+3+3)                                                                                                        |
+| ------------------ | -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **Planning**       | 9              | 3 Claude (architecture, security, specs) + 3 Gemini (context, codebase, patterns) + 3 Codex (feasibility, complexity, APIs) |
+| **Implementation** | 9              | 3 Claude (core code, tests, docs) + 3 Codex (implement, optimize, validate) + 3 Gemini (review, context, security)          |
+| **Verification**   | 9              | 3 Claude (security, logic, edges) + 3 Gemini (context, patterns, regression) + 3 Codex (completeness, coverage, quality)    |
 
 **TOTAL PER TASK: 27 agent invocations (9 per phase × 3 phases)**
 
 ### Enforcement Checklist (Before Marking ANY Task Complete)
+
 - [ ] **27 agents** were invoked across 3 phases (9 per phase)
 - [ ] **9+ concurrent** agents ran simultaneously at peak
 - [ ] All three AI models (Claude, Codex, Gemini) participated in EACH phase
@@ -83,6 +88,7 @@
 **NEVER use weaker models or configurations to save tokens. Maximum capability is required at all times.**
 
 ### 1. Gemini Maximum Capability (MANDATORY)
+
 ```bash
 # READ-ONLY (analysis, review, docs) - YOLO allowed:
 gemini -m gemini-3-pro-preview --approval-mode yolo "Analyze: ..."
@@ -90,11 +96,13 @@ gemini -m gemini-3-pro-preview --approval-mode yolo "Analyze: ..."
 # MODIFICATIONS (code changes, git) - Manual approval:
 gemini -m gemini-3-pro-preview "Implement: ..."
 ```
+
 - **1M token context**: Full codebase analysis
 - **Pro routing**: Always most capable model
 - **No Downgrade Rule:** Never use `gemini-1.5-flash` or shorthand `-m pro` (may misroute).
 
 ### 2. Codex Maximum Capability (MANDATORY)
+
 ```bash
 # DEFAULT (workspace-write) - Use for most tasks:
 codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "task"
@@ -102,18 +110,20 @@ codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-wri
 # ESCALATED (danger-full-access) - Only after checklist below:
 codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s danger-full-access "task"
 ```
+
 - **xhigh reasoning**: Maximum reasoning depth
 - **400K context**: Large codebase understanding
 - **No Downgrade Rule:** Never use `gpt-4o` or lower reasoning settings.
 
 **⚠️ danger-full-access Escalation Checklist:**
 Before using `-s danger-full-access`, verify ALL:
+
 - [ ] Task genuinely requires system-wide access (not just workspace)
 - [ ] Running in isolated container/VM (not host system)
 - [ ] Security review completed by second AI
 - [ ] Backup/checkpoint created before execution
 - [ ] Changes will be reviewed post-execution
-*Default to `-s workspace-write` unless all boxes checked.*
+      _Default to `-s workspace-write` unless all boxes checked._
 
 **⚠️ YOLO Mode (`-y`/`--approval-mode yolo`) Policy:**
 | Operation Type | YOLO Allowed? | Rationale |
@@ -125,15 +135,17 @@ Before using `-s danger-full-access`, verify ALL:
 | Git operations | ❌ No | Risk of data loss |
 | Deployments | ❌ No | Production impact |
 | System commands | ❌ No | Security risk |
-*Use YOLO only for read-only operations. For modifications, use manual approval.*
+_Use YOLO only for read-only operations. For modifications, use manual approval._
 
 ### 3. Claude Maximum Capability (MANDATORY)
+
 - **Architecture/Security:** Use `ultrathink` (32K tokens)
 - **Implementation:** Use standard `thinking` (4K-10K tokens)
 - **Opus model**: Deepest analysis via Task tool with model="opus"
 - **No Downgrade Rule:** Do not turn off thinking mode for code generation.
 
 ### Enforcement Checklist (Capability Verification)
+
 - [ ] **Gemini:** Verified `-m gemini-3-pro-preview` is used
 - [ ] **Codex:** Verified `xhigh` reasoning is active
 - [ ] **Claude:** Verified thinking mode is enabled
@@ -147,29 +159,33 @@ Before using `-s danger-full-access`, verify ALL:
 ### Phase 1: Pre-Work Cross-AI Clarification
 
 **BEFORE building any TODO list:**
+
 ```bash
 gemini -m gemini-3-pro-preview --approval-mode yolo "Explain requirements, edge cases, challenges for: [task]"
 codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Analyze implementation steps and dependencies for: [task]"
 ```
+
 Synthesize both perspectives before proceeding.
 
 ### Phase 2: Build Complete TODO List
 
 **NO work begins until TODO is 100% complete:**
+
 1. Extract ALL tasks from plans and AI clarifications
 2. Break complex tasks into verifiable subtasks
 3. Assign each task to Claude, Codex, or Gemini (distribute evenly)
 4. Assign DIFFERENT AI as verifier for each task
 
-| AI | Assign For |
-|----|------------|
+| AI         | Assign For                         |
+| ---------- | ---------------------------------- |
 | **Claude** | Core logic, architecture, security |
-| **Codex** | Scripts, tests, APIs, prototyping |
-| **Gemini** | Codebase analysis, docs, reviews |
+| **Codex**  | Scripts, tests, APIs, prototyping  |
+| **Gemini** | Codebase analysis, docs, reviews   |
 
 ### Phase 3: User Approval Gate (BLOCKING)
 
 Present to user and **STOP**:
+
 - Complete TODO table with AI assignments
 - Scope and approach summary
 - **DO NOT proceed without explicit "approved"**
@@ -179,6 +195,7 @@ Present to user and **STOP**:
 ### Phase 4: Implementation with Verification
 
 **NO task is DONE until:**
+
 1. Implementation complete by assigned AI
 2. Verification by DIFFERENT AI reports PASS/FAIL
 3. Status updated only after verification passes
@@ -191,8 +208,8 @@ codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-wri
 ### TODO Table Format
 
 ```markdown
-| ID | Task | Assigned | Verifier | Status | V |
-|----|------|:--------:|:--------:|:------:|:-:|
+| ID    | Task          |      Assigned       |    Verifier    |  Status  |  V  |
+| ----- | ------------- | :-----------------: | :------------: | :------: | :-: |
 | T-001 | [Description] | Claude/Codex/Gemini | [Different AI] | [Status] | [ ] |
 ```
 
@@ -207,14 +224,15 @@ codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-wri
 
 **Status Flow:** `Pending → In Progress → Ready for Verify → Verified → Completed`
 
-| Status | Meaning | Next Action |
-|--------|---------|-------------|
-| `Pending` | Not started | Begin work |
-| `In Progress` | Work underway | Complete implementation |
-| `Ready for Verify` | Awaiting verification | Request verification |
-| `Verified` | PASSED | Mark completed |
-| `Blocked` | Cannot proceed | Resolve blocker |
-| `Failed` | Verification FAILED | Fix and re-verify |
+| Status             | Meaning               | Next Action             |
+| ------------------ | --------------------- | ----------------------- |
+| `Pending`          | Not started           | Begin work              |
+| `In Progress`      | Work underway         | Complete implementation |
+| `Ready for Verify` | Awaiting verification | Request verification    |
+| `Verified`         | PASSED                | Mark completed          |
+| `Completed`        | Fully done            | Archive/close           |
+| `Blocked`          | Cannot proceed        | Resolve blocker         |
+| `Failed`           | Verification FAILED   | Fix and re-verify       |
 
 **Verification Marks:** `[ ]` pending | `[x]` passed | `[!]` failed
 
@@ -225,6 +243,7 @@ codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-wri
 **Purpose:** Any change must be independently verified by a second agent before acceptance.
 
 **Verification request format (required):**
+
 ```
 VERIFY:
 - Scope: <files/paths>
@@ -235,16 +254,19 @@ VERIFY:
 - Risk notes: <edge cases>
 ```
 
-**PASS/FAIL criteria:**
-- **PASS** if *all* expected behaviors match, tests/steps reproduce cleanly, and no regressions.
+**PASS/FAIL/INCONCLUSIVE criteria:**
+
+- **PASS** if _all_ expected behaviors match, tests/steps reproduce cleanly, and no regressions.
 - **FAIL** if any expected behavior is missing, tests/steps fail, or regressions/new risks appear.
-- **INCONCLUSIVE** is not allowed; verifier must choose PASS or FAIL.
+- **INCONCLUSIVE** if evidence is insufficient to determine outcome → escalate to third AI or user.
 
 **Re-verification rules:**
+
 - Any change after a FAIL requires a **fresh** verification request.
 - The verifier must re-run the **full** scope (no partial "spot checks").
 
 **FAIL Example:**
+
 ```
 VERIFICATION RESULT: FAIL
 Issues Found:
@@ -270,42 +292,51 @@ Verifier: Codex (GPT-5.2)
 ## ROLLBACK & RECOVERY PROCEDURES
 
 **When to rollback:**
+
 - Verification fails **3 times** on the same change.
 - A **critical error** is introduced (data loss, security regression, prod outage risk).
 - The change is no longer aligned with user intent.
 
 **How to rollback:**
+
 - **Git revert** (preferred): `git revert <bad-commit>` (reversible, preserves history)
 - **Checkpoint restore**: Restore to last known-good checkpoint.
 
 **Post‑rollback verification:**
+
 - Re-run the **original** verification steps against the rolled-back state.
 - Log the rollback reason and verification outcome.
 
 **Preventing rollback loops:**
+
 - Require a **new plan** before re-attempting the same change.
 - If rollback happens twice, **escalate to user** for direction.
 
 ## PROGRESS REPORTING CADENCE & FORMAT
 
 **Reporting Frequency:**
+
 - **Routine Updates:** Every 30 minutes or after completing a major todo item.
 - **Exception Updates:** IMMEDIATELY upon encountering an error or blocker.
 
 **Required Metrics:**
+
 1. **Status:** (On Track / At Risk / Blocked)
 2. **Completion %:** Estimated percentage of current task.
 3. **Token Usage:** Current session token count.
 4. **Next Milestone:** Time/Goal for the next checkpoint.
 
 **Blocker Escalation:**
+
 - If a task takes >15 mins longer than expected: **REPORT**.
 - If an error persists after 1 retry: **REPORT**.
 - If tool output is ambiguous: **ASK FOR CLARIFICATION**.
 
 **Status Template:**
+
 ```markdown
 **STATUS UPDATE: [Timestamp]**
+
 - **Current Task:** [Task ID/Name]
 - **Status:** [🟢 On Track / 🟡 At Risk / 🔴 Blocked]
 - **Progress:** [XX]% complete
@@ -317,6 +348,7 @@ Verifier: Codex (GPT-5.2)
 ## SESSION INITIALIZATION (MANDATORY)
 
 Before starting work, verify:
+
 ```bash
 node -v && python --version && git --version  # Tools present
 git status                                     # Clean git state
@@ -328,26 +360,7 @@ test -f ~/.gemini/oauth_creds.json && echo "Gemini OK"  # Creds exist
 
 ### Session Persistence Architecture
 
-**Progress File Pattern** (Required for context resumption):
-```bash
-# Create/update claude-progress.txt at start of each session
-cat > claude-progress.txt <<EOF
-# Session Progress Log
-## Last Updated: $(date -Iseconds)
-## Session ID: ${SESSION_ID}
-
-### Completed Tasks:
-$(git log --oneline -20)
-
-### Current State:
-- Active branch: $(git branch --show-current)
-- Uncommitted changes: $(git status --short | wc -l)
-- Last checkpoint: ${LAST_CHECKPOINT}
-
-### Next Actions:
-[TODO items from previous session]
-EOF
-```
+**Progress File:** Update `claude-progress.txt` each session with: date, session ID, `git log --oneline -20`, current branch, uncommitted count, last checkpoint, and next TODOs.
 
 **State Persistence Locations:**
 | State Type | Location | Backup Frequency |
@@ -366,27 +379,8 @@ EOF
 | Gemini 3 Pro | 1M | 800K (80%) | 750K tokens used |
 | Codex GPT-5.2 | 400K | 320K (80%) | 300K tokens used |
 
-**Context Overflow Prevention:**
-```bash
-check_context_health() {
-    local tokens_used=$1 model=$2
-    case "$model" in
-        claude*) limit=150000 ;;
-        gemini*) limit=750000 ;;
-        codex*)  limit=300000 ;;
-    esac
-    if [[ $tokens_used -gt $limit ]]; then
-        create_session_checkpoint
-        gemini -m gemini-3-pro-preview --approval-mode yolo "Summarize session state: $(cat claude-progress.txt)"
-        refresh_session
-    fi
-}
-```
-
-**Context Overflow Failover:**
-```
-Claude Sonnet (200K) → Gemini Pro (1M) → Split into sub-tasks
-```
+**Context Overflow:** At 80% threshold (Claude 150K, Gemini 750K, Codex 300K): checkpoint → summarize via Gemini → refresh.
+**Failover:** Claude (200K) → Gemini (1M) → split sub-tasks.
 
 ### Session Refresh Protocol (Every 8 Hours)
 
@@ -407,6 +401,7 @@ CONTEXT_CHECKPOINT_INTERVAL=300  # 5 minutes
 ### Watchdog & Auto-Recovery Stack
 
 **3-Layer Supervision:**
+
 ```
 Layer 1: tri-agent-daemon (Parent)
   ├─ tri-agent-worker (Task executor)
@@ -440,10 +435,11 @@ Layer 3: tri-24-monitor (24-hour guardian)
 | Model | Daily Limit | Hourly Average | Alert Threshold |
 |-------|-------------|----------------|-----------------|
 | Claude Max | ~100M tokens | 4.2M/hour | 70% daily |
-| Gemini Pro | Unlimited* | N/A | API rate limits |
+| Gemini Pro | Unlimited\* | N/A | API rate limits |
 | Codex | ~50M tokens | 2.1M/hour | 70% daily |
 
 **Budget Reset Schedule:**
+
 - Claude: Rolling 5-hour window + 7-day weekly cap
 - Gemini: Daily reset at midnight UTC
 - Codex: Daily reset at midnight UTC
@@ -451,6 +447,7 @@ Layer 3: tri-24-monitor (24-hour guardian)
 ### 24-Hour Operation Checklist
 
 **Before Starting:**
+
 - [ ] Verify watchdog-master is running
 - [ ] Check daily budget availability
 - [ ] Initialize claude-progress.txt
@@ -458,6 +455,7 @@ Layer 3: tri-24-monitor (24-hour guardian)
 - [ ] Configure 8-hour session refresh
 
 **During Operation (Automated):**
+
 - [ ] Heartbeat every 30 seconds
 - [ ] Context checkpoint every 5 minutes
 - [ ] Progress update every commit
@@ -465,6 +463,7 @@ Layer 3: tri-24-monitor (24-hour guardian)
 - [ ] Session refresh at 8-hour boundaries
 
 **Recovery Triggers:**
+
 - [ ] Task timeout → Requeue
 - [ ] Worker crash → Auto-restart
 - [ ] Context overflow → Session refresh
@@ -498,23 +497,27 @@ tri-agent session-refresh --summarize
 ### Resource & Log Governance (24HR MANDATORY)
 
 **Log Rotation Policy:**
+
 - **Max Log Size:** 50MB per file
 - **Retention:** 7 days (rolling window)
 - **Rotation Check:** Every session refresh (8 hours)
 - **Command:** `find logs/ -name "*.log" -size +50M -exec gzip {} \;`
 
 **Hardware Safety Limits:**
+
 - **Max Concurrent CLI Processes:** 15 (prevent fork bombs)
 - **Max RAM Usage:** 75% of System Total (pause new agents if exceeded)
 - **Disk Free Space Floor:** 2GB (emergency stop if crossed)
 
 **Emergency Dead Man's Switch:**
+
 - **Mechanism:** `tri-24-monitor` must touch `~/.claude/heartbeat` every 30s
 - **Systemd/Cron Action:** If file age > 5m, kill all `tri-agent` processes and restart `watchdog-master`
 
 ### Large Repository Protocol (8GB+ Support)
 
 **Context Strategy: Sparse Loading**
+
 - **Problem:** 1M tokens ≈ 4MB text. 8GB repo is 2000x larger
 - **Solution:** NEVER load "entire codebase". Use hierarchical narrowing:
   1. **Map:** `tree -L 2` or `find . -maxdepth 2` for structure
@@ -522,6 +525,7 @@ tri-agent session-refresh --summarize
   3. **Read:** Only read files confirmed relevant by search
 
 **Smart Ignore (Performance):**
+
 ```bash
 # .geminiignore / .claudeignore
 package-lock.json
@@ -539,7 +543,8 @@ node_modules/
 ```
 
 **Incremental Verification (8GB+ repos):**
-- **Unit:** `jest -o` / `pytest --changed-files` (changed only)
+
+- **Unit:** `jest -o` / `pytest --lf` (last-failed only)
 - **Build:** `tsc --incremental`
 - **Lint:** `eslint --cache`
 
@@ -554,6 +559,7 @@ node_modules/
 | Budget drain | Hard stop at 95% daily budget |
 
 **Atomic State Writes:**
+
 ```bash
 # Use write-to-temp-and-rename pattern
 write_state() {
@@ -565,6 +571,7 @@ write_state() {
 ```
 
 **Fallback Summarization:**
+
 - If Gemini fails during session refresh, dump raw context to timestamped file
 - Alert and preserve data for manual recovery
 
@@ -591,11 +598,11 @@ write_state() {
 **View thinking:** `Ctrl+O` (verbose mode)
 **Budget:** `export MAX_THINKING_TOKENS=32000`
 
-| Budget | Use Case |
-|--------|----------|
-| 4K-10K | Simple reasoning |
-| 16K-32K | Complex tasks, debugging |
-| 32K+ | Architecture, security audits |
+| Budget  | Use Case                      |
+| ------- | ----------------------------- |
+| 4K-10K  | Simple reasoning              |
+| 16K-32K | Complex tasks, debugging      |
+| 32K+    | Architecture, security audits |
 
 **Note:** Phrases like "think hard" or "ultrathink" do NOT allocate thinking tokens. Use the settings above.
 
@@ -641,37 +648,43 @@ write_state() {
 ## GITHUB ISSUE WORKFLOW (TRI-AGENT MANDATORY)
 
 ### Issue Lifecycle
+
 ```
 OPEN → ASSIGNED → IN_PROGRESS → REVIEW_1 → REVIEW_2 → CLOSED
                        ↑______________|  (if FAIL)
 ```
 
 ### Enforcement Rules (BLOCKING)
+
 1. **3 Different AI Models Required**: Implementer ≠ Reviewer1 ≠ Reviewer2
 2. **Cannot Close Without 2 Approvals** from different models
 3. **All Comments Signed**: Ahmed Adel Bakr Alderai (no AI attribution)
 4. **Status Updates Every 30 Minutes** during active work
 
 ### Agent Assignment by Issue Type
-| Category | Implementer | Reviewer 1 | Reviewer 2 |
-|----------|-------------|------------|------------|
-| Security | Claude | Codex | Gemini |
-| UI/Frontend | Codex | Claude | Gemini |
-| Documentation | Gemini | Claude | Codex |
-| Complex Logic | Claude | Gemini | Codex |
-| Testing | Codex | Gemini | Claude |
-| API/Backend | Codex | Claude | Gemini |
+
+| Category      | Implementer | Reviewer 1 | Reviewer 2 |
+| ------------- | ----------- | ---------- | ---------- |
+| Security      | Claude      | Codex      | Gemini     |
+| UI/Frontend   | Codex       | Claude     | Gemini     |
+| Documentation | Gemini      | Claude     | Codex      |
+| Complex Logic | Claude      | Gemini     | Codex      |
+| Testing       | Codex       | Gemini     | Claude     |
+| API/Backend   | Codex       | Claude     | Gemini     |
 
 ### GitHub Issue Commands
+
 - `/github/issue/assign #N` - Assign with tri-agent commitment
 - `/github/issue/complete #N` - Request review (post VERIFY block)
 - `/github/issue/review #N PASS|FAIL` - Submit review decision
 - `/github/issue/close #N` - Close (requires 2 approvals from different AIs)
 
 ### Comment Templates
+
 See: `.claude/docs/issue-templates.md`
 
 ### Integration
+
 - Uses existing VERIFY block format (see Two-Key Rule)
 - Uses TODO-First Protocol for implementation planning
 - Follows Attribution Rules (Ahmed Adel Bakr Alderai only)
@@ -698,6 +711,7 @@ Author: Ahmed Adel Bakr Alderai
 ```
 
 **Example:**
+
 ```
 feat(auth): implement OAuth2 PKCE flow for mobile clients
 
@@ -871,21 +885,21 @@ gemini -m gemini-3-pro-preview --approval-mode yolo "Review for security: <code>
 
 ### CLI Error Handling
 
-| Exit Code | Meaning | Recovery |
-|-----------|---------|----------|
-| `0` | Success | Proceed |
-| `1` | General error | Check syntax |
-| `2` | Auth failed | `gemini-switch` or `codex auth` |
-| `124` | Timeout | Increase timeout or split task |
-| `429` | Rate limited | Backoff: wait 2^n seconds |
+| Exit Code | Meaning       | Recovery                        |
+| --------- | ------------- | ------------------------------- |
+| `0`       | Success       | Proceed                         |
+| `1`       | General error | Check syntax                    |
+| `2`       | Auth failed   | `gemini-switch` or `codex auth` |
+| `124`     | Timeout       | Increase timeout or split task  |
+| `429`     | Rate limited  | Backoff: wait 2^n seconds       |
 
 ### Timeout Specifications
 
-| Operation | Default | Max |
-|-----------|---------|-----|
-| Gemini CLI | 120s | 600s |
-| Codex CLI | 180s | 600s |
-| Full task | 1800s | 3600s |
+| Operation  | Default | Max   |
+| ---------- | ------- | ----- |
+| Gemini CLI | 120s    | 600s  |
+| Codex CLI  | 180s    | 600s  |
+| Full task  | 1800s   | 3600s |
 
 ## Code Style
 
@@ -899,12 +913,12 @@ gemini -m gemini-3-pro-preview --approval-mode yolo "Review for security: <code>
 
 ### Alert Levels and Routing
 
-| Level | Response Time | Notification Method | Example Triggers |
-|-------|--------------|---------------------|------------------|
-| **CRITICAL** | Immediate | Desktop + Sound + Log | Daemon crash, security breach, budget exhausted |
-| **ERROR** | < 5 min | Desktop + Log | Task failure, API error, rate limit |
-| **WARNING** | < 15 min | Log only | High memory, slow response, context near limit |
-| **INFO** | Batched hourly | Log only | Task completed, checkpoint created |
+| Level        | Response Time  | Notification Method   | Example Triggers                                |
+| ------------ | -------------- | --------------------- | ----------------------------------------------- |
+| **CRITICAL** | Immediate      | Desktop + Sound + Log | Daemon crash, security breach, budget exhausted |
+| **ERROR**    | < 5 min        | Desktop + Log         | Task failure, API error, rate limit             |
+| **WARNING**  | < 15 min       | Log only              | High memory, slow response, context near limit  |
+| **INFO**     | Batched hourly | Log only              | Task completed, checkpoint created              |
 
 ### Notification Hooks
 
@@ -918,7 +932,7 @@ curl -X POST "$SLACK_WEBHOOK_URL" \
   -d '{"text":"CRITICAL: '"$MESSAGE"'"}'
 
 # Email via msmtp (optional)
-echo "Subject: Tri-Agent Alert\n\n$MESSAGE" | msmtp "$ALERT_EMAIL"
+printf "Subject: Tri-Agent Alert\n\n%s" "$MESSAGE" | msmtp "$ALERT_EMAIL"
 ```
 
 ### Alert Configuration
@@ -936,14 +950,14 @@ SOUND_ENABLED=true               # play sound for critical
 
 ### Key Performance Indicators (KPIs)
 
-| Metric | Target | Alert Threshold | Collection Method |
-|--------|--------|-----------------|-------------------|
-| Task Success Rate | > 95% | < 90% | `tasks.completed / tasks.total` |
-| Avg Task Duration | < 5 min | > 10 min | `avg(task.end - task.start)` |
-| Agent Utilization | > 70% | < 50% | `active_agents / max_agents` |
-| Context Usage | < 80% | > 90% | `tokens_used / context_limit` |
-| Error Rate | < 5% | > 10% | `errors / total_operations` |
-| Lock Contention | < 10% | > 20% | `lock_failures / lock_attempts` |
+| Metric            | Target  | Alert Threshold | Collection Method               |
+| ----------------- | ------- | --------------- | ------------------------------- |
+| Task Success Rate | > 95%   | < 90%           | `tasks.completed / tasks.total` |
+| Avg Task Duration | < 5 min | > 10 min        | `avg(task.end - task.start)`    |
+| Agent Utilization | > 70%   | < 50%           | `active_agents / max_agents`    |
+| Context Usage     | < 80%   | > 90%           | `tokens_used / context_limit`   |
+| Error Rate        | < 5%    | > 10%           | `errors / total_operations`     |
+| Lock Contention   | < 10%   | > 20%           | `lock_failures / lock_attempts` |
 
 ### Metrics Collection
 
@@ -997,11 +1011,11 @@ Level 4: Notify and pause
 
 ### Model Failover Chain
 
-| Primary | Failover 1 | Failover 2 | Last Resort |
-|---------|-----------|------------|-------------|
-| Claude Opus | Claude Sonnet | Gemini Pro | Queue + Notify |
-| Gemini 3 Pro | Gemini 2.5 Pro | Claude Sonnet | Queue + Notify |
-| Codex GPT-5.2 | Codex o3 | Claude Sonnet | Queue + Notify |
+| Primary       | Failover 1     | Failover 2    | Last Resort    |
+| ------------- | -------------- | ------------- | -------------- |
+| Claude Opus   | Claude Sonnet  | Gemini Pro    | Queue + Notify |
+| Gemini 3 Pro  | Gemini 2.5 Pro | Claude Sonnet | Queue + Notify |
+| Codex GPT-5.2 | Codex o3       | Claude Sonnet | Queue + Notify |
 
 ### Circuit Breaker States
 
@@ -1028,6 +1042,7 @@ FAILOVER_ENABLED=true
 ### Degraded Mode Operations
 
 When in degraded mode:
+
 - [ ] Reduce concurrent agents to minimum (3)
 - [ ] Disable non-essential MCP servers
 - [ ] Extend timeout thresholds 2x
@@ -1038,15 +1053,15 @@ When in degraded mode:
 
 ### Retention Policies
 
-| Data Type | Retention Period | Cleanup Frequency | Location |
-|-----------|-----------------|-------------------|----------|
-| Audit Logs | 30 days | Daily | `~/.claude/logs/audit/` |
-| Session Logs | 7 days | Daily | `~/.claude/logs/sessions.log` |
-| Checkpoints | 3 days | Every 8 hours | `~/.claude/sessions/checkpoints/` |
-| Snapshots | 7 days | Daily | `~/.claude/sessions/snapshots/` |
-| Task Files | 14 days | Daily | `~/.claude/tasks/` |
-| Metrics | 90 days | Weekly | `~/.claude/metrics/` |
-| Backups | 30 days | Daily | `~/.claude/backups/` |
+| Data Type    | Retention Period | Cleanup Frequency | Location                          |
+| ------------ | ---------------- | ----------------- | --------------------------------- |
+| Audit Logs   | 30 days          | Daily             | `~/.claude/logs/audit/`           |
+| Session Logs | 7 days           | Daily             | `~/.claude/logs/sessions.log`     |
+| Checkpoints  | 3 days           | Every 8 hours     | `~/.claude/sessions/checkpoints/` |
+| Snapshots    | 7 days           | Daily             | `~/.claude/sessions/snapshots/`   |
+| Task Files   | 14 days          | Daily             | `~/.claude/tasks/`                |
+| Metrics      | 90 days          | Weekly            | `~/.claude/metrics/`              |
+| Backups      | 30 days          | Daily             | `~/.claude/backups/`              |
 
 ### Automated Cleanup Script
 
@@ -1096,13 +1111,13 @@ DISK_CRITICAL_THRESHOLD_GB=2 # Emergency stop if < 2GB free
 
 **Full runbooks:** See `.claude/docs/incident-runbooks.md`
 
-| Runbook | Severity | Trigger |
-|---------|----------|---------|
-| Daemon Crash | CRITICAL | PID stale, no heartbeat |
-| Context Overflow | HIGH | Token limit exceeded |
-| Budget Exhaustion | MEDIUM | 429 errors |
-| Lock Contention | MEDIUM | High lock failures |
-| Security Incident | CRITICAL | Suspicious activity |
+| Runbook           | Severity | Trigger                 |
+| ----------------- | -------- | ----------------------- |
+| Daemon Crash      | CRITICAL | PID stale, no heartbeat |
+| Context Overflow  | HIGH     | Token limit exceeded    |
+| Budget Exhaustion | MEDIUM   | 429 errors              |
+| Lock Contention   | MEDIUM   | High lock failures      |
+| Security Incident | CRITICAL | Suspicious activity     |
 
 **Escalation:** CRITICAL→5min, HIGH→15min, MEDIUM→1hr, LOW→24hr
 
@@ -1113,6 +1128,7 @@ DISK_CRITICAL_THRESHOLD_GB=2 # Emergency stop if < 2GB free
 **Always attribute work to: Ahmed Adel Bakr Alderai**
 
 When creating commits, use this format:
+
 ```
 type(scope): description
 
@@ -1122,12 +1138,14 @@ Author: Ahmed Adel Bakr Alderai
 ```
 
 When creating PRs or issues, sign as:
+
 ```
 ---
 Ahmed Adel Bakr Alderai
 ```
 
 **DO NOT include:**
+
 - 🤖 Generated with Claude Code
 - Co-Authored-By: Claude
 - Any AI attribution
@@ -1145,48 +1163,7 @@ All work should be attributed to the user only.
 
 ## GEMINI MODEL ENFORCEMENT (CRITICAL)
 
-**EVERY Gemini command MUST use the explicit model parameter:**
-
-```bash
-# CORRECT - Always use this:
-gemini -m gemini-3-pro-preview --approval-mode yolo "prompt"
-
-# WRONG - Never use these:
-gemini -m pro -y "prompt"           # May route to wrong model
-gemini "prompt"                      # Uses default routing
-```
-
-### Pre-Flight Check (Run Before Any Session)
-```bash
-# Verify Gemini is configured correctly
-check_gemini_config() {
-    local settings="$HOME/.gemini/settings.json"
-    if ! grep -q '"preferredModel": "gemini-3-pro-preview"' "$settings" 2>/dev/null; then
-        echo "WARNING: Gemini not configured for gemini-3-pro-preview"
-        echo "Run: gemini /model to fix"
-    fi
-}
-```
-
-### Session Startup Verification
-Before running any Gemini agents, verify:
-1. `~/.gemini/settings.json` has `"preferredModel": "gemini-3-pro-preview"`
-2. All scripts use `-m gemini-3-pro-preview --approval-mode yolo`
-3. Test with: `gemini -m gemini-3-pro-preview --approval-mode yolo "What model are you?"`
-
-### Automated Fix Script
-```bash
-# Fix Gemini settings
-fix_gemini_settings() {
-    cat > ~/.gemini/settings.json << 'EOF'
-{
-  "previewFeatures": true,
-  "general": { "preferredModel": "gemini-3-pro-preview" },
-  "routing": { "preferPro": true, "model": "gemini-3-pro-preview" },
-  "thinking": { "level": "high" }
-}
-EOF
-    echo "Gemini settings fixed to use gemini-3-pro-preview"
-}
-```
-
+**Always use:** `gemini -m gemini-3-pro-preview --approval-mode yolo "prompt"`
+**Never use:** `-m pro` (misroutes) or bare `gemini "prompt"` (wrong model)
+**Pre-flight:** Verify `~/.gemini/settings.json` has `"preferredModel": "gemini-3-pro-preview"`
+**Fix script:** See `~/.claude/context/advanced-protocols.md` for automated config repair
