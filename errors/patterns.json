@@ -1,0 +1,401 @@
+{
+  "version": "1.0.0",
+  "updated": "2026-01-20",
+  "description": "Error patterns database for tri-agent system auto-recovery",
+  "patterns": [
+    {
+      "id": "ERR-001",
+      "name": "timeout_exit_124",
+      "error_signature": "exit\\s*(code)?\\s*124|timeout|timed\\s*out|SIGALRM|command\\s+timed\\s+out",
+      "exit_code": 124,
+      "severity": "medium",
+      "root_cause": "Task exceeded timeout threshold. Common causes: large codebase analysis, slow network, complex computation, or task scope too broad.",
+      "prevention_strategy": "Split large tasks into smaller subtasks. Use --timeout flag with appropriate value (max 600s). Pre-filter files before analysis. Use Gemini for large context (1M tokens).",
+      "recovery_command": "split_and_retry",
+      "recovery_steps": [
+        "Identify task scope and split into 2-4 smaller subtasks",
+        "Increase timeout: --timeout 600",
+        "If file analysis, limit to specific directories",
+        "Route to Gemini if context > 100K tokens"
+      ],
+      "max_retries": 3,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true
+    },
+    {
+      "id": "ERR-002",
+      "name": "auth_failed_exit_2",
+      "error_signature": "exit\\s*(code)?\\s*2|auth(entication)?\\s*(failed|error|invalid)|unauthorized|401|invalid\\s*credentials|token\\s*expired|oauth\\s*error",
+      "exit_code": 2,
+      "severity": "high",
+      "root_cause": "Authentication credentials expired, invalid, or missing. OAuth token may need refresh, API key may be revoked, or credentials file corrupted.",
+      "prevention_strategy": "Rotate OAuth tokens every 30 days. Verify credentials in preflight check. Store credentials with chmod 600. Use credential health monitoring.",
+      "recovery_command": "reauth_prompt",
+      "recovery_steps": [
+        "For Gemini: Run 'gemini-switch' to re-authenticate",
+        "For Codex: Run 'codex auth' to refresh credentials",
+        "Verify credential files exist and have correct permissions",
+        "Check ~/.gemini/oauth_creds.json and ~/.codex/config.toml"
+      ],
+      "max_retries": 1,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true,
+      "requires_user_action": true
+    },
+    {
+      "id": "ERR-003",
+      "name": "sqlite_busy",
+      "error_signature": "SQLITE_BUSY|database\\s+is\\s+locked|unable\\s+to\\s+open\\s+database|cannot\\s+start\\s+a\\s+transaction|attempt\\s+to\\s+write\\s+a\\s+readonly\\s+database",
+      "exit_code": null,
+      "severity": "medium",
+      "root_cause": "SQLite database lock contention. Multiple processes attempting concurrent writes. WAL mode not enabled or checkpoint needed.",
+      "prevention_strategy": "Enable WAL mode on all databases. Use connection pooling. Implement write queue for high-contention scenarios. Run PRAGMA wal_checkpoint periodically.",
+      "recovery_command": "sqlite_retry_backoff",
+      "recovery_steps": [
+        "Wait with exponential backoff (2^n seconds, max 32s)",
+        "Check for stale locks: lsof *.db",
+        "Run: sqlite3 $DB 'PRAGMA wal_checkpoint(TRUNCATE);'",
+        "If persistent, reduce concurrent agents"
+      ],
+      "max_retries": 5,
+      "backoff_seconds": 2,
+      "backoff_multiplier": 2,
+      "max_backoff_seconds": 32,
+      "escalate_after_retries": true
+    },
+    {
+      "id": "ERR-004",
+      "name": "context_length_exceeded",
+      "error_signature": "context_length_exceeded|maximum\\s*context\\s*length|token\\s*limit|too\\s*many\\s*tokens|context\\s*window\\s*exceeded|max_tokens|input\\s+too\\s+long",
+      "exit_code": null,
+      "severity": "high",
+      "root_cause": "Input tokens exceeded model context window. Claude: 200K, Codex: 400K, Gemini: 1M. Task included too many files or overly verbose context.",
+      "prevention_strategy": "Pre-calculate token count before submission. Use Gemini for large context tasks. Implement progressive context loading. Summarize intermediate results.",
+      "recovery_command": "trigger_summarization",
+      "recovery_steps": [
+        "Calculate current token usage",
+        "Summarize context to under 50% of limit",
+        "Route to Gemini if context > 150K tokens",
+        "Split task and process incrementally",
+        "Use file filtering to reduce scope"
+      ],
+      "max_retries": 2,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true,
+      "context_limits": {
+        "claude": 200000,
+        "codex": 400000,
+        "gemini": 1000000
+      }
+    },
+    {
+      "id": "ERR-005",
+      "name": "rate_limit_429",
+      "error_signature": "429|rate\\s*limit|too\\s*many\\s*requests|quota\\s*exceeded|throttl|requests?\\s+per\\s+(minute|hour|day)|daily\\s+limit|usage\\s+limit",
+      "exit_code": null,
+      "severity": "medium",
+      "root_cause": "API rate limit or daily quota exceeded. Too many requests in short time window, or budget threshold reached.",
+      "prevention_strategy": "Implement request throttling. Monitor usage against daily caps. Use cost-effective models for simple tasks. Batch similar requests.",
+      "recovery_command": "exponential_backoff",
+      "recovery_steps": [
+        "Wait with exponential backoff: 2^n seconds",
+        "Check daily budget status",
+        "If quota exceeded, wait for reset or switch model",
+        "Reduce concurrent agent count temporarily"
+      ],
+      "max_retries": 5,
+      "backoff_seconds": 2,
+      "backoff_multiplier": 2,
+      "max_backoff_seconds": 64,
+      "escalate_after_retries": true,
+      "budget_thresholds": {
+        "warning": 0.7,
+        "pause": 0.85,
+        "stop": 0.95
+      }
+    },
+    {
+      "id": "ERR-006",
+      "name": "verification_fail_loop",
+      "error_signature": "VERIFICATION\\s*RESULT:\\s*FAIL|verification\\s*failed|\\[!\\]|FAIL.*FAIL.*FAIL|failed\\s*verification\\s*3\\s*times",
+      "exit_code": null,
+      "severity": "high",
+      "root_cause": "Implementation repeatedly fails verification. Possible spec ambiguity, fundamental approach issue, or verifier/implementer disagreement.",
+      "prevention_strategy": "Clarify requirements before implementation. Use tri-agent pre-work analysis. Document acceptance criteria explicitly. Implement in smaller increments.",
+      "recovery_command": "escalate_to_user",
+      "recovery_steps": [
+        "After 2 FAIL cycles, declare deadlock",
+        "Document disputed claims and evidence",
+        "Present to user with clear decision request",
+        "Alternative: Request third AI consensus",
+        "If 3 FAILs, trigger git revert"
+      ],
+      "max_retries": 2,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true,
+      "requires_user_action": true,
+      "rollback_trigger": 3
+    },
+    {
+      "id": "ERR-007",
+      "name": "network_error",
+      "error_signature": "connection\\s*(refused|reset|timed\\s*out)|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|network\\s*(is\\s+)?unreachable|DNS\\s+resolution|getaddrinfo|socket\\s+hang\\s+up",
+      "exit_code": null,
+      "severity": "medium",
+      "root_cause": "Network connectivity issue. API endpoint unreachable, DNS resolution failure, or firewall blocking.",
+      "prevention_strategy": "Implement connection health checks. Use retry with backoff for transient failures. Monitor API endpoint status.",
+      "recovery_command": "network_retry",
+      "recovery_steps": [
+        "Check network connectivity: ping api.anthropic.com",
+        "Verify DNS resolution",
+        "Check firewall/proxy settings",
+        "Retry with exponential backoff"
+      ],
+      "max_retries": 3,
+      "backoff_seconds": 5,
+      "backoff_multiplier": 2,
+      "max_backoff_seconds": 60,
+      "escalate_after_retries": true
+    },
+    {
+      "id": "ERR-008",
+      "name": "memory_oom",
+      "error_signature": "out\\s*of\\s*memory|OOM|memory\\s*allocation\\s*failed|cannot\\s*allocate|killed.*memory|ENOMEM|heap\\s+out\\s+of\\s+memory",
+      "exit_code": 137,
+      "severity": "critical",
+      "root_cause": "Process exceeded memory limits. Task too memory-intensive, memory leak, or insufficient system resources.",
+      "prevention_strategy": "Monitor memory usage. Process large files in chunks. Set memory limits per agent. Use streaming for large data.",
+      "recovery_command": "memory_recovery",
+      "recovery_steps": [
+        "Kill memory-hogging processes",
+        "Clear caches: sync && echo 3 > /proc/sys/vm/drop_caches",
+        "Reduce concurrent agents",
+        "Split task into smaller memory footprint",
+        "Restart affected service"
+      ],
+      "max_retries": 2,
+      "backoff_seconds": 10,
+      "escalate_after_retries": true
+    },
+    {
+      "id": "ERR-009",
+      "name": "git_conflict",
+      "error_signature": "CONFLICT|merge\\s+conflict|automatic\\s+merge\\s+failed|fix\\s+conflicts|unmerged\\s+paths|both\\s+modified",
+      "exit_code": 1,
+      "severity": "high",
+      "root_cause": "Git merge or rebase conflict. Concurrent changes to same files, or divergent branch histories.",
+      "prevention_strategy": "Use git worktrees for parallel work. Pull/rebase frequently. Coordinate file ownership between agents.",
+      "recovery_command": "git_conflict_resolve",
+      "recovery_steps": [
+        "Identify conflicting files: git status",
+        "Review conflict markers in files",
+        "For simple conflicts, attempt auto-resolution",
+        "For complex conflicts, escalate to user",
+        "After resolution: git add . && git commit"
+      ],
+      "max_retries": 1,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true,
+      "requires_user_action": true
+    },
+    {
+      "id": "ERR-010",
+      "name": "disk_space",
+      "error_signature": "no\\s*space\\s*left|disk\\s*quota|ENOSPC|cannot\\s+write|filesystem\\s+full|insufficient\\s+disk",
+      "exit_code": null,
+      "severity": "critical",
+      "root_cause": "Disk space exhausted. Logs accumulated, large files created, or quota exceeded.",
+      "prevention_strategy": "Monitor disk usage. Implement log rotation. Run cleanup script daily. Set alerts at 80% capacity.",
+      "recovery_command": "disk_cleanup",
+      "recovery_steps": [
+        "Check disk usage: df -h",
+        "Run cleanup: ~/.claude/scripts/cleanup.sh",
+        "Remove old logs: find ~/.claude/logs -mtime +7 -delete",
+        "Compress large files",
+        "If critical, pause all non-essential operations"
+      ],
+      "max_retries": 1,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true
+    },
+    {
+      "id": "ERR-011",
+      "name": "permission_denied",
+      "error_signature": "permission\\s*denied|EACCES|EPERM|not\\s+permitted|access\\s+denied|Operation\\s+not\\s+permitted",
+      "exit_code": 1,
+      "severity": "high",
+      "root_cause": "Insufficient permissions for operation. File ownership issue, missing sudo, or sandbox restriction.",
+      "prevention_strategy": "Use workspace-write sandbox mode. Verify file permissions before operations. Document required permissions.",
+      "recovery_command": "permission_fix",
+      "recovery_steps": [
+        "Check file permissions: ls -la",
+        "Fix ownership: chown -R $USER:$USER",
+        "If sandbox issue, verify operation is permitted",
+        "For system files, escalate to user"
+      ],
+      "max_retries": 1,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true,
+      "requires_user_action": true
+    },
+    {
+      "id": "ERR-012",
+      "name": "json_parse_error",
+      "error_signature": "JSON\\.parse|Unexpected\\s+token|invalid\\s+JSON|JSON\\s+parse\\s+error|SyntaxError.*JSON|malformed\\s+JSON",
+      "exit_code": null,
+      "severity": "low",
+      "root_cause": "Malformed JSON response or file. Truncated output, encoding issue, or invalid characters.",
+      "prevention_strategy": "Validate JSON before parsing. Use streaming JSON parser for large files. Implement graceful fallback.",
+      "recovery_command": "json_recovery",
+      "recovery_steps": [
+        "Validate JSON: jq . file.json",
+        "Check for truncation or encoding issues",
+        "Try re-fetching the data",
+        "Use fallback default values if non-critical"
+      ],
+      "max_retries": 2,
+      "backoff_seconds": 1,
+      "escalate_after_retries": false
+    },
+    {
+      "id": "ERR-013",
+      "name": "model_overloaded",
+      "error_signature": "model\\s*(is\\s+)?overloaded|capacity|server\\s+busy|try\\s+again\\s+later|503|service\\s+unavailable|temporarily\\s+unavailable",
+      "exit_code": null,
+      "severity": "medium",
+      "root_cause": "AI model service temporarily overloaded. High demand period or service degradation.",
+      "prevention_strategy": "Implement failover to alternate models. Use off-peak hours for large tasks. Queue non-urgent requests.",
+      "recovery_command": "model_failover",
+      "recovery_steps": [
+        "Wait 30-60 seconds and retry",
+        "Failover: Claude -> Gemini -> Codex",
+        "Check service status pages",
+        "Queue task for later if persistent"
+      ],
+      "max_retries": 3,
+      "backoff_seconds": 30,
+      "backoff_multiplier": 2,
+      "max_backoff_seconds": 120,
+      "escalate_after_retries": true
+    },
+    {
+      "id": "ERR-014",
+      "name": "stale_process",
+      "error_signature": "stale\\s+pid|zombie\\s+process|defunct|process\\s+not\\s+found|no\\s+such\\s+process|ESRCH",
+      "exit_code": null,
+      "severity": "low",
+      "root_cause": "Orphaned or zombie process. Previous session crashed without cleanup, or process tracking failed.",
+      "prevention_strategy": "Implement proper signal handlers. Clean up PIDs on startup. Use process supervision.",
+      "recovery_command": "process_cleanup",
+      "recovery_steps": [
+        "Find stale processes: ps aux | grep tri-agent",
+        "Kill orphans: pkill -9 -f 'tri-agent'",
+        "Remove stale PID files",
+        "Restart services cleanly"
+      ],
+      "max_retries": 1,
+      "backoff_seconds": 0,
+      "escalate_after_retries": false
+    },
+    {
+      "id": "ERR-015",
+      "name": "test_failure",
+      "error_signature": "FAILED|AssertionError|test.*failed|npm\\s+test.*exit\\s+1|pytest.*failed|jest.*failed|\\d+\\s+failing",
+      "exit_code": 1,
+      "severity": "medium",
+      "root_cause": "Automated tests failed. Code regression, environment issue, or flaky test.",
+      "prevention_strategy": "Run tests before commit. Isolate flaky tests. Maintain test environment parity.",
+      "recovery_command": "test_analysis",
+      "recovery_steps": [
+        "Identify failing tests from output",
+        "Check if failure is flaky (rerun once)",
+        "Analyze test output for root cause",
+        "Fix code or update test expectations",
+        "Verify fix with full test suite"
+      ],
+      "max_retries": 1,
+      "backoff_seconds": 0,
+      "escalate_after_retries": true
+    }
+  ],
+  "recovery_commands": {
+    "split_and_retry": {
+      "description": "Split task into smaller subtasks and retry each",
+      "implementation": "auto-recovery.sh::split_and_retry"
+    },
+    "reauth_prompt": {
+      "description": "Prompt user to re-authenticate",
+      "implementation": "auto-recovery.sh::reauth_prompt"
+    },
+    "sqlite_retry_backoff": {
+      "description": "Retry SQLite operation with exponential backoff",
+      "implementation": "auto-recovery.sh::sqlite_retry_backoff"
+    },
+    "trigger_summarization": {
+      "description": "Summarize context to reduce token count",
+      "implementation": "auto-recovery.sh::trigger_summarization"
+    },
+    "exponential_backoff": {
+      "description": "Wait with exponential backoff and retry",
+      "implementation": "auto-recovery.sh::exponential_backoff"
+    },
+    "escalate_to_user": {
+      "description": "Escalate issue to user for manual intervention",
+      "implementation": "auto-recovery.sh::escalate_to_user"
+    },
+    "network_retry": {
+      "description": "Retry after network connectivity check",
+      "implementation": "auto-recovery.sh::network_retry"
+    },
+    "memory_recovery": {
+      "description": "Attempt memory recovery procedures",
+      "implementation": "auto-recovery.sh::memory_recovery"
+    },
+    "git_conflict_resolve": {
+      "description": "Attempt automatic git conflict resolution",
+      "implementation": "auto-recovery.sh::git_conflict_resolve"
+    },
+    "disk_cleanup": {
+      "description": "Run disk cleanup procedures",
+      "implementation": "auto-recovery.sh::disk_cleanup"
+    },
+    "permission_fix": {
+      "description": "Attempt to fix permission issues",
+      "implementation": "auto-recovery.sh::permission_fix"
+    },
+    "json_recovery": {
+      "description": "Attempt JSON recovery or fallback",
+      "implementation": "auto-recovery.sh::json_recovery"
+    },
+    "model_failover": {
+      "description": "Failover to alternate AI model",
+      "implementation": "auto-recovery.sh::model_failover"
+    },
+    "process_cleanup": {
+      "description": "Clean up stale processes",
+      "implementation": "auto-recovery.sh::process_cleanup"
+    },
+    "test_analysis": {
+      "description": "Analyze test failures and suggest fixes",
+      "implementation": "auto-recovery.sh::test_analysis"
+    }
+  },
+  "escalation_levels": {
+    "low": {
+      "response_time": "batched",
+      "notification": "log_only"
+    },
+    "medium": {
+      "response_time": "15_minutes",
+      "notification": "log_and_alert"
+    },
+    "high": {
+      "response_time": "5_minutes",
+      "notification": "desktop_and_log"
+    },
+    "critical": {
+      "response_time": "immediate",
+      "notification": "desktop_sound_log"
+    }
+  }
+}
