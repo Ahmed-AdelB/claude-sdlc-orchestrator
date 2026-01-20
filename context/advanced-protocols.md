@@ -31,7 +31,30 @@ codex exec "Implement: $(cat /tmp/ctx.txt)"
 - **Retention:** 365 days (compliance requirement)
 - **Format:** Append-only JSONL with SHA-256 checksums
 - **Location:** `~/.claude/logs/audit/YYYY-MM-DD.jsonl`
-- **Verify:** `sha256sum -c audit.checksums` weekly
+- **Immutability:** `chattr +a` on log files (append-only attribute)
+
+### Log Integrity (Checksums + Signing)
+
+```bash
+# Generate checksums for all audit logs
+cd ~/.claude/logs/audit
+sha256sum *.jsonl > manifest.sha256
+
+# Sign the manifest with GPG (tamper-proof)
+gpg --sign --armor manifest.sha256
+
+# Verify integrity (run weekly via cron)
+sha256sum -c manifest.sha256 && gpg --verify manifest.sha256.asc
+```
+
+**Automation (add to crontab):**
+
+```bash
+# Weekly integrity check: 0 0 * * 0 ~/.claude/scripts/verify-audit.sh
+#!/bin/bash
+cd ~/.claude/logs/audit
+sha256sum -c manifest.sha256 || notify-send -u critical "Audit log integrity FAILED"
+```
 
 ## Rate Limit Thresholds
 

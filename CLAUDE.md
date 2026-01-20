@@ -1,5 +1,7 @@
 # Global SDLC Orchestration System
 
+> **Version:** 2.1.0 | **Updated:** 2026-01-20 | **Author:** Ahmed Adel Bakr Alderai
+
 ## AI Stack ($420/month)
 
 - **Claude Max** ($200): Primary orchestrator, 900 msg/5hr, Opus + Sonnet
@@ -58,32 +60,32 @@
 - Minimum test coverage: 80%
 - Zero critical security vulnerabilities
 
+## Security-First Code Generation (MANDATORY)
+
+**Full details:** See `~/.claude/rules/security.md`
+
+When generating code, always apply these security requirements:
+
+- **Input Validation:** Validate and sanitize all user inputs
+- **Parameterized Queries:** Use parameterized queries for all database operations (never string concatenation)
+- **Error Handling:** Implement proper error handling; never expose stack traces to users
+- **Least Privilege:** Follow principle of least privilege for all operations
+- **Secure Defaults:** Use HTTPS, encrypted storage, secure cookies
+- **No Hardcoded Secrets:** Never hardcode credentials, API keys, or secrets - use environment variables
+- **Dependency Security:** Check for known vulnerabilities in dependencies before adding
+
 ## ENFORCED MULTI-AGENT PARALLELISM (CRITICAL REQUIREMENT)
 
-### Minimum Agent Requirements
+**Full details:** See `~/.claude/rules/multi-agent.md`
 
-**Standard:** 9 concurrent agents (3 Claude + 3 Codex + 3 Gemini), 27 total per task.
-**Tiered by complexity:** 1 (trivial) → 3 (standard) → 9 (complex tasks).
-**Exception:** Degraded mode allows minimum 3 agents (see Graceful Degradation).
+**Quick Reference:** 9 concurrent agents (3 Claude + 3 Codex + 3 Gemini), 27 total per task.
+Tiered: 1 (trivial) → 3 (standard) → 9 (complex). Degraded mode: minimum 3.
 
-| Activity Type      | Min Concurrent | Distribution (3+3+3)                                                                                                        |
-| ------------------ | -------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| **Planning**       | 9              | 3 Claude (architecture, security, specs) + 3 Gemini (context, codebase, patterns) + 3 Codex (feasibility, complexity, APIs) |
-| **Implementation** | 9              | 3 Claude (core code, tests, docs) + 3 Codex (implement, optimize, validate) + 3 Gemini (review, context, security)          |
-| **Verification**   | 9              | 3 Claude (security, logic, edges) + 3 Gemini (context, patterns, regression) + 3 Codex (completeness, coverage, quality)    |
-
-**TOTAL PER TASK: 27 agent invocations (9 per phase × 3 phases)**
-
-### Enforcement Checklist (Before Marking ANY Task Complete)
-
-- [ ] **27 agents** were invoked across 3 phases (9 per phase)
-- [ ] **9+ concurrent** agents ran simultaneously at peak
-- [ ] All three AI models (Claude, Codex, Gemini) participated in EACH phase
-- [ ] Implementation was verified by at least **2 non-implementing AIs**
-- [ ] Security review completed by at least **2 AIs** from different models
-- [ ] Todo was updated throughout the process with phase tracking
+**Enforcement:** All 3 models in each phase, 2+ AI verification, security review by 2 AIs.
 
 ## MAXIMUM CAPABILITY STANDARDS (MANDATORY)
+
+**Full details:** See `~/.claude/rules/capability.md`
 
 **NEVER use weaker models or configurations to save tokens. Maximum capability is required at all times.**
 
@@ -234,83 +236,37 @@ codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-wri
 | `Blocked`          | Cannot proceed        | Resolve blocker         |
 | `Failed`           | Verification FAILED   | Fix and re-verify       |
 
-**Verification Marks:** `[ ]` pending | `[x]` passed | `[!]` failed
+**Verification Marks:** `[ ]` pending | `[x]` passed | `[!]` failed | `[?]` inconclusive (escalate)
 
 **Runtime:** Every AI MUST continuously add discovered requirements, update status in real-time, flag blockers, record verification results.
 
-## VERIFICATION PROTOCOL (TWO-KEY RULE) — Enhanced
+## VERIFICATION PROTOCOL (TWO-KEY RULE)
 
-**Purpose:** Any change must be independently verified by a second agent before acceptance.
+**Full details:** See `~/.claude/rules/verification.md`
 
-**Verification request format (required):**
+**Quick Reference:**
 
-```
-VERIFY:
-- Scope: <files/paths>
-- Change summary: <1–3 sentences>
-- Expected behavior: <concrete outcomes>
-- Repro steps: <commands or manual steps>
-- Evidence to check: <logs/screenshots/tests>
-- Risk notes: <edge cases>
-```
+- **VERIFY format:** Scope, Change summary, Expected behavior, Repro steps, Evidence, Risk notes
+- **Results:** PASS (all match) | FAIL (issues found) | INCONCLUSIVE (escalate)
+- **Marks:** `[ ]` pending | `[x]` passed | `[!]` failed | `[?]` inconclusive
+- **Re-verify:** Fresh request required after FAIL; verifier re-runs full scope
+- **Stalemate:** 2 cycles max → escalate to user (primary) OR third AI consensus (alternative)
+- **Rollback:** 3 FAILs OR critical error → `git revert` → re-run original verification → require new plan before retry
 
-**PASS/FAIL/INCONCLUSIVE criteria:**
+**Examples:** See `~/.claude/rules/verification.md` for comprehensive FAIL cycle examples with re-verification workflow.
 
-- **PASS** if _all_ expected behaviors match, tests/steps reproduce cleanly, and no regressions.
-- **FAIL** if any expected behavior is missing, tests/steps fail, or regressions/new risks appear.
-- **INCONCLUSIVE** if evidence is insufficient to determine outcome → escalate to third AI or user.
+## PARTIAL BATCH FAILURE STRATEGY
 
-**Re-verification rules:**
+When running parallel agents and <100% succeed:
 
-- Any change after a FAIL requires a **fresh** verification request.
-- The verifier must re-run the **full** scope (no partial "spot checks").
-
-**FAIL Example:**
-
-```
-VERIFICATION RESULT: FAIL
-Issues Found:
-1. CRITICAL - Token expiration not enforced (line 47)
-2. HIGH - Token not invalidated after use (line 89)
-Required: Fix both issues, re-run tests, submit fresh VERIFY
-Verifier: Codex (GPT-5.2)
-```
-
-## STALEMATE RESOLUTION PROTOCOL
-
-**Trigger:** Implementer and verifier disagree after a verification cycle.
-
-- **Max retries:** 2 total verification cycles after initial disagreement.
-- **Deadlock detection:** If the same dispute recurs **twice**, declare a deadlock.
-- **Tie‑breaker escalation:** Escalate to the user with:
-  - the disputed claim,
-  - evidence from both sides,
-  - a clear ask: "Which outcome should we prioritize?"
-- **Alternative path:** Request consensus from a **third AI** and follow majority decision.
-- **Documentation:** Record the deadlock and resolution path in the change log.
-
-## ROLLBACK & RECOVERY PROCEDURES
-
-**When to rollback:**
-
-- Verification fails **3 times** on the same change.
-- A **critical error** is introduced (data loss, security regression, prod outage risk).
-- The change is no longer aligned with user intent.
-
-**How to rollback:**
-
-- **Git revert** (preferred): `git revert <bad-commit>` (reversible, preserves history)
-- **Checkpoint restore**: Restore to last known-good checkpoint.
-
-**Post‑rollback verification:**
-
-- Re-run the **original** verification steps against the rolled-back state.
-- Log the rollback reason and verification outcome.
-
-**Preventing rollback loops:**
-
-- Require a **new plan** before re-attempting the same change.
-- If rollback happens twice, **escalate to user** for direction.
+1. **Quarantine** failed tasks immediately
+2. **Commit** successful results (don't block on failures)
+3. **Analyze** failure type:
+   - Model error → Retry with different model
+   - Context error → Split task and retry
+   - Logic error → Escalate for manual review
+4. **Retry** failed tasks with alternate model OR escalate to human
+5. **Document** failure patterns for future prevention
 
 ## PROGRESS REPORTING CADENCE & FORMAT
 
@@ -347,233 +303,41 @@ Verifier: Codex (GPT-5.2)
 
 ## SESSION INITIALIZATION (MANDATORY)
 
-Before starting work, verify:
+**Pre-flight checklist - ALL checks must pass before work begins.**
 
 ```bash
-node -v && python --version && git --version  # Tools present
-git status                                     # Clean git state
-sqlite3 state/tri-agent.db "PRAGMA integrity_check;"  # DB OK
-test -f ~/.gemini/oauth_creds.json && echo "Gemini OK"  # Creds exist
+#!/bin/bash
+# Run: tri-agent preflight OR copy/paste this block
+set -e; F=0; echo "=== TRI-AGENT PRE-FLIGHT ==="
+# 1. Tool versions (node 18+, python 3.10+, git 2.30+)
+node -v | grep -qE 'v(1[89]|[2-9][0-9])' && echo "[OK] Node $(node -v)" || { echo "[FAIL] Node <18"; F=1; }
+python3 -c "import sys; exit(0 if sys.version_info >= (3,10) else 1)" && echo "[OK] Python $(python3 --version)" || { echo "[FAIL] Python <3.10"; F=1; }
+git --version | grep -qE '2\.([3-9][0-9]|[0-9]{3})' && echo "[OK] Git" || { echo "[FAIL] Git <2.30"; F=1; }
+# 2. Git state (warn on uncommitted tracked files)
+[[ -z "$(git status --porcelain 2>/dev/null | grep -v '^??')" ]] && echo "[OK] Git clean" || echo "[WARN] Uncommitted changes"
+# 3. Database integrity
+for db in ~/.claude/state/*.db 2>/dev/null; do sqlite3 "$db" "PRAGMA integrity_check;" | grep -q "^ok$" && echo "[OK] DB: $(basename $db)" || { echo "[FAIL] DB: $db"; F=1; }; done
+# 4. Credentials (Gemini + Codex)
+[[ -f ~/.gemini/oauth_creds.json && -s ~/.gemini/oauth_creds.json ]] && echo "[OK] Gemini creds" || { echo "[FAIL] Gemini auth"; F=1; }
+[[ -n "$OPENAI_API_KEY" || -f ~/.codex/config.toml ]] && echo "[OK] Codex creds" || { echo "[FAIL] Codex auth"; F=1; }
+# 5. Disk space (min 2GB)
+FREE=$(df -BG ~ 2>/dev/null | awk 'NR==2{gsub("G","");print $4}'); [[ ${FREE:-0} -ge 2 ]] && echo "[OK] Disk: ${FREE}GB" || { echo "[FAIL] Disk <2GB"; F=1; }
+# 6. Network (API endpoints)
+curl -sf --max-time 5 https://api.anthropic.com >/dev/null && echo "[OK] Claude API" || echo "[WARN] Claude unreachable"
+curl -sf --max-time 5 https://generativelanguage.googleapis.com >/dev/null && echo "[OK] Gemini API" || echo "[WARN] Gemini unreachable"
+curl -sf --max-time 5 https://api.openai.com >/dev/null && echo "[OK] OpenAI API" || echo "[WARN] OpenAI unreachable"
+echo "=== PRE-FLIGHT $([ $F -eq 0 ] && echo 'PASSED' || echo 'FAILED') ==="; exit $F
 ```
 
-## 24-HOUR CONTINUOUS OPERATION (CRITICAL)
+**Quick:** `tri-agent preflight` | **Fix issues:** `tri-agent doctor --fix`
 
-### Session Persistence Architecture
+## 24-HOUR CONTINUOUS OPERATION
 
-**Progress File:** Update `claude-progress.txt` each session with: date, session ID, `git log --oneline -20`, current branch, uncommitted count, last checkpoint, and next TODOs.
+**Full documentation:** See `~/.claude/context/24hr-operations.md`
 
-**State Persistence Locations:**
-| State Type | Location | Backup Frequency |
-|------------|----------|------------------|
-| Task Queue | `state/tri-agent.db` (SQLite) | Real-time WAL |
-| Progress Log | `claude-progress.txt` | Every commit |
-| Checkpoints | `sessions/checkpoints/` | Every 5 minutes |
-| Event Log | `state/event-store/events.jsonl` | Append-only |
+**Quick Reference:** Session refresh 8hr | Context limits: Claude 150K, Gemini 750K, Codex 300K | Failover: Claude→Gemini→split | Budget: 70% warn→85% pause→95% stop
 
-### Context Window Management (CRITICAL FOR 24HR)
-
-**Token Budget Per Session:**
-| Model | Context Window | Safe Working Limit | Refresh Trigger |
-|-------|---------------|-------------------|-----------------|
-| Claude Opus/Sonnet | 200K | 160K (80%) | 150K tokens used |
-| Gemini 3 Pro | 1M | 800K (80%) | 750K tokens used |
-| Codex GPT-5.2 | 400K | 320K (80%) | 300K tokens used |
-
-**Context Overflow:** At 80% threshold (Claude 150K, Gemini 750K, Codex 300K): checkpoint → summarize via Gemini → refresh.
-**Failover:** Claude (200K) → Gemini (1M) → split sub-tasks.
-
-### Session Refresh Protocol (Every 8 Hours)
-
-```bash
-SESSION_DURATION_HOURS=8
-SESSION_REFRESH_ENABLED=true
-CONTEXT_CHECKPOINT_INTERVAL=300  # 5 minutes
-
-# At session boundary:
-# 1. Checkpoint all in-progress work
-# 2. Commit with descriptive message
-# 3. Update claude-progress.txt
-# 4. Generate session summary via Gemini
-# 5. Clear context and reload essentials
-# 6. Resume from checkpoint
-```
-
-### Watchdog & Auto-Recovery Stack
-
-**3-Layer Supervision:**
-
-```
-Layer 1: tri-agent-daemon (Parent)
-  ├─ tri-agent-worker (Task executor)
-  ├─ tri-agent-supervisor (Approval flow)
-  └─ budget-watchdog (Cost tracking)
-
-Layer 2: watchdog-master (External supervisor)
-  ├─ Monitors Layer 1 health
-  ├─ Restarts failed daemons
-  └─ Exponential backoff (2^n seconds)
-
-Layer 3: tri-24-monitor (24-hour guardian)
-  ├─ Heartbeat every 30 seconds
-  ├─ System health checks
-  └─ Alerting on failures
-```
-
-**Recovery Hierarchy:**
-| Failure Type | Detection | Recovery Action |
-|--------------|-----------|-----------------|
-| Task Timeout | Heartbeat > threshold | Requeue task, increment retry |
-| Worker Crash | PID check fails | Mark dead, recover tasks |
-| Daemon Crash | watchdog-master | Auto-restart with backoff |
-| Context Overflow | Token tracking | Session refresh |
-| Rate Limit | 429 response | Exponential backoff |
-| Budget Exhausted | cost-tracker | Pause until reset |
-
-### 24-Hour Budget Management
-
-**Daily Token Budgets:**
-| Model | Daily Limit | Hourly Average | Alert Threshold |
-|-------|-------------|----------------|-----------------|
-| Claude Max | ~100M tokens | 4.2M/hour | 70% daily |
-| Gemini Pro | Unlimited\* | N/A | API rate limits |
-| Codex | ~50M tokens | 2.1M/hour | 70% daily |
-
-**Budget Reset Schedule:**
-
-- Claude: Rolling 5-hour window + 7-day weekly cap
-- Gemini: Daily reset at midnight UTC
-- Codex: Daily reset at midnight UTC
-
-### 24-Hour Operation Checklist
-
-**Before Starting:**
-
-- [ ] Verify watchdog-master is running
-- [ ] Check daily budget availability
-- [ ] Initialize claude-progress.txt
-- [ ] Create initial git checkpoint
-- [ ] Configure 8-hour session refresh
-
-**During Operation (Automated):**
-
-- [ ] Heartbeat every 30 seconds
-- [ ] Context checkpoint every 5 minutes
-- [ ] Progress update every commit
-- [ ] Budget check every 100K tokens
-- [ ] Session refresh at 8-hour boundaries
-
-**Recovery Triggers:**
-
-- [ ] Task timeout → Requeue
-- [ ] Worker crash → Auto-restart
-- [ ] Context overflow → Session refresh
-- [ ] Budget exhaustion → Pause & alert
-
-### Commands for 24-Hour Operation
-
-```bash
-# Start 24-hour session
-tri-agent start --mode=24hr --watchdog --monitor
-
-# Check session health
-tri-agent health --verbose
-
-# Force checkpoint
-tri-agent checkpoint --reason="manual"
-
-# Resume from crash
-tri-agent resume --from-checkpoint latest
-
-# View progress
-cat claude-progress.txt
-
-# Check budget
-cost-tracker --status --daily
-
-# Session refresh
-tri-agent session-refresh --summarize
-```
-
-### Resource & Log Governance (24HR MANDATORY)
-
-**Log Rotation Policy:**
-
-- **Max Log Size:** 50MB per file
-- **Retention:** 7 days (rolling window)
-- **Rotation Check:** Every session refresh (8 hours)
-- **Command:** `find logs/ -name "*.log" -size +50M -exec gzip {} \;`
-
-**Hardware Safety Limits:**
-
-- **Max Concurrent CLI Processes:** 15 (prevent fork bombs)
-- **Max RAM Usage:** 75% of System Total (pause new agents if exceeded)
-- **Disk Free Space Floor:** 2GB (emergency stop if crossed)
-
-**Emergency Dead Man's Switch:**
-
-- **Mechanism:** `tri-24-monitor` must touch `~/.claude/heartbeat` every 30s
-- **Systemd/Cron Action:** If file age > 5m, kill all `tri-agent` processes and restart `watchdog-master`
-
-### Large Repository Protocol (8GB+ Support)
-
-**Context Strategy: Sparse Loading**
-
-- **Problem:** 1M tokens ≈ 4MB text. 8GB repo is 2000x larger
-- **Solution:** NEVER load "entire codebase". Use hierarchical narrowing:
-  1. **Map:** `tree -L 2` or `find . -maxdepth 2` for structure
-  2. **Search:** Use `ripgrep` (rg) to find specific symbols
-  3. **Read:** Only read files confirmed relevant by search
-
-**Smart Ignore (Performance):**
-
-```bash
-# .geminiignore / .claudeignore
-package-lock.json
-yarn.lock
-*.log
-.cache/
-tmp/
-dist/
-build/
-node_modules/
-*.so
-*.dll
-*.png
-*.mp4
-```
-
-**Incremental Verification (8GB+ repos):**
-
-- **Unit:** `jest -o` / `pytest --lf` (last-failed only)
-- **Build:** `tsc --incremental`
-- **Lint:** `eslint --cache`
-
-### Security Hardening (Production)
-
-**Risk Mitigation:**
-| Risk | Mitigation |
-|------|------------|
-| `danger-full-access` | Run Codex in Docker container |
-| YOLO mode | Audit log all auto-approved actions |
-| Credential exposure | Secret scanning on `claude-progress.txt` |
-| Budget drain | Hard stop at 95% daily budget |
-
-**Atomic State Writes:**
-
-```bash
-# Use write-to-temp-and-rename pattern
-write_state() {
-    local target="$1" content="$2"
-    local tmp="${target}.tmp.$$"
-    echo "$content" > "$tmp"
-    mv "$tmp" "$target"  # Atomic on same filesystem
-}
-```
-
-**Fallback Summarization:**
-
-- If Gemini fails during session refresh, dump raw context to timestamped file
-- Alert and preserve data for manual recovery
+**Commands:** `tri-agent start --mode=24hr` | `health` | `checkpoint` | `resume`
 
 ## Multi-Model Routing
 
@@ -590,6 +354,21 @@ write_state() {
 | Ultra Architecture      | Claude Opus Max | `/agents/ai-ml/claude-opus-max` - ultrathink 32K      |
 | Project Refactoring     | Codex Max       | `/agents/ai-ml/codex-max` - xhigh reasoning           |
 | Full Codebase Analysis  | Gemini Deep     | `/agents/ai-ml/gemini-deep` - gemini-3-pro 1M context |
+
+## Token Budget Management
+
+| Task Type           | Max Input | Max Output | Total Budget |
+| ------------------- | --------- | ---------- | ------------ |
+| Quick fix           | 10K       | 2K         | 12K          |
+| Standard feature    | 50K       | 10K        | 60K          |
+| Refactoring         | 100K      | 20K        | 120K         |
+| Architecture review | 150K      | 30K        | 180K         |
+
+**Model Selection for Cost:**
+
+- **Sonnet:** Default for 80% of tasks (best cost/quality)
+- **Opus:** Architecture, security, complex debugging only
+- **Haiku:** Linting, formatting, simple queries
 
 ## Extended Thinking Control
 
@@ -739,18 +518,12 @@ Author: Ahmed Adel Bakr Alderai
 ### Gemini CLI
 
 ```bash
-# CANONICAL COMMAND (always use this for tasks):
+# CANONICAL COMMAND (see "Maximum Capability Standards" for full syntax):
 gemini -m gemini-3-pro-preview --approval-mode yolo "prompt"
 
 # Session management
 gemini -r latest                      # Resume most recent session
 gemini --list-sessions                # List available sessions
-
-# Read-only analysis (YOLO allowed)
-gemini -m gemini-3-pro-preview --approval-mode yolo "Analyze: ..."
-
-# For modifications (use manual approval)
-gemini -m gemini-3-pro-preview "Implement: ..."
 ```
 
 ### Gemini Configuration File (~/.gemini/settings.json)
@@ -779,54 +552,20 @@ gemini -m gemini-3-pro-preview "Implement: ..."
 }
 ```
 
-### Gemini 3 Pro Setup & Usage
+### Gemini 3 Pro Setup
 
-**Requirements**:
+**Requirements:** CLI v0.18.x+ (`npm install -g @google/gemini-cli@latest`), AI Pro subscription, Preview Features enabled
+**Enable:** `gemini` → `/settings` → Enable Preview → `/model` → Select "Pro routing"
+**Routing:** Auto (Flash for simple, Pro for complex) or Pro routing (always most capable)
+**Limits:** Daily quota; `resets after Xh` shown in errors. Switch to 2.5 Pro or wait.
+**Best for:** 1M context analysis, multimodal tasks, agentic coding, documentation
 
-- Gemini CLI v0.18.x+ (`npm install -g @google/gemini-cli@latest`)
-- Google AI Pro/Ultra subscription OR paid Gemini API key
-- Preview Features enabled
-
-**Enable Gemini 3 Pro**:
-
-1. Run `gemini` interactively
-2. Type `/settings` → Enable "Preview Features"
-3. Type `/model` → Select "Pro routing" for Gemini 3 Pro priority
-4. Model shows as "Pro (gemini-3-pro, gemini-2.5-pro)"
-
-**Model Routing**:
-
-- **Auto routing** (default): Simple → 2.5 Flash, Complex → 3 Pro or 2.5 Pro
-- **Pro routing**: Always uses most capable model (Gemini 3 Pro when enabled)
-
-**Usage Limits**:
-
-- Daily limits apply; CLI notifies when reached
-- Options: Switch to 2.5 Pro, upgrade, or wait for reset
-- Quota resets shown in error message (e.g., "resets after 4h")
-
-**Best Use Cases for Gemini 3 Pro**:
-
-- Full codebase analysis (1M token context)
-- Complex multi-step reasoning
-- Multimodal tasks (images, PDFs, code repos)
-- Agentic coding with project scaffolding
-- Documentation generation from code
-
-### Gemini Native Sessions (Multi-turn Conversations)
-
-The CLI natively supports conversation history - no manual context management needed:
+### Gemini Sessions
 
 ```bash
-# Start a new conversation
-gemini -m gemini-3-pro-preview "Analyze the database schema"
-
-# Follow up (resumes latest session)
-gemini -m gemini-3-pro-preview -r latest "Generate migration scripts"
-
-# List/manage sessions
-gemini --list-sessions
-gemini --delete-session 3
+gemini -m gemini-3-pro-preview "Analyze..."       # New conversation
+gemini -m gemini-3-pro-preview -r latest "..."    # Resume latest session
+gemini --list-sessions                            # Manage sessions
 ```
 
 **Tip:** Use `-r latest` to maintain context across multiple commands without re-explaining the task.
@@ -850,11 +589,11 @@ unset GOOGLE_CLOUD_PROJECT
 ### Codex CLI (GPT-5.2)
 
 ```bash
-# CANONICAL COMMAND (workspace-write default):
+# CANONICAL COMMAND (see "Maximum Capability Standards" for full syntax):
 codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "task"
 
 # With o3 for complex reasoning:
-codex exec -m o3 -c 'model_reasoning_effort="xhigh"' "complex reasoning task"
+codex exec -m o3 -c 'model_reasoning_effort="xhigh"' -s workspace-write "complex reasoning task"
 
 # View help
 codex --help
@@ -1053,15 +792,15 @@ When in degraded mode:
 
 ### Retention Policies
 
-| Data Type    | Retention Period | Cleanup Frequency | Location                          |
-| ------------ | ---------------- | ----------------- | --------------------------------- |
-| Audit Logs   | 30 days          | Daily             | `~/.claude/logs/audit/`           |
-| Session Logs | 7 days           | Daily             | `~/.claude/logs/sessions.log`     |
-| Checkpoints  | 3 days           | Every 8 hours     | `~/.claude/sessions/checkpoints/` |
-| Snapshots    | 7 days           | Daily             | `~/.claude/sessions/snapshots/`   |
-| Task Files   | 14 days          | Daily             | `~/.claude/tasks/`                |
-| Metrics      | 90 days          | Weekly            | `~/.claude/metrics/`              |
-| Backups      | 30 days          | Daily             | `~/.claude/backups/`              |
+| Data Type    | Retention Period | Cleanup Frequency | Location                              |
+| ------------ | ---------------- | ----------------- | ------------------------------------- |
+| Audit Logs   | 365 days         | Weekly            | `~/.claude/logs/audit/` (append-only) |
+| Session Logs | 7 days           | Daily             | `~/.claude/logs/sessions.log`         |
+| Checkpoints  | 3 days           | Every 8 hours     | `~/.claude/sessions/checkpoints/`     |
+| Snapshots    | 7 days           | Daily             | `~/.claude/sessions/snapshots/`       |
+| Task Files   | 14 days          | Daily             | `~/.claude/tasks/`                    |
+| Metrics      | 90 days          | Weekly            | `~/.claude/metrics/`                  |
+| Backups      | 30 days          | Daily             | `~/.claude/backups/`                  |
 
 ### Automated Cleanup Script
 
@@ -1080,9 +819,10 @@ SESSION_DIR="${HOME}/.claude/sessions"
 # Rotate logs > 50MB
 find "$LOG_DIR" -name "*.log" -size +50M -exec gzip {} \;
 
-# Delete old audit logs
-find "$LOG_DIR/audit" -name "*.jsonl" -mtime +30 -delete
-find "$LOG_DIR/audit" -name "*.jsonl.gz" -mtime +90 -delete
+# Delete old audit logs (365 days for compliance, append-only)
+find "$LOG_DIR/audit" -name "*.jsonl" -mtime +365 -delete
+find "$LOG_DIR/audit" -name "*.jsonl.gz" -mtime +365 -delete
+chattr +a "$LOG_DIR/audit"/*.jsonl 2>/dev/null || true  # Enforce append-only
 
 # Delete old checkpoints
 find "$SESSION_DIR/checkpoints" -name "*.json" -mtime +3 -delete
@@ -1121,7 +861,151 @@ DISK_CRITICAL_THRESHOLD_GB=2 # Emergency stop if < 2GB free
 
 **Escalation:** CRITICAL→5min, HIGH→15min, MEDIUM→1hr, LOW→24hr
 
+## Debugging Aids (P3.6)
+
+### Correlation IDs
+
+All logs/tasks tagged with `CID:{session}-{task}-{agent}-{seq}` for end-to-end tracing.
+
+```bash
+# Generate: CID=$(printf "s%s-T%03d-%s-%03d" "$(date +%Y%m%d)" "$TASK_NUM" "$AGENT" "$SEQ")
+# Example: CID:s20260120-T042-claude-007
+# Search:  grep "CID:s20260120-T042" ~/.claude/logs/*.log | less
+```
+
+### Diagnostic Command (`tri-agent doctor`)
+
+```bash
+tri-agent doctor                      # Full health check
+tri-agent doctor --component gemini   # Single component
+tri-agent doctor --fix                # Auto-repair common issues
+```
+
+| Check            | Pass Criteria                   | Auto-Fix Action            |
+| ---------------- | ------------------------------- | -------------------------- |
+| CLI versions     | gemini >= 0.18, codex >= 1.0    | `npm update -g`            |
+| Auth credentials | OAuth tokens valid, not expired | Re-auth prompt             |
+| DB integrity     | `PRAGMA integrity_check = ok`   | `VACUUM; REINDEX`          |
+| Disk space       | >= 2GB free                     | Run cleanup script         |
+| Network          | API endpoints reachable         | DNS/proxy diagnostics      |
+| Stale processes  | No zombie PIDs                  | Kill stale, remove pidfile |
+
+### Last Failure Snapshot
+
+Auto-persisted to `~/.claude/debug/last-failure.json` on any task failure.
+
+```json
+{
+  "cid": "s20260120-T042-codex-007",
+  "ts": "2026-01-20T14:32:01Z",
+  "task": "T-042",
+  "agent": "codex",
+  "error": "timeout",
+  "exit": 124,
+  "stderr": "...last 50 lines...",
+  "tokens": 285000,
+  "retries": 2,
+  "git_sha": "abc123",
+  "env": { "TRI_AGENT_DEBUG": "1" }
+}
+```
+
+**Replay:** `tri-agent replay --from ~/.claude/debug/last-failure.json`
+
+### Debug Mode
+
+```bash
+TRI_AGENT_DEBUG=1 tri-agent start   # Verbose logging (stderr)
+TRI_AGENT_DEBUG=2 tri-agent start   # + API request/response bodies
+TRI_AGENT_TRACE=1 tri-agent start   # + Function-level tracing
+```
+
+### Common Error Patterns
+
+| Pattern                   | Cause                | Fix                                    |
+| ------------------------- | -------------------- | -------------------------------------- |
+| `exit 2` (gemini/codex)   | Auth expired/invalid | `gemini-switch` or `codex auth`        |
+| `exit 124` timeout        | Task too large       | Split task, `--timeout 600`            |
+| `SQLITE_BUSY`             | DB lock contention   | Reduce concurrency, add retry logic    |
+| `context_length_exceeded` | Token overflow       | Trigger session refresh, split context |
+| `429 Too Many Requests`   | Rate limit           | Backoff 2^n sec, check daily budget    |
+| 3+ verification FAILs     | Spec mismatch        | Escalate to user, re-clarify reqs      |
+
+## Metrics Tracking (P3.7)
+
+### Verification Pass Rate
+
+```bash
+tri-agent metrics --type verify --range 7d
+# Output: Pass: 94.2% | Fail: 4.1% | Inconclusive: 1.7% | Avg attempts: 1.3
+```
+
+| Metric             | Target | Alert Threshold |
+| ------------------ | ------ | --------------- |
+| First-attempt pass | >= 85% | < 75%           |
+| Max attempts       | <= 2   | > 3             |
+| Inconclusive rate  | < 5%   | > 10%           |
+
+### Approval Latency (Ready-to-Verified)
+
+```bash
+tri-agent metrics --type latency --range 24h
+# Output: P50: 42s | P90: 2m15s | P99: 7m30s
+```
+
+| Percentile | Target   | Alert Threshold |
+| ---------- | -------- | --------------- |
+| P50        | < 1 min  | > 2 min         |
+| P90        | < 5 min  | > 10 min        |
+| P99        | < 15 min | > 30 min        |
+
+### Cost per Task by Model
+
+```bash
+tri-agent metrics --type cost --range 30d --group-by model
+```
+
+| Model         | Avg $/Task | Daily Cap |
+| ------------- | ---------- | --------- |
+| Claude Opus   | $0.45      | $15       |
+| Claude Sonnet | $0.08      | $10       |
+| Gemini 3 Pro  | $0.02      | Unlimited |
+| Codex GPT-5.2 | $0.12      | $12       |
+
+**Alerts:** 70% daily cap → WARNING, 90% → PAUSE new tasks
+
+### Resource Utilization per Agent
+
+```bash
+tri-agent metrics --type utilization --live
+# Output: Claude: 78% | Codex: 65% | Gemini: 82% | Avg: 75%
+```
+
+| Metric           | Healthy    | Action if Outside |
+| ---------------- | ---------- | ----------------- |
+| CPU per agent    | 10-80%     | Scale or throttle |
+| Memory per agent | < 2GB      | Restart if > 4GB  |
+| Active/Max ratio | 60-90%     | Add/remove agents |
+| Queue depth      | < 20 tasks | Scale up if > 50  |
+
+### Test Coverage Delta per Task
+
+```bash
+tri-agent metrics --type coverage --task T-042
+# Output: Before: 78.2% | After: 81.5% | Delta: +3.3%
+```
+
+| Metric         | Requirement | Block If |
+| -------------- | ----------- | -------- |
+| Coverage delta | >= 0%       | < -1%    |
+| New code cov   | >= 80%      | < 60%    |
+| Critical paths | 100%        | < 100%   |
+
+**Enforcement:** Tasks reducing coverage are auto-flagged; merge blocked until resolved.
+
 ## Attribution Rules (CRITICAL)
+
+**Full details:** See `~/.claude/rules/attribution.md`
 
 **NEVER use "Generated with Claude Code" in commits, PRs, or documentation.**
 
@@ -1159,7 +1043,32 @@ All work should be attributed to the user only.
 **Anti-Patterns:** Use tiered agents (1/3/9 by complexity), prefer `git revert` over `reset --hard`
 **Defaults:** `workspace-write` (not danger), manual approval (not YOLO), start with 3 agents
 **Rate Limits:** Alert 70% → Pause 85% → Stop 95%
-**Context Handoff:** `RESULT=$(gemini -m gemini-3-pro-preview --approval-mode yolo "..."); codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Use: $RESULT"`
+**Context Handoff:** `RESULT=$(gemini ... --approval-mode yolo "Analyze"); codex exec ... "Use: $RESULT"`
+
+### Handoff vs Parallel Decision
+
+| Scenario                |   Handoff   | Parallel |
+| ----------------------- | :---------: | :------: |
+| Output feeds next input |      ✓      |    -     |
+| Independent subtasks    |      -      |    ✓     |
+| Context > 100K tokens   | ✓ (Gemini)  |    -     |
+| Verification needed     | ✓ (diff AI) |    -     |
+
+**Context limits:** Claude 150K, Codex 300K, Gemini 1M. Summarize if payload > 50% limit.
+
+### Multi-AI Context Handoff Pattern
+
+```bash
+# Method 1: Variable capture (preferred)
+ANALYSIS=$(gemini -m gemini-3-pro-preview --approval-mode yolo "Analyze: $TASK")
+codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Implement: $ANALYSIS"
+
+# Method 2: Temp file (for large outputs)
+gemini -m gemini-3-pro-preview --approval-mode yolo "Analyze: $TASK" > /tmp/analysis.txt
+codex exec -m gpt-5.2-codex -s workspace-write "Implement based on: $(cat /tmp/analysis.txt)"
+```
+
+**Truncate large outputs:** `echo "$RESULT" | head -c 50000`
 
 ## GEMINI MODEL ENFORCEMENT (CRITICAL)
 
