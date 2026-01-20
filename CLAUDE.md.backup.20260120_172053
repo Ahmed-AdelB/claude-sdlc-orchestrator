@@ -58,9 +58,9 @@
 ## ENFORCED MULTI-AGENT PARALLELISM (CRITICAL REQUIREMENT)
 
 ### Minimum Agent Requirements
-**Standard:** 9 concurrent agents (3 Claude + 3 Codex + 3 Gemini), 27 total per task.
-**Tiered by complexity:** 1 (trivial) → 3 (standard) → 9 (complex tasks).
-**Exception:** Degraded mode allows minimum 3 agents (see Graceful Degradation).
+**ALWAYS run at least 9 CONCURRENT agents** (3 Claude + 3 Codex + 3 Gemini) at ANY time.
+**Total invocations per task: 21 agents across 3 phases.**
+**CRITICAL: At least 9 agents (3×3) MUST be running simultaneously throughout ALL work.**
 
 | Activity Type | Min Concurrent | Distribution (3+3+3) |
 |--------------|----------------|----------------------|
@@ -68,10 +68,10 @@
 | **Implementation** | 9 | 3 Claude (core code, tests, docs) + 3 Codex (implement, optimize, validate) + 3 Gemini (review, context, security) |
 | **Verification** | 9 | 3 Claude (security, logic, edges) + 3 Gemini (context, patterns, regression) + 3 Codex (completeness, coverage, quality) |
 
-**TOTAL PER TASK: 27 agent invocations (9 per phase × 3 phases)**
+**TOTAL PER TASK: 21 agent invocations (7 per phase × 3 phases)**
 
 ### Enforcement Checklist (Before Marking ANY Task Complete)
-- [ ] **27 agents** were invoked across 3 phases (9 per phase)
+- [ ] **21 agents** were invoked across 3 phases (7 per phase)
 - [ ] **9+ concurrent** agents ran simultaneously at peak
 - [ ] All three AI models (Claude, Codex, Gemini) participated in EACH phase
 - [ ] Implementation was verified by at least **2 non-implementing AIs**
@@ -84,48 +84,23 @@
 
 ### 1. Gemini Maximum Capability (MANDATORY)
 ```bash
-# READ-ONLY (analysis, review, docs) - YOLO allowed:
-gemini -m gemini-3-pro-preview --approval-mode yolo "Analyze: ..."
-
-# MODIFICATIONS (code changes, git) - Manual approval:
-gemini -m gemini-3-pro-preview "Implement: ..."
+gemini -m pro -y "prompt"
+# OR
+gemini -m gemini-3-pro-preview --approval-mode yolo "prompt"
 ```
 - **1M token context**: Full codebase analysis
 - **Pro routing**: Always most capable model
-- **No Downgrade Rule:** Never use `gemini-1.5-flash` or shorthand `-m pro` (may misroute).
+- **High thinking**: Extended reasoning
+- **No Downgrade Rule:** Never use `gemini-1.5-flash` or standard `gemini-pro` unless explicitly instructed for a trivial task.
 
 ### 2. Codex Maximum Capability (MANDATORY)
 ```bash
-# DEFAULT (workspace-write) - Use for most tasks:
-codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "task"
-
-# ESCALATED (danger-full-access) - Only after checklist below:
 codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s danger-full-access "task"
 ```
 - **xhigh reasoning**: Maximum reasoning depth
 - **400K context**: Large codebase understanding
-- **No Downgrade Rule:** Never use `gpt-4o` or lower reasoning settings.
-
-**⚠️ danger-full-access Escalation Checklist:**
-Before using `-s danger-full-access`, verify ALL:
-- [ ] Task genuinely requires system-wide access (not just workspace)
-- [ ] Running in isolated container/VM (not host system)
-- [ ] Security review completed by second AI
-- [ ] Backup/checkpoint created before execution
-- [ ] Changes will be reviewed post-execution
-*Default to `-s workspace-write` unless all boxes checked.*
-
-**⚠️ YOLO Mode (`-y`/`--approval-mode yolo`) Policy:**
-| Operation Type | YOLO Allowed? | Rationale |
-|----------------|---------------|-----------|
-| Read-only analysis | ✅ Yes | No risk of modification |
-| Code review | ✅ Yes | Analysis only |
-| Documentation generation | ✅ Yes | Output can be reviewed |
-| File modifications | ❌ No | Requires explicit approval |
-| Git operations | ❌ No | Risk of data loss |
-| Deployments | ❌ No | Production impact |
-| System commands | ❌ No | Security risk |
-*Use YOLO only for read-only operations. For modifications, use manual approval.*
+- **Full access**: System-wide modifications
+- **No Downgrade Rule:** Never use `gpt-4o` or lower reasoning settings for implementation tasks.
 
 ### 3. Claude Maximum Capability (MANDATORY)
 - **Architecture/Security:** Use `ultrathink` (32K tokens)
@@ -134,91 +109,167 @@ Before using `-s danger-full-access`, verify ALL:
 - **No Downgrade Rule:** Do not turn off thinking mode for code generation.
 
 ### Enforcement Checklist (Capability Verification)
-- [ ] **Gemini:** Verified `-m gemini-3-pro-preview` is used
+- [ ] **Gemini:** Verified `-m pro` or `gemini-3-pro-preview` is used
 - [ ] **Codex:** Verified `xhigh` reasoning is active
 - [ ] **Claude:** Verified thinking mode is enabled
 - [ ] **Context:** Verified full relevant context was loaded
 - [ ] **Downgrade Check:** Confirmed no lower-tier models were selected
 
-## UNIFIED TRI-AGENT WORKFLOW PROTOCOL (MANDATORY)
+## TRI-AI ACTIVE TODO MANAGEMENT (CRITICAL)
 
-> **This protocol MUST be followed for EVERY task. NO EXCEPTIONS.**
+Every AI (Claude, Codex, Gemini) MUST:
+1. **Add new requirements** discovered during work
+2. **Update task status** in real-time
+3. **Break down complex tasks** into subtasks
+4. **Flag blockers** and dependencies
+5. **Record verification results**
 
-### Phase 1: Pre-Work Cross-AI Clarification
+## TRI-AI VERIFICATION WORKFLOW (MANDATORY)
 
-**BEFORE building any TODO list:**
+### Pre-Work Planning Protocol (Zero-Assumption Rule)
+**BEFORE starting ANY work, the following steps are MANDATORY:**
+
+1. **Cross-AI Clarification (Zero-Assumption Rule):**
+   - You MUST ask Gemini or Codex to explain the requirements back to you to ensure shared understanding.
+   - *Command:* `gemini "Explain the core requirements and potential edge cases for: [task description]"`
+   - *Command:* `codex exec "Analyze technical constraints for: [task description]"`
+
+2. **Build Comprehensive TODO List:**
+   - Build todo list **based on the AI explanations**, not just the user prompt
+   - Include ALL tasks from analysis/plans
+   - Include specific "Clarification" items if any ambiguity remains
+   - Consider all 3 AIs (Claude, Codex, Gemini) for implementation
+
+3. **User Approval Gate:**
+   - Present the AI-verified understanding and todo list to the user
+   - **STOP** and wait for approval before executing any code
+   - If changes requested, update and re-present
+
+### Verification Before Completion
+**NO todo item is considered DONE until:**
+1. **Implementation complete** by primary AI
+2. **Verification by different AI** - Ask Gemini OR Codex to verify
+3. **Both AIs agree** the task is correctly implemented
+4. **Update todo status** only after verification passes
+
+### Verification Commands
 ```bash
-gemini -m gemini-3-pro-preview --approval-mode yolo "Explain requirements, edge cases, challenges for: [task]"
-codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Analyze implementation steps and dependencies for: [task]"
-```
-Synthesize both perspectives before proceeding.
+# Ask Gemini to verify
+gemini -y "Verify this implementation is correct: [description]. Check for: correctness, security, edge cases. Report PASS/FAIL with reasons."
 
-### Phase 2: Build Complete TODO List
-
-**NO work begins until TODO is 100% complete:**
-1. Extract ALL tasks from plans and AI clarifications
-2. Break complex tasks into verifiable subtasks
-3. Assign each task to Claude, Codex, or Gemini (distribute evenly)
-4. Assign DIFFERENT AI as verifier for each task
-
-| AI | Assign For |
-|----|------------|
-| **Claude** | Core logic, architecture, security |
-| **Codex** | Scripts, tests, APIs, prototyping |
-| **Gemini** | Codebase analysis, docs, reviews |
-
-### Phase 3: User Approval Gate (BLOCKING)
-
-Present to user and **STOP**:
-- Complete TODO table with AI assignments
-- Scope and approach summary
-- **DO NOT proceed without explicit "approved"**
-
-**During work, pause for:** Scope changes, security-sensitive ops, budget impacts.
-
-### Phase 4: Implementation with Verification
-
-**NO task is DONE until:**
-1. Implementation complete by assigned AI
-2. Verification by DIFFERENT AI reports PASS/FAIL
-3. Status updated only after verification passes
-
-```bash
-gemini -m gemini-3-pro-preview --approval-mode yolo "Verify: [desc]. Check correctness, security, edges. PASS/FAIL."
-codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Verify: [desc]. Check logic, completeness. PASS/FAIL."
+# Ask Codex to verify
+codex exec -m gpt-5.2-codex "Verify this implementation: [description]. Check: logic, security, completeness. Report PASS/FAIL."
 ```
 
-### TODO Table Format
+### Todo Building Rules
+- **Never start work** with incomplete todo list
+- **Break down** complex tasks into verifiable subtasks
+- **Assign AI** to each task (Claude/Codex/Gemini)
+- **Assign verifier** to each task (different AI than implementer)
+- **Track status**: pending → in_progress → verification → completed
+
+## STRICT TRI-AGENT WORKFLOW PROTOCOL (MANDATORY)
+
+> **This protocol MUST be followed for EVERY task. No exceptions.**
+
+### Todo-First Enforcement (BLOCKING)
+
+**BEFORE starting ANY work, you MUST:**
+
+1. **Build Complete TODO List**
+   - Convert ENTIRE plan to granular tasks
+   - NO work begins until TODO list is complete
+   - Each task must have: ID, Description, Assigned AI, Verifier AI
+
+2. **Cross-AI Clarification (MANDATORY)**
+   ```bash
+   # Ask BOTH Gemini and Codex to clarify requirements
+   gemini -y "Explain what the user needs for: [requirement]. Clarify any ambiguities."
+   codex exec "Interpret this requirement: [requirement]. List specific implementation steps."
+   ```
+   - Incorporate clarifications into TODO list
+   - Do NOT skip this step
+
+3. **User Approval Gate**
+   - Present complete TODO list to user
+   - Show AI assignments and verifiers
+   - Get EXPLICIT approval before proceeding
+   - If changes requested, update and re-present
+
+### Multi-Agent Assignment (REQUIRED)
+
+**ALL tasks must use the 3-AI ecosystem:**
+
+| AI | Strengths | Assign For |
+|----|-----------|------------|
+| **Claude** | Architecture, orchestration, complex reasoning | Core logic, integration, security |
+| **Codex** | Implementation, prototyping, validation | Scripts, tests, API work |
+| **Gemini** | Large context, documentation, patterns | Codebase analysis, docs, reviews |
+
+**Assignment Rules:**
+- Every TODO must have `Assigned AI` + `Verifier AI`
+- Verifier MUST be different from Assigned AI
+- Distribute tasks across all 3 AIs (not all to one)
+
+## TODO LIST FORMAT SPECIFICATION (MANDATORY)
+
+### Required Table Structure
 
 ```markdown
-| ID | Task | Assigned | Verifier | Status | V |
-|----|------|:--------:|:--------:|:------:|:-:|
-| T-001 | [Description] | Claude/Codex/Gemini | [Different AI] | [Status] | [ ] |
+| ID | Task | Assigned AI | Verifier AI | Status | Verified |
+|----|------|:-----------:|:-----------:|:------:|:--------:|
+| T1 | [Description] | Claude/Codex/Gemini | [Different AI] | [Status] | [ ] |
 ```
 
-**Example:**
-| ID | Task | Assigned | Verifier | Status | V |
-|----|------|:--------:|:--------:|:------:|:-:|
-| T-001 | Design webhook schema | Claude | Gemini | Completed | [x] |
-| T-002 | Implement idempotency | Codex | Claude | Verified | [x] |
-| T-003 | Add retry logic | Claude | Codex | Ready for Verify | [ ] |
-| T-004 | Create refund endpoint | Codex | Gemini | In Progress | [ ] |
-| T-005 | Write integration tests | Gemini | Claude | Pending | [ ] |
+### Status Flow
 
-**Status Flow:** `Pending → In Progress → Ready for Verify → Verified → Completed`
+```
+Pending → In Progress → Ready for Verify → Verified → Completed
+```
+
+### Status Definitions
 
 | Status | Meaning | Next Action |
 |--------|---------|-------------|
 | `Pending` | Not started | Begin work |
 | `In Progress` | Work underway | Complete implementation |
-| `Ready for Verify` | Awaiting verification | Request verification |
-| `Verified` | PASSED | Mark completed |
+| `Ready for Verify` | Implementation done | Request verification |
+| `Verified` | Verification PASSED | Mark completed |
 | `Blocked` | Cannot proceed | Resolve blocker |
 | `Failed` | Verification FAILED | Fix and re-verify |
 
-**Verification Marks:** `[ ]` pending | `[x]` passed | `[!]` failed
+### Verification Checkbox Rules
 
-**Runtime:** Every AI MUST continuously add discovered requirements, update status in real-time, flag blockers, record verification results.
+- `[ ]` = Not verified
+- `[x]` = Verified by assigned verifier
+- `[!]` = Verification failed, needs rework
+
+## USER APPROVAL GATE (MANDATORY)
+
+### Before Work Begins
+
+**NO implementation starts until user approves:**
+
+1. **Present TODO List** with:
+   - All tasks from plan/analysis
+   - AI assignments for each task
+   - Verifier assignments
+   - Estimated complexity
+
+2. **Ask for Approval** using AskUserQuestion tool
+
+3. **If Modified:**
+   - Update TODO list
+   - Re-present for approval
+   - Repeat until approved
+
+### During Work
+
+**Pause and get approval for:**
+- Scope changes (new requirements discovered)
+- Major approach changes
+- Security-sensitive operations
+- Budget-impacting decisions
 
 ## VERIFICATION PROTOCOL (TWO-KEY RULE) — Enhanced
 
@@ -244,16 +295,6 @@ VERIFY:
 - Any change after a FAIL requires a **fresh** verification request.
 - The verifier must re-run the **full** scope (no partial "spot checks").
 
-**FAIL Example:**
-```
-VERIFICATION RESULT: FAIL
-Issues Found:
-1. CRITICAL - Token expiration not enforced (line 47)
-2. HIGH - Token not invalidated after use (line 89)
-Required: Fix both issues, re-run tests, submit fresh VERIFY
-Verifier: Codex (GPT-5.2)
-```
-
 ## STALEMATE RESOLUTION PROTOCOL
 
 **Trigger:** Implementer and verifier disagree after a verification cycle.
@@ -275,7 +316,7 @@ Verifier: Codex (GPT-5.2)
 - The change is no longer aligned with user intent.
 
 **How to rollback:**
-- **Git revert** (preferred): `git revert <bad-commit>` (reversible, preserves history)
+- **Git reset** (if committed): `git reset --hard <last-good-commit>`
 - **Checkpoint restore**: Restore to last known-good checkpoint.
 
 **Post‑rollback verification:**
@@ -312,16 +353,6 @@ Verifier: Codex (GPT-5.2)
 - **Recent Action:** [One sentence summary]
 - **Next Step:** [Immediate next action]
 - **Issues:** [None / Description of blocker]
-```
-
-## SESSION INITIALIZATION (MANDATORY)
-
-Before starting work, verify:
-```bash
-node -v && python --version && git --version  # Tools present
-git status                                     # Clean git state
-sqlite3 state/tri-agent.db "PRAGMA integrity_check;"  # DB OK
-test -f ~/.gemini/oauth_creds.json && echo "Gemini OK"  # Creds exist
 ```
 
 ## 24-HOUR CONTINUOUS OPERATION (CRITICAL)
@@ -377,13 +408,13 @@ check_context_health() {
     esac
     if [[ $tokens_used -gt $limit ]]; then
         create_session_checkpoint
-        gemini -m gemini-3-pro-preview --approval-mode yolo "Summarize session state: $(cat claude-progress.txt)"
+        gemini -y "Summarize session state: $(cat claude-progress.txt)"
         refresh_session
     fi
 }
 ```
 
-**Context Overflow Failover:**
+**Model Failover Chain:**
 ```
 Claude Sonnet (200K) → Gemini Pro (1M) → Split into sub-tasks
 ```
@@ -439,9 +470,9 @@ Layer 3: tri-24-monitor (24-hour guardian)
 **Daily Token Budgets:**
 | Model | Daily Limit | Hourly Average | Alert Threshold |
 |-------|-------------|----------------|-----------------|
-| Claude Max | ~100M tokens | 4.2M/hour | 70% daily |
+| Claude Max | ~100M tokens | 4.2M/hour | 80% daily |
 | Gemini Pro | Unlimited* | N/A | API rate limits |
-| Codex | ~50M tokens | 2.1M/hour | 70% daily |
+| Codex | ~50M tokens | 2.1M/hour | 80% daily |
 
 **Budget Reset Schedule:**
 - Claude: Rolling 5-hour window + 7-day weekly cap
@@ -509,7 +540,7 @@ tri-agent session-refresh --summarize
 - **Disk Free Space Floor:** 2GB (emergency stop if crossed)
 
 **Emergency Dead Man's Switch:**
-- **Mechanism:** `tri-24-monitor` must touch `~/.claude/heartbeat` every 30s
+- **Mechanism:** `tri-24-monitor` must touch `~/.claude/heartbeat` every 60s
 - **Systemd/Cron Action:** If file age > 5m, kill all `tri-agent` processes and restart `watchdog-master`
 
 ### Large Repository Protocol (8GB+ Support)
@@ -584,20 +615,11 @@ write_state() {
 | Project Refactoring     | Codex Max       | `/agents/ai-ml/codex-max` - xhigh reasoning           |
 | Full Codebase Analysis  | Gemini Deep     | `/agents/ai-ml/gemini-deep` - gemini-3-pro 1M context |
 
-## Extended Thinking Control
+## Thinking Mode Escalation
 
-**Toggle:** `Alt+T` (Linux/Win) or `Option+T` (Mac)
-**Configure:** `/config` → set thinking default
-**View thinking:** `Ctrl+O` (verbose mode)
-**Budget:** `export MAX_THINKING_TOKENS=32000`
-
-| Budget | Use Case |
-|--------|----------|
-| 4K-10K | Simple reasoning |
-| 16K-32K | Complex tasks, debugging |
-| 32K+ | Architecture, security audits |
-
-**Note:** Phrases like "think hard" or "ultrathink" do NOT allocate thinking tokens. Use the settings above.
+- Standard: `think` (4K tokens) - Simple tasks
+- Extended: `think hard` (10K tokens) - Complex logic
+- Maximum: `ultrathink` (32K tokens) - Architecture, debugging
 
 ## Slash Commands
 
@@ -697,22 +719,6 @@ Tri-Agent Approval:
 Author: Ahmed Adel Bakr Alderai
 ```
 
-**Example:**
-```
-feat(auth): implement OAuth2 PKCE flow for mobile clients
-
-Adds PKCE support to prevent authorization code interception
-attacks on mobile devices. Includes code_verifier generation,
-SHA256 challenge, and state validation.
-
-Tri-Agent Approval:
-- Claude (Sonnet): APPROVE - Architecture follows RFC 7636
-- Codex (GPT-5.2): APPROVE - Tests pass
-- Gemini (3 Pro): APPROVE - Security reviewed
-
-Author: Ahmed Adel Bakr Alderai
-```
-
 ## MCP Servers
 
 - **git**: Version control operations
@@ -725,18 +731,26 @@ Author: Ahmed Adel Bakr Alderai
 ### Gemini CLI
 
 ```bash
-# CANONICAL COMMAND (always use this for tasks):
-gemini -m gemini-3-pro-preview --approval-mode yolo "prompt"
+# Basic usage - both work
+gemini "your prompt here"             # Positional argument
+gemini -p "your prompt here"          # -p flag (still works)
 
-# Session management
+# With auto-approve (YOLO mode)
+gemini -y "prompt"                    # Auto-approve all tools
+gemini --approval-mode yolo "prompt"  # Same as -y
+
+# Gemini 3 Pro (requires Preview Features enabled)
+gemini -m gemini-3-pro-preview "prompt"  # Correct model ID
+gemini -m pro "prompt"                    # Shorthand for pro model (auto-routes)
+
+# Combined flags
+gemini -m pro -y "prompt"                          # Pro model + auto-approve
+gemini -m gemini-3-pro-preview --approval-mode yolo "prompt"  # Explicit model + YOLO
+
+# Resume previous session
 gemini -r latest                      # Resume most recent session
+gemini --resume 5                     # Resume session by index
 gemini --list-sessions                # List available sessions
-
-# Read-only analysis (YOLO allowed)
-gemini -m gemini-3-pro-preview --approval-mode yolo "Analyze: ..."
-
-# For modifications (use manual approval)
-gemini -m gemini-3-pro-preview "Implement: ..."
 ```
 
 ### Gemini Configuration File (~/.gemini/settings.json)
@@ -805,13 +819,18 @@ The CLI natively supports conversation history - no manual context management ne
 
 ```bash
 # Start a new conversation
-gemini -m gemini-3-pro-preview "Analyze the database schema"
+gemini "Analyze the database schema"
 
-# Follow up (resumes latest session)
-gemini -m gemini-3-pro-preview -r latest "Generate migration scripts"
+# Follow up on the same context (resumes latest session)
+gemini -r latest "Now generate migration scripts based on your analysis"
 
-# List/manage sessions
+# List available sessions
 gemini --list-sessions
+
+# Resume a specific older session by index
+gemini --resume 5 "Continue with the refactoring we discussed"
+
+# Delete old sessions
 gemini --delete-session 3
 ```
 
@@ -831,19 +850,24 @@ gemini-switch
 unset GOOGLE_CLOUD_PROJECT
 ```
 
-**Credentials Location:** `~/.gemini/oauth_creds.json` (ensure `chmod 600`)
+**Credentials Location:** `~/.gemini/oauth_creds.json`
 
 ### Codex CLI (GPT-5.2)
 
 ```bash
-# CANONICAL COMMAND (workspace-write default):
-codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "task"
+# Non-interactive execution
+codex exec "task description"
+codex exec "Implement feature X" src/component.py
 
-# With o3 for complex reasoning:
-codex exec -m o3 -c 'model_reasoning_effort="xhigh"' "complex reasoning task"
+# With specific model
+codex exec -m o3 "complex reasoning task"
+
+# MAXIMUM CONFIGURATION - GPT-5.2-Codex with xhigh reasoning
+codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s danger-full-access "task"
 
 # View help
 codex --help
+codex exec --help
 ```
 
 ### Codex Configuration File (~/.codex/config.toml)
@@ -863,29 +887,11 @@ sandbox_mode = "workspace-write"   # Or "danger-full-access" for full system acc
 ```bash
 # 1. Claude (primary orchestration) - Direct in Claude Code
 # 2. Codex (implementation)
-codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Implement: <task>"
+codex exec "Review and implement: <task>"
 
-# 3. Gemini (validation/security - read-only, YOLO OK)
-gemini -m gemini-3-pro-preview --approval-mode yolo "Review for security: <code>"
+# 3. Gemini (validation/security)
+gemini -y "Review for security issues: <code>"
 ```
-
-### CLI Error Handling
-
-| Exit Code | Meaning | Recovery |
-|-----------|---------|----------|
-| `0` | Success | Proceed |
-| `1` | General error | Check syntax |
-| `2` | Auth failed | `gemini-switch` or `codex auth` |
-| `124` | Timeout | Increase timeout or split task |
-| `429` | Rate limited | Backoff: wait 2^n seconds |
-
-### Timeout Specifications
-
-| Operation | Default | Max |
-|-----------|---------|-----|
-| Gemini CLI | 120s | 600s |
-| Codex CLI | 180s | 600s |
-| Full task | 1800s | 3600s |
 
 ## Code Style
 
@@ -1058,10 +1064,6 @@ When in degraded mode:
 LOG_DIR="${HOME}/.claude/logs"
 SESSION_DIR="${HOME}/.claude/sessions"
 
-# Safety: Validate paths exist
-[[ -d "$LOG_DIR" ]] || { echo "ERROR: LOG_DIR missing"; exit 1; }
-[[ -d "$SESSION_DIR" ]] || { echo "ERROR: SESSION_DIR missing"; exit 1; }
-
 # Rotate logs > 50MB
 find "$LOG_DIR" -name "*.log" -size +50M -exec gzip {} \;
 
@@ -1106,6 +1108,88 @@ DISK_CRITICAL_THRESHOLD_GB=2 # Emergency stop if < 2GB free
 
 **Escalation:** CRITICAL→5min, HIGH→15min, MEDIUM→1hr, LOW→24hr
 
+## TODO-FIRST PROTOCOL (BLOCKING REQUIREMENT)
+
+**This protocol MUST be followed for EVERY task. NO EXCEPTIONS.**
+
+### Phase 1: Cross-AI Requirements Clarification (MANDATORY)
+
+**BEFORE building any TODO list, you MUST:**
+
+1. **Ask Gemini to explain requirements:**
+   ```bash
+   gemini -m pro -y "Explain in detail what the user needs for: [task]. List all requirements, edge cases, and potential challenges."
+   ```
+
+2. **Ask Codex to analyze implementation steps:**
+   ```bash
+   codex exec -m gpt-5.2-codex "Analyze the requirements for: [task]. List specific implementation steps, dependencies, and technical considerations."
+   ```
+
+3. **Synthesize both perspectives** into a unified understanding before building TODO
+
+### Phase 2: Build Complete TODO List (BEFORE ANY WORK)
+
+**CRITICAL: NO work starts until TODO is 100% complete**
+
+1. **Extract EVERY task** from all plans, research, and AI clarifications
+2. **Break down complex tasks** into granular, verifiable subtasks
+3. **Assign ALL 3 AIs** to implementation:
+   - Distribute tasks across Claude, Codex, and Gemini
+   - NO single AI should do all the work
+4. **Assign different AI as verifier** for each task:
+   - Verifier MUST be different from implementer
+   - Record verifier in TODO table
+
+### Phase 3: User Approval Gate (BLOCKING)
+
+**STOP and wait for explicit user approval:**
+
+1. Present the complete TODO list
+2. Explain scope, approach, and AI assignments
+3. **DO NOT proceed without "approved" or similar confirmation**
+4. If changes requested, update TODO and re-present
+
+### Phase 4: Implementation with Verification
+
+**NO task is considered DONE until:**
+
+1. Implementation completed by assigned AI
+2. **Verification by DIFFERENT AI** (Gemini or Codex must verify Claude's work, etc.)
+3. Verification result recorded (PASS/FAIL)
+4. Only then update status to "completed"
+
+### Verification Commands (Use These)
+
+```bash
+# Gemini verifies implementation
+gemini -m pro -y "Verify this implementation is correct: [description]. Check for: correctness, security, edge cases. Report PASS/FAIL with reasons."
+
+# Codex verifies implementation
+codex exec -m gpt-5.2-codex "Verify this implementation: [description]. Check: logic, security, completeness. Report PASS/FAIL."
+```
+
+### TODO Table Format (Required)
+
+```markdown
+| ID | Task | Assigned AI | Verifier AI | Status | Verified |
+|----|------|:-----------:|:-----------:|:------:|:--------:|
+| T-001 | [Description] | Claude/Codex/Gemini | [Different AI] | Pending/In Progress/Completed | [ ]/[x] |
+```
+
+### Checklist Before Starting ANY Work
+
+- [ ] Asked Gemini to explain requirements
+- [ ] Asked Codex to analyze implementation steps
+- [ ] Built complete TODO with ALL tasks from plans
+- [ ] Assigned all 3 AIs (Claude, Codex, Gemini) to tasks
+- [ ] Assigned different AI as verifier for each task
+- [ ] Presented TODO to user
+- [ ] Received explicit user approval
+- [ ] Only then started implementation
+
+**VIOLATION OF THIS PROTOCOL IS NOT ALLOWED**
+
 ## Attribution Rules (CRITICAL)
 
 **NEVER use "Generated with Claude Code" in commits, PRs, or documentation.**
@@ -1133,15 +1217,6 @@ Ahmed Adel Bakr Alderai
 - Any AI attribution
 
 All work should be attributed to the user only.
-
-## OPERATIONAL BEST PRACTICES
-
-**Full details:** See `~/.claude/context/advanced-protocols.md`
-
-**Anti-Patterns:** Use tiered agents (1/3/9 by complexity), prefer `git revert` over `reset --hard`
-**Defaults:** `workspace-write` (not danger), manual approval (not YOLO), start with 3 agents
-**Rate Limits:** Alert 70% → Pause 85% → Stop 95%
-**Context Handoff:** `RESULT=$(gemini -m gemini-3-pro-preview --approval-mode yolo "..."); codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Use: $RESULT"`
 
 ## GEMINI MODEL ENFORCEMENT (CRITICAL)
 
@@ -1172,7 +1247,7 @@ check_gemini_config() {
 Before running any Gemini agents, verify:
 1. `~/.gemini/settings.json` has `"preferredModel": "gemini-3-pro-preview"`
 2. All scripts use `-m gemini-3-pro-preview --approval-mode yolo`
-3. Test with: `gemini -m gemini-3-pro-preview --approval-mode yolo "What model are you?"`
+3. Test with: `gemini -m gemini-3-pro-preview -y "What model are you?"`
 
 ### Automated Fix Script
 ```bash
