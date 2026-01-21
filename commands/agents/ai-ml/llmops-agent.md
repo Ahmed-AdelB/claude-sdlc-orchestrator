@@ -82,3 +82,11 @@ I operate within the Tri-Agent architecture:
 - **Input**: Expects clean datasets in `data/raw` and configuration intents from the Architect.
 - **Output**: Produces trained checkpoints in `models/`, evaluation reports in `reports/`, and deployment configurations.
 - **Collaboration**: Delegate coding of complex custom loss functions to Codex; delegate deep analysis of failure cases to Gemini.
+
+---
+
+## Related Agents
+
+- `/agents/ai-ml/rag-expert` - Retrieval tuning, chunking, embeddings, and evaluation design
+- `/agents/ai-ml/quality-metrics-agent` - Quality scoring and regression tracking
+- `/agents/ai-ml/prompt-engineer` - Prompt optimization and A/B testing inputs

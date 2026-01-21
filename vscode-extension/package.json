@@ -1,0 +1,300 @@
+{
+  "name": "tri-agent-vscode",
+  "displayName": "Tri-Agent Integration",
+  "description": "VS Code integration for Claude, Codex, and Gemini tri-agent workflow",
+  "version": "1.0.0",
+  "publisher": "ahmed-alderai",
+  "author": {
+    "name": "Ahmed Adel Bakr Alderai"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahmed-alderai/tri-agent-vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "claude",
+    "codex",
+    "gemini",
+    "tri-agent",
+    "code-review",
+    "security"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "triAgent.secure",
+        "title": "Tri-Agent: Security Review",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "triAgent.testGen",
+        "title": "Tri-Agent: Generate Tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "triAgent.review",
+        "title": "Tri-Agent: Code Review",
+        "icon": "$(code-review)"
+      },
+      {
+        "command": "triAgent.analyze",
+        "title": "Tri-Agent: Analyze Code",
+        "icon": "$(search)"
+      },
+      {
+        "command": "triAgent.implement",
+        "title": "Tri-Agent: Implement Feature",
+        "icon": "$(add)"
+      },
+      {
+        "command": "triAgent.refactor",
+        "title": "Tri-Agent: Refactor Code",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "triAgent.explain",
+        "title": "Tri-Agent: Explain Code",
+        "icon": "$(info)"
+      },
+      {
+        "command": "triAgent.showPanel",
+        "title": "Tri-Agent: Show Agent Panel",
+        "icon": "$(robot)"
+      },
+      {
+        "command": "triAgent.showCostEstimate",
+        "title": "Tri-Agent: Show Cost Estimate",
+        "icon": "$(credit-card)"
+      },
+      {
+        "command": "triAgent.cancelTask",
+        "title": "Tri-Agent: Cancel Current Task",
+        "icon": "$(close)"
+      },
+      {
+        "command": "triAgent.viewLogs",
+        "title": "Tri-Agent: View Logs",
+        "icon": "$(output)"
+      },
+      {
+        "command": "triAgent.refreshStatus",
+        "title": "Tri-Agent: Refresh Status",
+        "icon": "$(refresh)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "triAgent.secure",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "triAgent.testGen",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "triAgent.review",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "triAgent.analyze",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "triAgent.showPanel",
+        "key": "ctrl+shift+p",
+        "mac": "cmd+shift+p",
+        "when": "editorFocus"
+      },
+      {
+        "command": "triAgent.cancelTask",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "submenu": "triAgent.submenu",
+          "group": "triAgent"
+        }
+      ],
+      "triAgent.submenu": [
+        {
+          "command": "triAgent.secure",
+          "group": "1_security"
+        },
+        {
+          "command": "triAgent.testGen",
+          "group": "2_testing"
+        },
+        {
+          "command": "triAgent.review",
+          "group": "3_review"
+        },
+        {
+          "command": "triAgent.analyze",
+          "group": "4_analyze"
+        },
+        {
+          "command": "triAgent.refactor",
+          "group": "5_refactor"
+        },
+        {
+          "command": "triAgent.explain",
+          "group": "6_explain"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "triAgent.showPanel",
+          "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "triAgent.refreshStatus",
+          "when": "view == triAgentStatus",
+          "group": "navigation"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "triAgent.submenu",
+        "label": "Tri-Agent"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "triAgent",
+          "title": "Tri-Agent",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "triAgent": [
+        {
+          "id": "triAgentStatus",
+          "name": "Agent Status",
+          "type": "webview"
+        },
+        {
+          "id": "triAgentTasks",
+          "name": "Active Tasks"
+        },
+        {
+          "id": "triAgentCosts",
+          "name": "Cost Tracking"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Tri-Agent",
+      "properties": {
+        "triAgent.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Path to Claude Code CLI executable"
+        },
+        "triAgent.codexPath": {
+          "type": "string",
+          "default": "codex",
+          "description": "Path to Codex CLI executable"
+        },
+        "triAgent.geminiPath": {
+          "type": "string",
+          "default": "gemini",
+          "description": "Path to Gemini CLI executable"
+        },
+        "triAgent.defaultModel": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "gemini",
+            "auto"
+          ],
+          "default": "auto",
+          "description": "Default AI model for tasks"
+        },
+        "triAgent.showCostEstimates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show cost estimates before executing tasks"
+        },
+        "triAgent.autoRefreshInterval": {
+          "type": "number",
+          "default": 30,
+          "description": "Auto-refresh interval for status panel (seconds)"
+        },
+        "triAgent.maxConcurrentAgents": {
+          "type": "number",
+          "default": 9,
+          "description": "Maximum concurrent agent instances"
+        },
+        "triAgent.budgetWarningThreshold": {
+          "type": "number",
+          "default": 70,
+          "description": "Budget warning threshold percentage"
+        },
+        "triAgent.enableTelemetry": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable anonymous usage telemetry"
+        },
+        "triAgent.logsDirectory": {
+          "type": "string",
+          "default": "~/.claude/logs",
+          "description": "Directory for tri-agent logs"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "@vscode/test-electron": "^2.3.8",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^8.55.0",
+    "typescript": "^5.3.2"
+  },
+  "dependencies": {
+    "glob": "^10.3.10"
+  }
+}

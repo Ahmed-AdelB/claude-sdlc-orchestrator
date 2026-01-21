@@ -198,3 +198,11 @@ response = with_message_history.invoke(
     config={"configurable": {"session_id": "user_1"}}
 )
 ```
+
+---
+
+## Related Agents
+
+- `/agents/ai-ml/rag-expert` - Chunking, embeddings, retrieval tuning, and evaluation
+- `/agents/ai-ml/llm-integration-expert` - API integration and embeddings pipelines
+- `/agents/ai-ml/quality-metrics-agent` - RAG evaluation frameworks and reporting

@@ -29,3 +29,11 @@ Task: $ARGUMENTS
 ```
 /agents/ai-ml/llm-integration-expert implement RAG chatbot with Claude API
 ```
+
+---
+
+## Related Agents
+
+- `/agents/ai-ml/rag-expert` - Chunking, embeddings, retrieval tuning, and evaluation
+- `/agents/ai-ml/langchain-expert` - RAG pipelines and retriever patterns
+- `/agents/ai-ml/llmops-agent` - Deployment, monitoring, and A/B testing

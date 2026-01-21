@@ -1,0 +1,402 @@
+# Tri-Agent Prometheus Alert Rules
+# Location: /home/aadel/.claude/dashboards/prometheus/alerts.yml
+#
+# These rules should be loaded by Prometheus via the rule_files configuration:
+#   rule_files:
+#     - "/path/to/alerts.yml"
+
+groups:
+  # ============================================================================
+  # Error Rate Alerts
+  # ============================================================================
+  - name: tri_agent_errors
+    interval: 30s
+    rules:
+      # High error rate - CRITICAL
+      - alert: TriAgentHighErrorRate
+        expr: |
+          (
+            sum(rate(tri_agent_tasks_total{status="failed"}[5m]))
+            /
+            sum(rate(tri_agent_tasks_total[5m]))
+          ) * 100 > 10
+        for: 5m
+        labels:
+          severity: critical
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent error rate exceeds 10%"
+          description: |
+            Error rate is {{ $value | printf "%.2f" }}% (threshold: 10%)
+            This indicates a systemic issue with task execution.
+          runbook_url: "https://docs.internal/runbooks/tri-agent-errors"
+          dashboard_url: "https://grafana.internal/d/tri-agent-overview"
+
+      # Elevated error rate - WARNING
+      - alert: TriAgentElevatedErrorRate
+        expr: |
+          (
+            sum(rate(tri_agent_tasks_total{status="failed"}[5m]))
+            /
+            sum(rate(tri_agent_tasks_total[5m]))
+          ) * 100 > 5
+        for: 10m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent error rate elevated above 5%"
+          description: |
+            Error rate is {{ $value | printf "%.2f" }}% (threshold: 5%)
+            Monitor closely and investigate root cause.
+
+      # Consecutive failures - CRITICAL
+      - alert: TriAgentConsecutiveFailures
+        expr: |
+          increase(tri_agent_tasks_total{status="failed"}[10m]) >= 5
+          and
+          increase(tri_agent_tasks_total{status="completed"}[10m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: ai-ops
+        annotations:
+          summary: "5+ consecutive task failures detected"
+          description: |
+            No successful tasks in the last 10 minutes while failures are occurring.
+            Possible systemic issue - investigate immediately.
+
+  # ============================================================================
+  # Budget and Cost Alerts
+  # ============================================================================
+  - name: tri_agent_budget
+    interval: 1m
+    rules:
+      # Budget 70% threshold - WARNING
+      - alert: TriAgentBudget70Percent
+        expr: (sum(tri_agent_cost_total) / 420) * 100 >= 70
+        for: 1m
+        labels:
+          severity: warning
+          team: ai-ops
+          budget_level: "70"
+        annotations:
+          summary: "Tri-Agent budget at 70% - Review spending"
+          description: |
+            Monthly budget usage: {{ $value | printf "%.1f" }}%
+            Spent: ${{ printf "%.2f" (mul $value 4.2) }} of $420
+            Remaining: ${{ printf "%.2f" (mul (sub 100 $value) 4.2) }}
+            Action: Review spending patterns and optimize if needed.
+
+      # Budget 85% threshold - HIGH
+      - alert: TriAgentBudget85Percent
+        expr: (sum(tri_agent_cost_total) / 420) * 100 >= 85
+        for: 1m
+        labels:
+          severity: high
+          team: ai-ops
+          budget_level: "85"
+        annotations:
+          summary: "Tri-Agent budget at 85% - Pause non-critical tasks"
+          description: |
+            Monthly budget usage: {{ $value | printf "%.1f" }}%
+            Spent: ${{ printf "%.2f" (mul $value 4.2) }} of $420
+            Action: PAUSE non-critical tasks immediately.
+
+      # Budget 95% threshold - CRITICAL
+      - alert: TriAgentBudget95Percent
+        expr: (sum(tri_agent_cost_total) / 420) * 100 >= 95
+        for: 1m
+        labels:
+          severity: critical
+          team: ai-ops
+          budget_level: "95"
+        annotations:
+          summary: "Tri-Agent budget at 95% - STOP all new tasks"
+          description: |
+            Monthly budget usage: {{ $value | printf "%.1f" }}%
+            Spent: ${{ printf "%.2f" (mul $value 4.2) }} of $420
+            Action: STOP all new tasks. Emergency operations only.
+
+      # Daily cap exceeded for specific model
+      - alert: TriAgentModelDailyCapExceeded
+        expr: |
+          (
+            increase(tri_agent_cost_total{model="claude_opus"}[24h]) > 15
+            or
+            increase(tri_agent_cost_total{model="claude_sonnet"}[24h]) > 10
+            or
+            increase(tri_agent_cost_total{model="codex"}[24h]) > 12
+          )
+        for: 1m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Model daily spending cap exceeded"
+          description: |
+            A model has exceeded its daily spending cap.
+            Claude Opus cap: $15/day
+            Claude Sonnet cap: $10/day
+            Codex cap: $12/day
+            Action: Route tasks to alternative models.
+
+  # ============================================================================
+  # Context and Token Alerts
+  # ============================================================================
+  - name: tri_agent_context
+    interval: 30s
+    rules:
+      # Context overflow warning - Claude
+      - alert: TriAgentClaudeContextHigh
+        expr: (tri_agent_context_tokens_used{model="claude"} / 200000) * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+          team: ai-ops
+          model: claude
+        annotations:
+          summary: "Claude context usage above 80%"
+          description: |
+            Claude context at {{ $value | printf "%.1f" }}% ({{ printf "%.0f" (mul $value 2000) }} / 200,000 tokens)
+            Action: Consider session refresh or context summarization.
+
+      # Context overflow warning - Codex
+      - alert: TriAgentCodexContextHigh
+        expr: (tri_agent_context_tokens_used{model="codex"} / 400000) * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+          team: ai-ops
+          model: codex
+        annotations:
+          summary: "Codex context usage above 80%"
+          description: |
+            Codex context at {{ $value | printf "%.1f" }}% ({{ printf "%.0f" (mul $value 4000) }} / 400,000 tokens)
+            Action: Consider session refresh or context summarization.
+
+      # Context overflow warning - Gemini
+      - alert: TriAgentGeminiContextHigh
+        expr: (tri_agent_context_tokens_used{model="gemini"} / 1000000) * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+          team: ai-ops
+          model: gemini
+        annotations:
+          summary: "Gemini context usage above 80%"
+          description: |
+            Gemini context at {{ $value | printf "%.1f" }}% ({{ printf "%.0f" (mul $value 10000) }} / 1,000,000 tokens)
+            Action: Consider session refresh or context summarization.
+
+      # Context overflow critical - any model > 95%
+      - alert: TriAgentContextOverflowImminent
+        expr: |
+          (tri_agent_context_tokens_used{model="claude"} / 200000) * 100 > 95
+          or
+          (tri_agent_context_tokens_used{model="codex"} / 400000) * 100 > 95
+          or
+          (tri_agent_context_tokens_used{model="gemini"} / 1000000) * 100 > 95
+        for: 1m
+        labels:
+          severity: critical
+          team: ai-ops
+        annotations:
+          summary: "Context overflow imminent - immediate action required"
+          description: |
+            A model is at >95% context capacity.
+            Action: Trigger immediate session refresh to prevent overflow.
+
+  # ============================================================================
+  # Agent Health and Performance Alerts
+  # ============================================================================
+  - name: tri_agent_health
+    interval: 30s
+    rules:
+      # Agent unavailable
+      - alert: TriAgentModelUnavailable
+        expr: tri_agent_model_available == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent model {{ $labels.model }} unavailable"
+          description: |
+            Model {{ $labels.model }} has been unavailable for 2+ minutes.
+            Action: Check API status, credentials, and network connectivity.
+            Failover to alternative model may be required.
+
+      # Low agent utilization
+      - alert: TriAgentLowUtilization
+        expr: (tri_agent_active_agents / 9) * 100 < 50
+        for: 15m
+        labels:
+          severity: info
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent utilization below 50%"
+          description: |
+            Agent utilization is {{ $value | printf "%.1f" }}%
+            Only {{ printf "%.0f" (mul $value 0.09) }} of 9 agents active.
+            This may indicate idle resources or task queue issues.
+
+      # High response latency
+      - alert: TriAgentHighLatency
+        expr: |
+          histogram_quantile(0.95, rate(tri_agent_request_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent response latency elevated (p95 > 30s)"
+          description: |
+            95th percentile latency is {{ $value | printf "%.1f" }} seconds.
+            This may impact task throughput and user experience.
+
+      # Rate limiting detected
+      - alert: TriAgentRateLimited
+        expr: increase(tri_agent_rate_limit_hits_total[5m]) > 5
+        for: 1m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent experiencing rate limiting"
+          description: |
+            {{ $value | printf "%.0f" }} rate limit hits in the last 5 minutes.
+            Model: {{ $labels.model }}
+            Action: Implement backoff or reduce request frequency.
+
+      # Verification failure rate high
+      - alert: TriAgentVerificationFailureHigh
+        expr: |
+          (
+            sum(rate(tri_agent_verification_total{result="fail"}[15m]))
+            /
+            sum(rate(tri_agent_verification_total[15m]))
+          ) * 100 > 15
+        for: 10m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Verification failure rate above 15%"
+          description: |
+            Verification failure rate is {{ $value | printf "%.1f" }}%
+            This may indicate quality issues or unclear specifications.
+            Action: Review recent task specifications and requirements.
+
+  # ============================================================================
+  # Infrastructure Alerts
+  # ============================================================================
+  - name: tri_agent_infrastructure
+    interval: 1m
+    rules:
+      # Disk space low
+      - alert: TriAgentDiskSpaceLow
+        expr: tri_agent_disk_free_bytes < 2147483648  # 2GB
+        for: 5m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent disk space below 2GB"
+          description: |
+            Free disk space: {{ $value | humanize1024 }}B
+            Action: Run cleanup script or expand storage.
+            Location: ~/.claude/scripts/cleanup.sh
+
+      # Disk space critical
+      - alert: TriAgentDiskSpaceCritical
+        expr: tri_agent_disk_free_bytes < 536870912  # 512MB
+        for: 1m
+        labels:
+          severity: critical
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent disk space critically low (<512MB)"
+          description: |
+            Free disk space: {{ $value | humanize1024 }}B
+            Action: IMMEDIATE cleanup required. System may become unstable.
+
+      # Database integrity issue
+      - alert: TriAgentDatabaseCorruption
+        expr: tri_agent_db_integrity_check != 1
+        for: 1m
+        labels:
+          severity: critical
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent database integrity check failed"
+          description: |
+            Database: {{ $labels.database }}
+            Action: Run VACUUM and REINDEX, or restore from backup.
+            Command: sqlite3 {{ $labels.database }} "VACUUM; REINDEX;"
+
+      # Lock contention high
+      - alert: TriAgentLockContentionHigh
+        expr: |
+          (
+            sum(rate(tri_agent_lock_failures_total[5m]))
+            /
+            sum(rate(tri_agent_lock_attempts_total[5m]))
+          ) * 100 > 20
+        for: 5m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent lock contention above 20%"
+          description: |
+            Lock contention rate: {{ $value | printf "%.1f" }}%
+            Action: Reduce concurrency or investigate blocking operations.
+
+  # ============================================================================
+  # Session Management Alerts
+  # ============================================================================
+  - name: tri_agent_sessions
+    interval: 1m
+    rules:
+      # Session approaching refresh time
+      - alert: TriAgentSessionRefreshNeeded
+        expr: tri_agent_session_duration_seconds > 25200  # 7 hours (refresh at 8)
+        for: 5m
+        labels:
+          severity: info
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent session approaching refresh time"
+          description: |
+            Session duration: {{ $value | humanizeDuration }}
+            Refresh recommended at 8 hours to maintain optimal performance.
+            Action: Plan session checkpoint and refresh.
+
+      # Session exceeded max duration
+      - alert: TriAgentSessionOverdue
+        expr: tri_agent_session_duration_seconds > 32400  # 9 hours
+        for: 1m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent session exceeded recommended duration"
+          description: |
+            Session duration: {{ $value | humanizeDuration }}
+            Extended sessions may experience context degradation.
+            Action: Checkpoint and refresh session immediately.
+
+      # Checkpoint age too old
+      - alert: TriAgentCheckpointStale
+        expr: (time() - tri_agent_last_checkpoint_timestamp) > 14400  # 4 hours
+        for: 5m
+        labels:
+          severity: warning
+          team: ai-ops
+        annotations:
+          summary: "Tri-Agent checkpoint is stale (>4 hours old)"
+          description: |
+            Last checkpoint: {{ $value | humanizeDuration }} ago
+            Action: Create a new checkpoint to ensure recovery capability.
+            Command: tri-agent checkpoint
