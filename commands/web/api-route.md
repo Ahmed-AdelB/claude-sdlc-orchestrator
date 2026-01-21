@@ -1,6 +1,21 @@
+---
+name: web:api-route
+description: Generate API route handlers with validation, error handling, OpenAPI docs, and integration tests.
+version: 1.0.0
+tools:
+  - Read
+  - Write
+  - Bash
+---
+
 # API Route Generator
 
 Generate API route handlers with validation, error handling, OpenAPI docs, and integration tests for Express, FastAPI, or Next.js App Router.
+
+## Tri-Agent Integration
+- Claude: Define endpoint architecture, data contracts, and auth strategy.
+- Codex: Implement handlers, schemas, and tests for the chosen framework.
+- Gemini: Review for correctness, security gaps, and edge cases.
 
 ## Inputs to collect
 - Framework: express | fastapi | nextjs-app-router
@@ -23,6 +38,12 @@ If any are missing, ask concise questions before generating code.
 5. Add OpenAPI documentation.
 6. Generate integration tests.
 
+## Error Handling
+- Normalize validation errors with consistent status codes and payload shape.
+- Distinguish auth, not-found, and conflict errors from generic 500s.
+- Avoid leaking internal error details in responses.
+- Add tests for invalid inputs and common failure paths.
+
 ## Output checklist
 - Handler code with explicit types
 - Validation schemas
@@ -30,7 +51,10 @@ If any are missing, ask concise questions before generating code.
 - OpenAPI spec snippet
 - Integration tests
 
-## Templates
+## Templates and Examples
+
+### Example
+`@api-route nextjs-app-router POST /api/users "Create user with validation"`
 
 ### Express (TypeScript + Zod)
 

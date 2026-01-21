@@ -1,6 +1,21 @@
+---
+name: web:component
+description: Generate production-ready web components for React, Vue, and Svelte with TypeScript, styles, stories, and tests.
+version: 1.0.0
+tools:
+  - Read
+  - Write
+  - Bash
+---
+
 # Web Component Generator Skill
 
 This skill generates production-ready web components for React, Vue, and Svelte frameworks with TypeScript support, styles, stories, and tests.
+
+## Tri-Agent Integration
+- Claude: Define architecture, component responsibilities, and shared contracts.
+- Codex: Implement the component, stories, and tests in the target framework.
+- Gemini: Review for correctness, edge cases, and accessibility coverage.
 
 ## Usage
 `@component [framework] [name] [description/props]`
@@ -9,6 +24,9 @@ This skill generates production-ready web components for React, Vue, and Svelte 
 - `framework`: `react`, `vue`, or `svelte`
 - `name`: Component name (PascalCase)
 - `description/props`: Description of functionality and list of props
+
+**Example:**
+`@component react PrimaryButton "Primary CTA button with loading state"`
 
 ## Process
 1.  **Parse Requirements**: Analyze the input to determine the component's purpose, required props, and state.
@@ -20,7 +38,13 @@ This skill generates production-ready web components for React, Vue, and Svelte 
 
 ---
 
-## Templates
+## Error Handling
+- Validate props and required inputs at the boundary (TypeScript + runtime guards where needed).
+- Provide explicit error UI for async or data-driven components.
+- Use framework-appropriate error boundaries or error slots when rendering can fail.
+- Ensure tests cover invalid props and fallback states.
+
+## Templates and Examples
 
 ### 1. React (Next.js/TS)
 

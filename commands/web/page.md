@@ -1,6 +1,21 @@
+---
+name: web:page
+description: Generate Next.js App Router pages with metadata, SEO, data fetching, and tests.
+version: 1.0.0
+tools:
+  - Read
+  - Write
+  - Bash
+---
+
 # Next.js Page Generator
 
 Generate Next.js App Router pages with metadata, SEO, data fetching, loading/error UI, and tests.
+
+## Tri-Agent Integration
+- Claude: Define routing architecture, data boundaries, and SEO strategy.
+- Codex: Implement pages, loading/error UI, and tests.
+- Gemini: Review for correctness, SEO coverage, and UX edge cases.
 
 ## Arguments
 
@@ -43,7 +58,16 @@ Follow this workflow:
 5. Loading and error UI (`loading.tsx`, `error.tsx`)
 6. Tests using Vitest + React Testing Library
 
-### Templates
+## Error Handling
+- Use `notFound()` for missing resources and surface user-friendly copy.
+- Provide `error.tsx` with recovery actions and log correlation IDs if available.
+- Fail fast on failed fetches and avoid rendering partial invalid data.
+- Add tests for error boundaries and empty states.
+
+## Templates and Examples
+
+### Example
+`@page app/products/[id] "Product detail with SEO, SSR data, and error state"`
 
 #### Static Page (Server Component)
 

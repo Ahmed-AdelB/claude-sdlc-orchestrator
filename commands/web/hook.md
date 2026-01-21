@@ -1,7 +1,22 @@
+---
+name: web:hook
+description: Generate production-ready React custom hooks with TypeScript typing, state management, and tests.
+version: 1.0.0
+tools:
+  - Read
+  - Write
+  - Bash
+---
+
 # Custom Hook Generator Skill
 
 ## Description
 Generates production-ready React custom hooks with TypeScript, proper typing, state management, and tests.
+
+## Tri-Agent Integration
+- Claude: Define hook responsibilities, boundaries, and API shape.
+- Codex: Implement the hook, typing, and tests.
+- Gemini: Review for correctness, edge cases, and performance pitfalls.
 
 ## Instructions
 
@@ -36,7 +51,16 @@ Generates production-ready React custom hooks with TypeScript, proper typing, st
 - Test error handling.
 - Test unmounting/cleanup.
 
-## Templates
+## Error Handling
+- Normalize thrown values to `Error` and expose a typed error in the return object.
+- Guard against stale updates on unmounted components.
+- For async hooks, expose explicit `isLoading`/`isError` states and avoid swallowing errors.
+- Validate required inputs early and fail fast with clear error messages.
+
+## Templates and Examples
+
+### Example
+`@hook useDebouncedValue "Debounce a changing value with delay and cancel support"`
 
 ### Async Data Hook Template
 ```typescript
