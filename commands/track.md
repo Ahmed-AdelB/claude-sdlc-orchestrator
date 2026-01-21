@@ -20,6 +20,7 @@ Track and verify completed work:
    - Performance benchmarks
 
 3. **Create Pull Request**
+
    ```bash
    gh pr create --title "feat: [Feature name]" --body "$(cat <<'EOF'
    ## Summary
@@ -39,26 +40,30 @@ Track and verify completed work:
    - [ ] Documentation updated
    - [ ] No security issues
 
-   🤖 Generated with Claude Code
+   Author: Ahmed Adel Bakr Alderai
    EOF
    )"
    ```
 
 4. **Output Summary**
+
    ```markdown
    ## Implementation Complete
 
    ### Completed Tasks
+
    - [x] Task 1
    - [x] Task 2
 
    ### Metrics
-   | Metric | Value |
-   |--------|-------|
-   | Coverage | X% |
-   | Tests | X passed |
+
+   | Metric   | Value    |
+   | -------- | -------- |
+   | Coverage | X%       |
+   | Tests    | X passed |
 
    ### Pull Request
+
    [PR URL]
    ```
 

@@ -29,13 +29,14 @@ Implement the planned tasks:
    - Gemini: Security review
 
 5. **Commit Format**
+
    ```
    feat|fix|refactor: [description]
 
    - [Change 1]
    - [Change 2]
 
-   🤖 Generated with Claude Code
+   Author: Ahmed Adel Bakr Alderai
    ```
 
 6. **Next Step**: Once complete, proceed to `/track`
