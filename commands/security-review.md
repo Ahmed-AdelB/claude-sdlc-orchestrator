@@ -1,214 +1,67 @@
+---
+name: security-review
+description: Comprehensive security review workflow for codebases and APIs including OWASP Top 10 scanning, dependency vulnerability checks, secret detection, SQL injection and XSS analysis, authentication and authorization review, input validation analysis, security header review, and report generation with remediation recommendations. Use when asked to perform a security review, audit, or risk assessment.
+---
+
 # Security Review
 
-Comprehensive security audit using OWASP Top 10 and best practices.
+## Scope and setup
+- Identify targets: codebase, services, endpoints, configs, and infrastructure.
+- Document tech stack, entry points, data flows, and trust boundaries.
+- Prefer existing repo tooling; note sandbox or network constraints.
+- Define severity model and reporting expectations.
 
-## Arguments
-- `$ARGUMENTS` - Target files, directory, or PR number
+## Workflow
+### 1) OWASP Top 10 vulnerability scanning
+- Map the application surface to OWASP Top 10 categories.
+- Perform static review of auth, access control, data handling, logging, and config.
+- Run repo-provided SAST or security scripts when available.
 
-## Process
+### 2) Dependency vulnerability check
+- Review lockfiles and package manifests for all languages used.
+- Run the ecosystem audit tool if present; record vulnerable packages and fixed versions.
 
-### Step 1: Scope Identification
+### 3) Secret detection
+- Scan for hardcoded secrets in source, configs, and CI artifacts.
+- Use available secret scanners; otherwise use targeted searches for common key patterns.
 
-```markdown
-## Security Review Scope
-- Files: [List of files]
-- Components: [Affected components]
-- Entry Points: [API endpoints, forms, etc.]
-```
+### 4) SQL injection detection
+- Identify raw SQL usage and string interpolation.
+- Verify parameterized queries, prepared statements, and safe query builders.
 
-### Step 2: OWASP Top 10 Analysis
+### 5) XSS vulnerability detection
+- Trace user-controlled data to rendering sinks.
+- Verify output encoding and sanitization at the sink, not just at input.
 
-#### A01: Broken Access Control
-- [ ] Authentication required for protected resources
-- [ ] Authorization checks on all endpoints
-- [ ] No insecure direct object references
-- [ ] Session management secure
+### 6) Authentication and authorization review
+- Review auth flows, token handling, session management, and MFA.
+- Verify authorization checks at route, service, and data layers.
 
-#### A02: Cryptographic Failures
-- [ ] Sensitive data encrypted at rest
-- [ ] TLS/HTTPS for data in transit
-- [ ] No hardcoded secrets or keys
-- [ ] Strong encryption algorithms used
+### 7) Input validation analysis
+- Confirm boundary validation for all inputs, including files and headers.
+- Ensure allowlist validation, strict parsing, and size limits.
 
-#### A03: Injection
-- [ ] SQL queries parameterized
-- [ ] NoSQL injection prevented
-- [ ] Command injection prevented
-- [ ] XSS prevention (output encoding)
+### 8) Security header review
+- Check HTTP response headers and cookie flags for web surfaces.
+- Validate CSP, HSTS, X-Content-Type-Options, X-Frame-Options or frame-ancestors,
+  Referrer-Policy, Permissions-Policy, and Set-Cookie flags.
 
-#### A04: Insecure Design
-- [ ] Threat modeling performed
-- [ ] Secure defaults configured
-- [ ] Defense in depth implemented
-- [ ] Fail securely
+### 9) Report generation
+- Produce a structured report with scope, methodology, findings, and evidence.
+- Include severity, impact, and reproducible steps where safe.
 
-#### A05: Security Misconfiguration
-- [ ] No default credentials
-- [ ] Error messages don't leak info
-- [ ] Security headers configured
-- [ ] Dependencies up to date
+### 10) Remediation recommendations
+- Provide prioritized fixes with concrete guidance and references.
+- Include verification steps to confirm remediations.
 
-#### A06: Vulnerable Components
-- [ ] Dependencies scanned for CVEs
-- [ ] No known vulnerable versions
-- [ ] Supply chain security verified
+## Evidence handling
+- Link findings to file paths and relevant code or config snippets.
+- Capture tool output, versions, and command lines for traceability.
 
-#### A07: Authentication Failures
-- [ ] Strong password policy
-- [ ] Multi-factor authentication available
-- [ ] Account lockout on failed attempts
-- [ ] Session timeout configured
-
-#### A08: Software Integrity Failures
-- [ ] Code signing implemented
-- [ ] CI/CD pipeline secured
-- [ ] Dependency integrity verified
-
-#### A09: Logging Failures
-- [ ] Security events logged
-- [ ] Logs don't contain secrets
-- [ ] Log tampering prevented
-- [ ] Monitoring and alerting configured
-
-#### A10: Server-Side Request Forgery
-- [ ] URL validation on external requests
-- [ ] Allowlist for external hosts
-- [ ] No user-controlled URLs
-
-### Step 3: Secret Detection
-
-```bash
-# Scan for hardcoded secrets
-patterns=(
-  "AKIA[A-Z0-9]{16}"                    # AWS Access Key
-  "ghp_[A-Za-z0-9]{36,}"                # GitHub Token
-  "-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"  # Private Keys
-  "password\s*=\s*['\"][^'\"]{8,}['\"]" # Hardcoded passwords
-  "api[_-]?key\s*=\s*['\"][^'\"]+['\"]" # API keys
-)
-```
-
-**Findings:**
-- [ ] No secrets found
-- [ ] Secrets properly externalized
-- [ ] Environment variables used
-- [ ] Secrets manager integrated
-
-### Step 4: Dependency Audit
-
-```bash
-# Node.js
-npm audit
-npm audit fix
-
-# Python
-pip-audit
-safety check
-
-# Go
-go list -json -m all | nancy sleuth
-```
-
-### Step 5: Code Analysis
-
-#### Input Validation
-- [ ] All user input validated
-- [ ] Type checking enforced
-- [ ] Length limits applied
-- [ ] Whitelist validation used
-
-#### Output Encoding
-- [ ] HTML encoding for display
-- [ ] JSON encoding for API responses
-- [ ] SQL escaping for queries
-- [ ] URL encoding for redirects
-
-#### Authentication & Authorization
-- [ ] JWT tokens validated properly
-- [ ] CSRF protection enabled
-- [ ] CORS configured correctly
-- [ ] Rate limiting implemented
-
-### Step 6: Infrastructure Review
-
-- [ ] Principle of least privilege
-- [ ] Network segmentation
-- [ ] Firewall rules configured
-- [ ] Secrets rotation policy
-
-## Severity Classification
-
-| Severity | Criteria | Action Required |
-|----------|----------|-----------------|
-| 🔴 Critical | Exploitable, high impact | Fix immediately |
-| 🟠 High | Exploitable, medium impact | Fix before release |
-| 🟡 Medium | Requires conditions to exploit | Fix in sprint |
-| 🟢 Low | Informational, best practice | Document for future |
-
-## Output Format
-
-```markdown
-## Security Review Report
-
-### Overall Risk: 🔴 CRITICAL | 🟠 HIGH | 🟡 MEDIUM | 🟢 LOW
-
-### Executive Summary
-[2-3 sentence overview of findings]
-
-### Critical Findings (🔴)
-| ID | Issue | Location | OWASP | Remediation |
-|----|-------|----------|-------|-------------|
-| S-001 | [Issue] | file.ts:42 | A03 | [Fix] |
-
-### High Findings (🟠)
-| ID | Issue | Location | OWASP | Remediation |
-|----|-------|----------|-------|-------------|
-
-### Medium Findings (🟡)
-[List of medium severity issues]
-
-### Best Practice Recommendations
-- [Recommendation 1]
-- [Recommendation 2]
-
-### Compliance Status
-- [ ] OWASP Top 10: [X/10 passed]
-- [ ] Secrets Detection: [Pass/Fail]
-- [ ] Dependency Audit: [Pass/Fail]
-
-### Approval Decision
-⚠️ REQUIRES FIXES | ✅ APPROVED WITH RECOMMENDATIONS | ✅ APPROVED
-```
-
-## Remediation Tracking
-
-```markdown
-## Remediation Plan
-
-### Critical (Fix immediately)
-- [ ] S-001: [Issue] - Owner: [Name] - Due: [Date]
-- [ ] S-002: [Issue] - Owner: [Name] - Due: [Date]
-
-### High (Fix before release)
-- [ ] S-003: [Issue] - Owner: [Name] - Due: [Date]
-
-### Medium (Fix in sprint)
-- [ ] S-004: [Issue] - Owner: [Name] - Due: [Date]
-```
-
-## Example Usage
-
-```
-/security-review src/auth/
-/security-review PR #123
-/security-review src/api/payments.ts
-```
-
-## Integration with Agents
-
-- **security-expert**: Overall security assessment
-- **owasp-specialist**: OWASP Top 10 specific checks
-- **penetration-tester**: Exploit scenario analysis
-- **dependency-auditor**: Vulnerability scanning
-- **secrets-detector**: Secret detection patterns
-- **compliance-checker**: Regulatory compliance
+## Report format
+- Deliver `security-review-report.md` with sections:
+  - Summary
+  - Scope and Methodology
+  - Findings (severity ordered)
+  - Recommendations
+  - Appendix (tool output, versions, commands)

@@ -69,9 +69,7 @@ Language: [language]
 Framework: [framework]
 
 ### Current Code
-```[language]
-[relevant code]
-```
+[paste relevant code here]
 
 ### Task
 [task description]

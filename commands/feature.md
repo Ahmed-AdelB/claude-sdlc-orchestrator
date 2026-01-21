@@ -1,113 +1,164 @@
-# Feature Workflow
+---
+name: feature
+description: Full feature workflow across all five SDLC phases with tri-agent coordination.
+version: 1.0.0
+---
 
-Execute complete feature development workflow through all 5 SDLC phases.
+# /feature
 
-## Arguments
-- `$ARGUMENTS` - Feature description
+Run a complete feature workflow from discovery to verification.
 
-## Process
+## Usage
 
-### Phase 1: Brainstorm
-```
-/sdlc:brainstorm $ARGUMENTS
-```
-- Gather requirements
-- Ask clarifying questions
-- Identify dependencies
-- Define scope boundaries
+/feature <feature description>
 
-### Phase 2: Document
-```
-/sdlc:spec $ARGUMENTS
-```
-- Create detailed specifications
-- Define acceptance criteria
-- Document API contracts
-- Specify test requirements
+## Step-by-step workflow execution
 
-### Phase 3: Plan
-```
-/sdlc:plan $ARGUMENTS
-```
-- Technical design decisions
-- Break down into missions (AB Method)
-- Identify parallel work streams
-- Estimate complexity and risk
+1. Phase 1 - Discovery (Brainstorm)
+   - Gather requirements and constraints.
+   - Ask clarifying questions and define scope boundaries.
+   - Identify stakeholders, dependencies, and risks.
+   - Output: Feature Brief.
+2. Phase 2 - Specification (Document)
+   - Write functional and non-functional requirements.
+   - Define acceptance criteria and UX/API contracts.
+   - Capture edge cases and failure modes.
+   - Output: Feature Spec.
+3. Phase 3 - Planning (Plan)
+   - Choose architecture and major design decisions.
+   - Break down work into tasks and milestones.
+   - Define test strategy and rollout plan.
+   - Output: Implementation Plan.
+4. Phase 4 - Execution (Build)
+   - Implement iteratively with tests.
+   - Validate each milestone against acceptance criteria.
+   - Update docs and changelog as needed.
+   - Output: Implementation Log.
+5. Phase 5 - Tracking (Verify)
+   - Run final quality gates and regression checks.
+   - Confirm acceptance criteria and stakeholder sign-off.
+   - Prepare release notes and monitoring plan.
+   - Output: Release Readiness Report.
 
-### Phase 4: Execute
-```
-/sdlc:execute $ARGUMENTS
-```
-- Implement feature components
-- Write tests alongside code
-- Run quality gates continuously
-- Address review feedback
+## Templates
 
-### Phase 5: Track
-```
-/sdlc:status
-```
-- Monitor implementation progress
-- Verify acceptance criteria met
-- Run final quality gates
-- Prepare for deployment
-
-## Quality Gates
-
-At each phase transition:
-- [ ] Stakeholder approval on requirements
-- [ ] Technical design approved by architect
-- [ ] Test coverage >= 80%
-- [ ] Security review passed
-- [ ] Documentation complete
-
-## Output Format
+### Phase 1 - Feature Brief
 
 ```markdown
-## Feature: [Feature Name]
+## Feature Brief
 
-### Status
-Phase: [1-5]
-Progress: [Percentage]
+### Problem
+[What problem are we solving?]
 
-### Current Mission
-[Active mission description]
+### Goals
+- [Goal 1]
+- [Goal 2]
 
-### Completed
-- [x] Mission 1
-- [x] Mission 2
+### Non-Goals
+- [Out of scope 1]
+- [Out of scope 2]
 
-### Remaining
-- [ ] Mission 3
-- [ ] Mission 4
+### Constraints
+- [Technical or business constraints]
 
-### Blockers
-[Any blockers identified]
-
-### Next Steps
-1. [Next action]
-2. [Following action]
+### Open Questions
+- [Question 1]
+- [Question 2]
 ```
 
-## Commit Format
+### Phase 2 - Feature Spec
 
+```markdown
+## Feature Spec
+
+### Requirements
+- [Requirement 1]
+- [Requirement 2]
+
+### Acceptance Criteria
+- [ ] [Criterion 1]
+- [ ] [Criterion 2]
+
+### UX or API Contract
+- [UI flow or endpoints]
+
+### Edge Cases
+- [Edge case 1]
+- [Edge case 2]
 ```
-feat(scope): [feature summary]
 
-[Detailed description of changes]
+### Phase 3 - Implementation Plan
 
-BREAKING CHANGE: [if applicable]
+```markdown
+## Implementation Plan
 
-Resolves #[issue-number]
+### Architecture Decisions
+- [Decision 1]
+- [Decision 2]
 
-🤖 Generated with Claude Code
-Co-Authored-By: Claude <noreply@anthropic.com>
+### Work Breakdown
+1. [Task 1]
+2. [Task 2]
+
+### Test Strategy
+- Unit: [scope]
+- Integration: [scope]
+- E2E: [scope]
+
+### Rollout Plan
+- [Canary or staged rollout]
 ```
 
-## Example Usage
+### Phase 4 - Implementation Log
 
+```markdown
+## Implementation Log
+
+### Milestone
+[What was delivered]
+
+### Changes
+- [File or component]
+- [Behavior]
+
+### Tests
+- [Test name and result]
+
+### Notes
+- [Risks or follow-ups]
 ```
-/feature Add user authentication with OAuth2
-/feature Implement real-time notifications system
-/feature Create admin dashboard with analytics
+
+### Phase 5 - Release Readiness
+
+```markdown
+## Release Readiness
+
+### Acceptance Criteria Status
+- [ ] [Criterion 1]
+- [ ] [Criterion 2]
+
+### Verification
+- [ ] Unit tests
+- [ ] Integration tests
+- [ ] Manual QA
+
+### Monitoring
+- [Metric or alert]
+
+### Release Notes
+- [User-facing summary]
 ```
+
+## Integration with tri-agent system
+
+- Codex: primary executor for implementation and quick iteration.
+- Claude Code: architecture review, cross-file coherence, complex debugging.
+- Gemini CLI: large codebase analysis, dependency impact, documentation scan.
+
+### Coordination checkpoints
+
+- After Phase 1: ask Claude Code to validate scope and risk list.
+- After Phase 2: ask Gemini CLI to scan for existing patterns or similar features.
+- After Phase 3: ask Claude Code to review architecture decisions.
+- During Phase 4: use Codex for coding, Claude Code for review, Gemini CLI for impact checks.
+- Before Phase 5: ask all agents to confirm readiness and regression coverage.

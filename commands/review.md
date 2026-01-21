@@ -1,58 +1,96 @@
-# Code Review
+---
+name: review
+description: Multi-agent code review workflow with risk-based findings.
+version: 1.0.0
+---
 
-Perform comprehensive code review on the specified files or PR.
+# /review
 
-## Instructions
+Run a multi-agent code review with consolidated findings and clear verdict.
 
-1. **Scope Identification**
-   - Identify files to review
-   - Or fetch PR diff if PR number provided
+## Usage
 
-2. **Review Categories**
+/review <files, diff, or PR reference>
 
-   ### Functionality
-   - [ ] Code does what it should
-   - [ ] Edge cases handled
-   - [ ] Error handling appropriate
+## Step-by-step workflow execution
 
-   ### Code Quality
-   - [ ] Clear naming
-   - [ ] Single responsibility
-   - [ ] DRY principle
-   - [ ] Appropriate abstractions
+1. Define scope
+   - Identify files, modules, or PR diff to review.
+   - Capture context: feature intent, constraints, and known risks.
+   - Output: Review Brief.
+2. Assign agent roles
+   - Split review focus across agents by specialty.
+   - Output: Review Allocation.
+3. Perform review passes
+   - Functional correctness and edge cases.
+   - Security and input validation.
+   - Performance and resource usage.
+   - Maintainability and style consistency.
+   - Output: Agent Findings.
+4. Consolidate and deduplicate
+   - Merge overlapping findings and rank by severity.
+   - Identify test gaps and required follow-ups.
+   - Output: Consolidated Findings.
+5. Produce verdict
+   - APPROVE, REQUEST_CHANGES, or COMMENT.
+   - Provide actionable fixes with file references.
+   - Output: Review Summary.
 
-   ### Security
-   - [ ] No hardcoded secrets
-   - [ ] Input validation
-   - [ ] SQL injection prevention
-   - [ ] XSS prevention
+## Templates
 
-   ### Performance
-   - [ ] No N+1 queries
-   - [ ] Efficient algorithms
-   - [ ] Appropriate caching
+### Review Brief
 
-   ### Testing
-   - [ ] Adequate test coverage
-   - [ ] Tests are meaningful
-   - [ ] Edge cases tested
+```markdown
+## Review Brief
 
-3. **Output Format**
-   ```markdown
-   ## Code Review Summary
+### Scope
+- Files:
+- Diff/PR:
 
-   **Overall**: APPROVE | REQUEST_CHANGES | COMMENT
+### Intent
+[What the change is supposed to do]
 
-   ### Issues Found
-   | Severity | File | Line | Issue | Suggestion |
-   |----------|------|------|-------|------------|
-   | 🔴 Critical | | | | |
-   | 🟠 Major | | | | |
-   | 🟡 Minor | | | | |
+### Constraints
+- [Performance, security, compatibility]
+```
 
-   ### Positive Notes
-   - [Good practice observed]
+### Findings Table
 
-   ### Suggestions
-   - [Improvement idea]
-   ```
+```markdown
+## Findings
+
+| Severity | File | Line | Issue | Recommendation |
+| --- | --- | --- | --- | --- |
+| Critical | | | | |
+| Major | | | | |
+| Minor | | | | |
+```
+
+### Review Summary
+
+```markdown
+## Review Summary
+
+### Verdict
+APPROVE | REQUEST_CHANGES | COMMENT
+
+### Key Issues
+- [Issue 1]
+- [Issue 2]
+
+### Tests Suggested
+- [Test 1]
+- [Test 2]
+```
+
+## Integration with tri-agent system
+
+- Codex: primary reviewer for implementation details and diffs.
+- Claude Code: architecture coherence, design risks, and complex logic.
+- Gemini CLI: large codebase impact, documentation, and dependency review.
+
+### Coordination checkpoints
+
+- Before review: ask Gemini CLI to map impacted modules.
+- During review: ask Claude Code for deep reasoning on complex changes.
+- After review: merge findings into one prioritized list.

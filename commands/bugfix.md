@@ -1,143 +1,126 @@
-# Bug Fix Workflow
+---
+name: bugfix
+description: Bug fix workflow with root cause analysis and regression prevention.
+version: 1.0.0
+---
 
-Execute systematic bug fix with root cause analysis and regression testing.
+# /bugfix
 
-## Arguments
-- `$ARGUMENTS` - Bug description or issue number
+Execute a structured bug fix workflow with root cause analysis and verification.
 
-## Process
+## Usage
 
-### Step 1: Reproduce the Issue
-```markdown
-## Reproduction Steps
-1. [Action 1]
-2. [Action 2]
-3. [Observe bug]
+/bugfix <bug description or issue id>
 
-Expected: [What should happen]
-Actual: [What happens]
-Environment: [Browser/OS/Version]
-```
+## Step-by-step workflow execution
 
-### Step 2: Root Cause Analysis
+1. Intake and reproduce
+   - Capture expected vs actual behavior and environment details.
+   - Reproduce the issue reliably and document the steps.
+   - Output: Reproduction Record.
+2. Triage and scope
+   - Assess severity, impact, and affected components.
+   - Identify potential regressions or recent changes.
+   - Output: Triage Notes.
+3. Root cause analysis
+   - Gather evidence (logs, traces, code paths).
+   - Use causal chain or 5 Whys to identify the true cause.
+   - Output: RCA Summary.
+4. Fix design
+   - Propose solution options and choose a minimal, safe fix.
+   - Evaluate risks and side effects.
+   - Output: Fix Plan.
+5. Implement fix
+   - Apply the smallest change that addresses the root cause.
+   - Add or update regression tests.
+   - Output: Patch and Tests.
+6. Verify and prevent regression
+   - Run targeted and full test suites as needed.
+   - Validate in the original environment if possible.
+   - Output: Verification Checklist.
+7. Document and close
+   - Record root cause, fix, and prevention steps.
+   - Link issues and update changelog or incident notes.
+   - Output: Bug Fix Report.
 
-Use the 5 Whys technique:
-1. **Why did the bug occur?** [Answer]
-2. **Why did that happen?** [Answer]
-3. **Why did that condition exist?** [Answer]
-4. **Why wasn't it caught?** [Answer]
-5. **Why did our process allow this?** [Answer]
+## Templates
 
-### Step 3: Investigation
-
-#### Git History Analysis
-```bash
-# Find when bug was introduced
-git log --all --full-history -- path/to/file.ts
-
-# View specific commit
-git show <commit-hash>
-
-# Find commits mentioning issue
-git log --grep="related-keyword"
-```
-
-#### Code Analysis
-- [ ] Locate affected code paths
-- [ ] Identify all call sites
-- [ ] Check for similar patterns elsewhere
-- [ ] Review related tests (if any)
-
-### Step 4: Solution Design
+### Reproduction Record
 
 ```markdown
-## Fix Strategy
+## Reproduction Record
 
-### Root Cause
-[Core issue identified]
+### Environment
+- OS:
+- Browser/Runtime:
+- Version/Commit:
 
-### Proposed Solution
-[How to fix it]
+### Steps to Reproduce
+1.
+2.
+3.
 
-### Impact Analysis
-- Affected components: [List]
-- Breaking changes: [Yes/No]
-- Migration needed: [Yes/No]
+### Expected
+[What should happen]
 
-### Alternative Approaches
-1. [Approach 1] - Pros/Cons
-2. [Approach 2] - Pros/Cons
-
-### Selected Approach
-[Chosen solution and rationale]
+### Actual
+[What happens]
 ```
 
-### Step 5: Implementation
+### Root Cause Analysis
 
-1. **Create Feature Branch**
-   ```bash
-   git checkout -b fix/issue-number-brief-description
-   ```
+```markdown
+## Root Cause Analysis
 
-2. **Write Regression Test First**
-   ```typescript
-   it('should [prevent the bug from occurring]', () => {
-     // Test that fails with current code
-     // Will pass after fix
-   });
-   ```
+### Evidence
+- [Logs, stack traces, metrics]
 
-3. **Implement Fix**
-   - Make minimal changes
-   - Focus on root cause, not symptoms
-   - Add defensive programming where appropriate
+### Causal Chain
+1. [Immediate cause]
+2. [Underlying cause]
+3. [Systemic cause]
 
-4. **Verify Fix**
-   - [ ] Regression test passes
-   - [ ] All existing tests pass
-   - [ ] Manual verification in affected scenarios
-   - [ ] No new warnings/errors
-
-### Step 6: Quality Gates
-
-- [ ] Test coverage >= 80%
-- [ ] No console.log or debug code
-- [ ] Documentation updated if API changed
-- [ ] CHANGELOG.md updated
-- [ ] Related issues linked
-
-### Step 7: Issue Linking
-
-```bash
-# Commit references issue
-git commit -m "fix(component): brief description
-
-Root cause: [What caused the bug]
-Solution: [How it was fixed]
-Prevention: [How to prevent recurrence]
-
-Fixes #123
-Relates to #456"
+### 5 Whys (optional)
+1. Why?
+2. Why?
+3. Why?
+4. Why?
+5. Why?
 ```
 
-## Commit Format
+### Fix Plan
 
+```markdown
+## Fix Plan
+
+### Proposed Fix
+[Summary of the change]
+
+### Alternatives Considered
+- [Option 1]
+- [Option 2]
+
+### Risks
+- [Potential side effect]
+
+### Tests
+- [Regression test]
+- [Related tests]
 ```
-fix(scope): [concise bug fix description]
 
-Root Cause: [What caused the bug]
-Solution: [How it was fixed]
-Impact: [What this affects]
+### Verification Checklist
 
-Regression Test: [Test added to prevent recurrence]
+```markdown
+## Verification Checklist
 
-Fixes #[issue-number]
-
-🤖 Generated with Claude Code
-Co-Authored-By: Claude <noreply@anthropic.com>
+- [ ] Reproduction no longer occurs
+- [ ] Regression test added or updated
+- [ ] Unit tests pass
+- [ ] Integration tests pass
+- [ ] No new warnings or logs
 ```
 
-## Output Format
+### Bug Fix Report
 
 ```markdown
 ## Bug Fix Report
@@ -145,33 +128,27 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 ### Issue
 [Bug description]
 
-### Severity
-🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low
-
 ### Root Cause
-[Identified root cause]
+[Short summary]
 
 ### Fix Summary
-[What was changed]
+[What changed and why]
 
 ### Files Changed
-- `path/to/file1.ts` - [Change description]
-- `path/to/file2.ts` - [Change description]
+- `path/to/file` - [Change]
 
-### Tests Added
-- `path/to/test.spec.ts` - [Regression test]
-
-### Verification
-- [x] Bug no longer reproduces
-- [x] Regression test added
-- [x] All tests pass
-- [x] Code reviewed
+### Tests Added or Updated
+- `path/to/test` - [Coverage]
 ```
 
-## Example Usage
+## Integration with tri-agent system
 
-```
-/bugfix User session expires immediately after login
-/bugfix #456 - API returns 500 on empty request body
-/bugfix Race condition in payment processing
-```
+- Codex: primary executor for patching and test updates.
+- Claude Code: root cause validation, architecture impact, complex debugging.
+- Gemini CLI: wide codebase search for related patterns and regressions.
+
+### Coordination checkpoints
+
+- After reproduction: ask Gemini CLI to locate related code paths and similar bugs.
+- During RCA: ask Claude Code to validate causal chain and system impact.
+- Before merge: ask Claude Code to review fix quality and test coverage.

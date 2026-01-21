@@ -1,2442 +1,770 @@
-# Claude Agent Index
-
-A comprehensive guide to the specialized agents available in the Claude CLI ecosystem.
-
-## Quick Reference
-
-| Category | Agent | Primary Capability |
-|----------|-------|-------------------|
-| AI & Machine Learning | [Claude Opus Max Agent](#claude-opus-max) | Maximum-powered Claude Code agent using Opus 4.5 with ultrathink (32K token thin... |
-| AI & Machine Learning | [Codex Max Agent](#codex-max) | Maximum-powered Codex CLI agent using GPT-5.2-Codex with xhigh reasoning effort ... |
-| AI & Machine Learning | [Gemini Deep Agent](#gemini-deep) | Maximum-powered Gemini CLI agent using Gemini 3 Pro with Deep Think mode for com... |
-| AI & Machine Learning | [LangChain Expert](#langchain-expert) | Specialized agent for designing, implementing, and optimizing LangChain and Lang... |
-| AI & Machine Learning | [LLM Integration Expert Agent](#llm-integration-expert) | LLM integration specialist. Expert in OpenAI, Anthropic APIs, RAG, and prompt en... |
-| AI & Machine Learning | [LLMOps Agent](#llmops-agent) | Specialized agent for end-to-end LLM lifecycle management, including fine-tuning... |
-| AI & Machine Learning | [ML Engineer Agent](#ml-engineer) | Machine learning engineering specialist. Expert in ML pipelines, model deploymen... |
-| AI & Machine Learning | [Prompt Engineer](#prompt-engineer) | Specialized agent for designing, optimizing, and securing LLM prompts |
-| AI & Machine Learning | [AI Quality Metrics Agent](#quality-metrics-agent) | Specialized agent for measuring, analyzing, and improving AI output quality thro... |
-| AI & Machine Learning | [rag-expert](#rag-expert) | Vector store and RAG optimization agent focusing on chunking, embeddings, retrie... |
-| Backend Development | [API Architect Agent](#api-architect) | Designs and documents REST/GraphQL APIs. Creates OpenAPI specs and API contracts... |
-| Backend Development | [Authentication Specialist Agent](#authentication-specialist) | Authentication and authorization specialist. Expert in JWT, OAuth, RBAC, and sec... |
-| Backend Development | [Backend Developer Agent](#backend-developer) | General backend development expert. Implements APIs, services, and server-side l... |
-| Backend Development | [Django Expert Agent](#django-expert) | Django and Django REST Framework specialist. Expert in Python web development wi... |
-| Backend Development | [FastAPI Expert Agent](#fastapi-expert) | FastAPI framework specialist. Expert in async Python, Pydantic, dependency injec... |
-| Backend Development | [Go Expert Agent](#go-expert) | Go/Golang specialist. Expert in Go web services, concurrency, and idiomatic Go p... |
-| Backend Development | [GraphQL Specialist Agent](#graphql-specialist) | GraphQL API design and implementation specialist. Expert in schema design, resol... |
-| Backend Development | [Microservices Architect Agent](#microservices-architect) | Microservices architecture specialist. Expert in service decomposition, communic... |
-| Backend Development | [Node.js Expert Agent](#nodejs-expert) | Node.js and Express/NestJS specialist. Expert in TypeScript, async patterns, and... |
-| Backend Development | [Rails Expert Agent](#rails-expert) | Ruby on Rails specialist. Expert in Rails conventions, ActiveRecord, and Ruby be... |
-| Business & Planning | [Business Analyst Agent](#business-analyst) | tools: |
-| Business & Planning | [Cloud Cost Optimizer Agent](#cost-optimizer) | Specialized agent for multi-cloud and AI cost optimization, including reserved i... |
-| Business & Planning | [Project Tracker Agent](#project-tracker) | tools: |
-| Business & Planning | [Stakeholder Communicator Agent](#stakeholder-communicator) | tools: |
-| Cloud & Infrastructure | [AWS Expert Agent](#aws-expert) | AWS cloud specialist. Expert in AWS services, architecture, and best practices. |
-| Cloud & Infrastructure | [Azure Expert Agent](#azure-expert) | Azure cloud specialist. Expert in Microsoft Azure services, architecture, automa... |
-| Cloud & Infrastructure | [GCP Expert Agent](#gcp-expert-full) | A specialized agent for Google Cloud Platform architecture, implementation, and ... |
-| Cloud & Infrastructure | [GCP Expert Agent](#gcp-expert) | Google Cloud Platform specialist. Expert in GCP services and architecture. |
-| Cloud & Infrastructure | [Multi-Cloud Expert Agent](#multi-cloud-architect) | You are the **Multi-Cloud Architect**, an expert AI agent specializing in design... |
-| Cloud & Infrastructure | [Multi-Cloud Expert Agent](#multi-cloud-expert) | Multi-cloud architecture specialist. Expert in cross-cloud strategies and portab... |
-| Cloud & Infrastructure | [Serverless Expert Agent](#serverless-expert) | name: serverless-expert |
-| Database Engineering | [Database Architect Agent](#database-architect) | Database architecture specialist. Expert in schema design, normalization, indexi... |
-| Database Engineering | [Migration Expert Agent (Full)](#migration-expert-full) | Database migration specialist. Expert in zero-downtime schema evolution, data ba... |
-| Database Engineering | [Migration Expert Agent](#migration-expert) | Database migration specialist. Expert in schema evolution, zero-downtime migrati... |
-| Database Engineering | [MongoDB Expert Agent](#mongodb-expert) | MongoDB specialist. Expert in document modeling, aggregation, indexing, and Mong... |
-| Database Engineering | [ORM Expert Agent](#orm-expert) | ORM specialist. Expert in Prisma, SQLAlchemy, TypeORM, and database abstraction ... |
-| Database Engineering | [PostgreSQL Expert Agent](#postgresql-expert) | PostgreSQL specialist. Expert in PG features, performance tuning, extensions, an... |
-| Database Engineering | [Redis Expert Agent](#redis-expert) | Redis specialist. Expert in caching, data structures, pub/sub, and Redis pattern... |
-| DevOps & SRE | [CI/CD Expert Agent](#ci-cd-expert) | Comprehensive CI/CD specialist for pipeline design, build automation, deployment... |
-| DevOps & SRE | [DevOps Engineer Agent](#devops-engineer) | DevOps specialist. Expert in CI/CD, infrastructure automation, and deployment st... |
-| DevOps & SRE | [Docker Expert Agent](#docker-expert) | Docker and containerization specialist. Expert in Docker, Docker Compose, and co... |
-| DevOps & SRE | [GitHub Actions Expert Agent](#github-actions-expert) | > |
-| DevOps & SRE | [Production Incident Response Agent](#incident-response-agent) | Comprehensive production incident management specialist for incident detection, ... |
-| DevOps & SRE | [Infrastructure Architect Agent](#infrastructure-architect) | name: infrastructure-architect |
-| DevOps & SRE | [Kubernetes Expert Agent](#kubernetes-expert) | Kubernetes specialist. Expert in K8s resources, deployments, and cluster managem... |
-| DevOps & SRE | [Monitoring Expert Agent](#monitoring-expert) | Monitoring and observability specialist. Expert in Prometheus, Grafana, and logg... |
-| DevOps & SRE | [Self-Healing Pipeline Agent](#self-healing-pipeline-agent) | Autonomous agent for detecting, analyzing, and fixing CI/CD pipeline failures |
-| DevOps & SRE | [Terraform Expert Agent](#terraform-expert) | Terraform and IaC specialist. Expert in Terraform modules, state management, and... |
-| Frontend Development | [Accessibility Expert Agent](#accessibility-expert) | Web accessibility specialist. Expert in WCAG, ARIA, screen readers, and inclusiv... |
-| Frontend Development | [CSS Expert Agent](#css-expert) | CSS and styling specialist. Expert in CSS, Tailwind, CSS-in-JS, animations, and ... |
-| Frontend Development | [Frontend Developer Agent](#frontend-developer) | General frontend development specialist. Expert in modern web development, respo... |
-| Frontend Development | [Mobile Web Expert Agent](#mobile-web-expert) | Mobile web and PWA specialist. Expert in responsive design, PWA, mobile performa... |
-| Frontend Development | [Next.js Expert Agent](#nextjs-expert) | Next.js specialist. Expert in App Router, Server Components, SSR/SSG, and Next.j... |
-| Frontend Development | [React Expert Agent](#react-expert) | React.js specialist. Expert in React patterns, hooks, state management, and Reac... |
-| Frontend Development | [State Management Expert Agent](#state-management-expert) | State management specialist. Expert in Redux, Zustand, Jotai, React Query, and s... |
-| Frontend Development | [Frontend Testing Agent](#testing-frontend) | Frontend testing specialist. Expert in Jest, Testing Library, Playwright, and co... |
-| Frontend Development | [TypeScript Expert Agent](#typescript-expert) | TypeScript specialist. Expert in type systems, generics, advanced patterns, and ... |
-| Frontend Development | [Vue Expert Agent](#vue-expert) | Vue.js specialist. Expert in Vue 3, Composition API, Pinia, and Vue ecosystem. |
-| General Purpose & Orchestration | [Cascade Agent](#cascade-agent) | End-to-end automation of the ticket-to-PR workflow. Orchestrates specialized age... |
-| General Purpose & Orchestration | [Context Manager Agent](#context-manager) | Manages project context, loads relevant files, and maintains awareness of the cu... |
-| General Purpose & Orchestration | [Memory Coordinator Agent](#memory-coordinator) | Coordinates memory systems including vector memory, project ledger, and error kn... |
-| General Purpose & Orchestration | [model-router](#model-router) | Intelligent orchestrator that routes tasks to the optimal AI model (Claude, Code... |
-| General Purpose & Orchestration | [observability-agent](#observability-agent) | An agent designed to trace, monitor, and report on the performance, cost, and qu... |
-| General Purpose & Orchestration | [Orchestrator Agent](#orchestrator) | Master workflow orchestrator that coordinates all SDLC phases and delegates to s... |
-| General Purpose & Orchestration | [pair-programmer](#pair-programmer) | Interactive pair programmer for real-time coding assistance, incremental edits, ... |
-| General Purpose & Orchestration | [Parallel Coordinator Agent](#parallel-coordinator) | Coordinates parallel execution of independent tasks using git worktrees or isola... |
-| General Purpose & Orchestration | [Session Manager Agent](#session-manager) | Manages session state, progress tracking, and ensures continuity across conversa... |
-| General Purpose & Orchestration | [Task Router Agent](#task-router) | Intelligent task routing agent that analyzes tasks and determines the optimal ag... |
-| Integration & APIs | [API Integration Expert Agent](#api-integration-expert) | API integration specialist. Expert in REST, webhooks, OAuth, and third-party int... |
-| Integration & APIs | [api-observability-agent](#api-observability-agent) | Monitors API health, performance, and reliability. Tracks latency percentiles, e... |
-| Integration & APIs | [MCP Integration Expert Agent](#mcp-expert) | Model Context Protocol specialist for server development, tool patterns, and AI ... |
-| Integration & APIs | [Third-Party API Expert](#third-party-api-expert) | Expert in external API integrations including OAuth, rate limiting, webhooks, an... |
-| Integration & APIs | [Webhook Expert Agent](#webhook-expert) | "Target framework (express, fastapi, flask, django)" |
-| Performance Engineering | [Bundle Optimizer Agent](#bundle-optimizer) | Expert in JavaScript/TypeScript bundle optimization for Webpack, Vite, and esbui... |
-| Performance Engineering | [Caching Expert Agent](#caching-expert) | Caching specialist. Expert in cache strategies, Redis, CDN, and cache invalidati... |
-| Performance Engineering | [load-testing-expert](#load-testing-expert) | Load testing expert for k6 and Artillery. Designs tests, configures load profile... |
-| Performance Engineering | [Performance Optimizer Agent](#performance-optimizer) | Performance optimization specialist. Expert in code optimization, caching, and p... |
-| Performance Engineering | [Profiling Expert Agent](#profiling-expert) | > |
-| Planning & Architecture | [Architect Agent](#architect) | Designs system architecture, creates technical specifications, and makes archite... |
-| Planning & Architecture | [Exponential Planner Agent](#exponential-planner) | Strategic long-term planner that creates comprehensive multi-phase development p... |
-| Planning & Architecture | [Product Manager Agent](#product-manager) | Creates PRDs (Product Requirements Documents), prioritizes features, and manages... |
-| Planning & Architecture | [Requirements Analyst Agent](#requirements-analyst) | Gathers, analyzes, and documents requirements. Creates user stories with accepta... |
-| Planning & Architecture | [Requirements Analyzer Agent](#requirements-analyzer) | **Role:** You are the **Requirements Analyzer**, a specialized sub-agent respons... |
-| Planning & Architecture | [Risk Assessor Agent](#risk-assessor) | Identifies, analyzes, and documents risks in software projects. Creates risk mat... |
-| Planning & Architecture | [spec-generator](#spec-generator) | Generates formal, testable specifications, API contracts, and test scenarios fro... |
-| Planning & Architecture | [Tech Lead Agent](#tech-lead) | Provides technical leadership, makes implementation decisions, and guides develo... |
-| Planning & Architecture | [Tech Spec Writer Agent](#tech-spec-writer) | Creates detailed technical specifications from requirements. Translates business... |
-| Planning & Architecture | [UX Researcher Agent](#ux-researcher) | Conducts UX research, creates user personas, and designs user journeys. |
-| Quality Assurance & Code Quality | [Code Reviewer Agent](#code-reviewer) | Code review specialist. Expert in code quality, best practices, and constructive... |
-| Quality Assurance & Code Quality | [Dependency Manager Agent](#dependency-manager) | Purpose: Manage project dependencies with clear, actionable guidance. |
-| Quality Assurance & Code Quality | [Documentation Linter Agent](#doc-linter-agent) | You are the Documentation Linter Agent. You validate documentation quality and c... |
-| Quality Assurance & Code Quality | [Documentation Expert Agent](#documentation-expert) | Documentation specialist. Expert in API docs, code comments, and technical writi... |
-| Quality Assurance & Code Quality | [Gemini Reviewer Agent](#gemini-reviewer) | Gemini-powered code reviewer using CLI. Expert in security analysis, code qualit... |
-| Quality Assurance & Code Quality | [Linting Expert Agent](#linting-expert) | Linting and formatting specialist. Expert in ESLint, Prettier, and code style en... |
-| Quality Assurance & Code Quality | [Performance Analyst Agent](#performance-analyst) | Performance analysis specialist. Expert in profiling, bottleneck identification,... |
-| Quality Assurance & Code Quality | [Product Analyst Agent](#product-analyst) | Product analysis specialist. Expert in requirements gathering, user stories, and... |
-| Quality Assurance & Code Quality | [Refactoring Expert Agent](#refactoring-expert) | Code refactoring specialist. Expert in refactoring patterns, code smells, and sa... |
-| Quality Assurance & Code Quality | [Semantic Code Search Agent](#semantic-search-agent) | You are the **Semantic Code Search Agent**, a specialized sub-agent responsible ... |
-| Quality Assurance & Code Quality | [Technical Debt Analyst Agent](#technical-debt-analyst) | Technical debt specialist. Expert in debt identification, prioritization, and re... |
-| Security & Compliance | [Compliance Expert Agent](#compliance-expert) | Security compliance specialist. Expert in SOC2, GDPR, HIPAA, and compliance fram... |
-| Security & Compliance | [Dependency Auditor Agent](#dependency-auditor) | Dependency security auditor. Expert in supply chain security and dependency mana... |
-| Security & Compliance | ["Guardrails Enforcement Agent"](#guardrails-agent) | "Security compliance agent responsible for pre-execution validation of tool call... |
-| Security & Compliance | [Penetration Testing Agent](#penetration-tester) | Penetration testing specialist for authorized security testing, CTF challenges, ... |
-| Security & Compliance | [regulatory-compliance-agent](#regulatory-compliance-agent) | Specialized security agent for auditing and ensuring compliance with AI and data... |
-| Security & Compliance | [Secrets Management Expert Agent](#secrets-management-expert) | Secrets management specialist. Expert in vault systems, environment variables, a... |
-| Security & Compliance | [Security Expert Agent](#security-expert) | Application security specialist. Expert in OWASP Top 10, secure coding, and vuln... |
-| Security & Compliance | [Vulnerability Scanner Agent](#vulnerability-scanner) | Vulnerability scanning specialist. Expert in dependency scanning, SAST, and secu... |
-| Testing & QA | ["API Contract Testing Agent"](#api-contract-agent) | "Specialized agent for API contract validation, consumer-driven contract testing... |
-| Testing & QA | [API Test Expert Agent](#api-test-expert) | API testing specialist. Expert in REST/GraphQL testing, contract testing, and AP... |
-| Testing & QA | [E2E Test Expert Agent](#e2e-test-expert) | End-to-end testing specialist. Expert in Playwright, Cypress, and full system te... |
-| Testing & QA | [Integration Test Expert Agent](#integration-test-expert) | Integration testing specialist. Expert in API testing, database testing, and ser... |
-| Testing & QA | [Performance Test Expert Agent](#performance-test-expert) | Performance testing specialist. Expert in load testing, stress testing, and perf... |
-| Testing & QA | [TDD Coach Agent](#tdd-coach) | TDD coaching specialist. Expert in test-driven development, red-green-refactor c... |
-| Testing & QA | [Test Architect Agent](#test-architect) | Test architecture specialist. Expert in test strategy, pyramid design, and testi... |
-| Testing & QA | [Test Data Expert Agent](#test-data-expert) | Test data management specialist. Expert in fixtures, factories, and test data st... |
-| Testing & QA | [Unit Test Expert Agent](#unit-test-expert) | Unit testing specialist. Expert in mocking, test isolation, TDD, and unit test p... |
-
----
-
-## AI & Machine Learning
-
-### <a id='claude-opus-max'></a>Claude Opus Max Agent
-
-**Description:** Maximum-powered Claude Code agent using Opus 4.5 with ultrathink (32K token thinking budget) and high effort for the most complex tasks.
-
-**When to Use:**
-Use the `Claude Opus Max Agent` when you need maximum-powered claude code agent using opus 4.5 with ultrathink (32k token thinking budget) and high effort for the most complex tasks..
-
-**Usage:**
-```bash
-/agent run ai-ml/claude-opus-max.md <instructions>
-```
-
-**Related Agents:**
-[Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep), [LangChain Expert](#langchain-expert)
-
----
-
-### <a id='codex-max'></a>Codex Max Agent
-
-**Description:** Maximum-powered Codex CLI agent using GPT-5.2-Codex with xhigh reasoning effort for project-scale coding tasks.
-
-**When to Use:**
-Use the `Codex Max Agent` when you need maximum-powered codex cli agent using gpt-5.2-codex with xhigh reasoning effort for project-scale coding tasks..
-
-**Usage:**
-```bash
-/agent run ai-ml/codex-max.md <instructions>
-```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Gemini Deep Agent](#gemini-deep), [LangChain Expert](#langchain-expert)
-
----
-
-### <a id='gemini-deep'></a>Gemini Deep Agent
-
-**Description:** Maximum-powered Gemini CLI agent using Gemini 3 Pro with Deep Think mode for comprehensive research and analysis with 1M token context.
-
-**When to Use:**
-Use the `Gemini Deep Agent` when you need maximum-powered gemini cli agent using gemini 3 pro with deep think mode for comprehensive research and analysis with 1m token context..
-
-**Usage:**
-```bash
-/agent run ai-ml/gemini-deep.md <instructions>
-```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [LangChain Expert](#langchain-expert)
-
----
-
-### <a id='langchain-expert'></a>LangChain Expert
-
-**Description:** Specialized agent for designing, implementing, and optimizing LangChain and LangGraph applications, focusing on RAG, agentic workflows, and production deployment.
-
-**When to Use:**
-Use the `LangChain Expert` when you need specialized agent for designing, implementing, and optimizing langchain and langgraph applications, focusing on rag, agentic workflows, and production deployment..
-
-**Usage:**
-```bash
-/agent run ai-ml/langchain-expert.md <instructions>
+# Agent Index
+
+> **Version:** 2.0.0 | **Updated:** 2026-01-21 | **Total Agents:** 95+
+
+Comprehensive index of all specialized agents in the SDLC orchestration system. Use this guide to find the right agent for any task.
+
+---
+
+## Table of Contents
+
+1. [Quick Navigation](#quick-navigation)
+2. [Agent Selection Guide](#agent-selection-guide)
+3. [Integration Map](#integration-map)
+4. [Workflow Examples](#workflow-examples)
+5. [Agent Categories](#agent-categories)
+   - [General (Orchestration)](#general-agents)
+   - [Planning](#planning-agents)
+   - [Backend](#backend-agents)
+   - [Frontend](#frontend-agents)
+   - [Database](#database-agents)
+   - [Testing](#testing-agents)
+   - [Quality](#quality-agents)
+   - [Security](#security-agents)
+   - [Performance](#performance-agents)
+   - [DevOps](#devops-agents)
+   - [Cloud](#cloud-agents)
+   - [AI/ML](#ai-ml-agents)
+   - [Integration](#integration-agents)
+   - [Business](#business-agents)
+6. [Invocation Patterns](#invocation-patterns)
+7. [Best Practices](#best-practices)
+
+---
+
+## Quick Navigation
+
+| Category                           | Count | Primary Use Case                     | Key Agents                                                      |
+| ---------------------------------- | ----- | ------------------------------------ | --------------------------------------------------------------- |
+| [General](#general-agents)         | 10    | Orchestration, routing, coordination | `orchestrator`, `cascade-agent`, `model-router`                 |
+| [Planning](#planning-agents)       | 9     | Architecture, requirements, specs    | `architect`, `product-manager`, `tech-lead`                     |
+| [Backend](#backend-agents)         | 10    | API development, services            | `nodejs-expert`, `fastapi-expert`, `go-expert`                  |
+| [Frontend](#frontend-agents)       | 10    | UI/UX, React, Vue, Next.js           | `react-expert`, `nextjs-expert`, `vue-expert`                   |
+| [Database](#database-agents)       | 7     | SQL, NoSQL, migrations               | `postgresql-expert`, `mongodb-expert`, `redis-expert`           |
+| [Testing](#testing-agents)         | 10    | Unit, E2E, integration               | `test-architect`, `unit-test-expert`, `e2e-test-expert`         |
+| [Quality](#quality-agents)         | 11    | Code review, refactoring, docs       | `code-reviewer`, `refactoring-expert`, `documentation-expert`   |
+| [Security](#security-agents)       | 8     | Audits, scanning, compliance         | `security-expert`, `vulnerability-scanner`, `compliance-expert` |
+| [Performance](#performance-agents) | 5     | Caching, optimization                | `performance-optimizer`, `caching-expert`, `profiling-expert`   |
+| [DevOps](#devops-agents)           | 11    | CI/CD, Docker, K8s                   | `ci-cd-expert`, `docker-expert`, `kubernetes-expert`            |
+| [Cloud](#cloud-agents)             | 6     | AWS, GCP, Azure                      | `aws-expert`, `gcp-expert`, `azure-expert`                      |
+| [AI/ML](#ai-ml-agents)             | 10    | LLM integration, ML pipelines        | `claude-opus-max`, `codex-max`, `gemini-deep`                   |
+| [Integration](#integration-agents) | 5     | APIs, webhooks, MCP                  | `webhook-expert`, `mcp-expert`, `api-integration-expert`        |
+| [Business](#business-agents)       | 4     | Cost, tracking, communication        | `cost-optimizer`, `project-tracker`, `stakeholder-communicator` |
+
+---
+
+## Agent Selection Guide
+
+### By Task Type
+
+| Task                         | Primary Agent                              | Backup Agent               | Model         |
+| ---------------------------- | ------------------------------------------ | -------------------------- | ------------- |
+| **New feature end-to-end**   | `cascade-agent`                            | `orchestrator`             | Auto          |
+| **Architecture design**      | `architect`                                | `claude-opus-max`          | Opus          |
+| **Complex debugging**        | `claude-opus-max`                          | `codex-max`                | Opus/Codex    |
+| **Code implementation**      | `backend-developer` / `frontend-developer` | `codex-max`                | Sonnet/Codex  |
+| **Code review**              | `code-reviewer`                            | `gemini-reviewer`          | Sonnet/Gemini |
+| **Security audit**           | `security-expert`                          | `vulnerability-scanner`    | Opus          |
+| **Database design**          | `database-architect`                       | `postgresql-expert`        | Sonnet        |
+| **Test generation**          | `test-architect`                           | `unit-test-expert`         | Sonnet        |
+| **Performance optimization** | `performance-optimizer`                    | `caching-expert`           | Sonnet        |
+| **Documentation**            | `documentation-expert`                     | `gemini-deep`              | Gemini        |
+| **CI/CD pipeline**           | `ci-cd-expert`                             | `github-actions-expert`    | Codex         |
+| **Cloud infrastructure**     | `aws-expert` / `gcp-expert`                | `terraform-expert`         | Sonnet        |
+| **Full codebase analysis**   | `gemini-deep`                              | `model-router`             | Gemini        |
+| **Incident response**        | `incident-response-agent`                  | `stakeholder-communicator` | Sonnet        |
+
+### By AI Model Strength
+
+| Model               | Agent             | Context | Thinking       | Best For                                  |
+| ------------------- | ----------------- | ------- | -------------- | ----------------------------------------- |
+| **Claude Opus 4.5** | `claude-opus-max` | 200K    | 32K ultrathink | Architecture, security, critical bugs     |
+| **GPT-5.2-Codex**   | `codex-max`       | 400K    | xhigh          | Project-scale refactoring, implementation |
+| **Gemini 3 Pro**    | `gemini-deep`     | 1M      | high           | Full codebase analysis, documentation     |
+| **Claude Sonnet**   | Most agents       | 200K    | 4K-10K         | Standard coding, 80% of tasks             |
+
+### By Complexity Level
+
+| Complexity        | Recommended Agent    | Context Size | Model  |
+| ----------------- | -------------------- | ------------ | ------ |
+| **Trivial**       | `pair-programmer`    | < 10K        | Sonnet |
+| **Standard**      | `task-router` (auto) | 50K          | Sonnet |
+| **Complex**       | `claude-opus-max`    | 150K         | Opus   |
+| **Project-scale** | `codex-max`          | 400K         | Codex  |
+| **Full codebase** | `gemini-deep`        | 1M           | Gemini |
+
+---
+
+## Integration Map
+
+### How Agents Work Together
+
 ```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep)
-
----
-
-### <a id='llm-integration-expert'></a>LLM Integration Expert Agent
-
-**Description:** LLM integration specialist. Expert in OpenAI, Anthropic APIs, RAG, and prompt engineering.
+                                    ┌─────────────────────┐
+                                    │    Orchestrator     │
+                                    │   (Master Control)  │
+                                    └──────────┬──────────┘
+                                               │
+                    ┌──────────────────────────┼──────────────────────────┐
+                    │                          │                          │
+                    ▼                          ▼                          ▼
+           ┌───────────────┐          ┌───────────────┐          ┌───────────────┐
+           │  Model Router │          │  Task Router  │          │   Cascade     │
+           │ (AI Selection)│          │(Agent Select) │          │    Agent      │
+           └───────┬───────┘          └───────┬───────┘          └───────┬───────┘
+                   │                          │                          │
+       ┌───────────┼───────────┐              │              ┌───────────┼───────────┐
+       │           │           │              │              │           │           │
+       ▼           ▼           ▼              ▼              ▼           ▼           ▼
+  ┌─────────┐ ┌─────────┐ ┌─────────┐   ┌──────────┐   ┌──────────┐ ┌──────────┐ ┌──────────┐
+  │ Claude  │ │  Codex  │ │ Gemini  │   │ Planning │   │ Backend  │ │ Frontend │ │ Testing  │
+  │Opus Max │ │   Max   │ │  Deep   │   │  Agents  │   │  Agents  │ │  Agents  │ │  Agents  │
+  └─────────┘ └─────────┘ └─────────┘   └──────────┘   └──────────┘ └──────────┘ └──────────┘
+       │                                      │              │           │           │
+       └──────────────────────────────────────┴──────────────┴───────────┴───────────┘
+                                              │
+                              ┌───────────────┴───────────────┐
+                              │      Supporting Agents        │
+                              ├───────────────────────────────┤
+                              │ Security │ DevOps │ Quality  │
+                              │  Cloud   │Database│ Business │
+                              └───────────────────────────────┘
+```
+
+### Agent Collaboration Patterns
+
+| Pattern          | Flow                                  | Use Case            |
+| ---------------- | ------------------------------------- | ------------------- |
+| **Cascade**      | Ticket → Spec → Implement → Test → PR | End-to-end features |
+| **Parallel**     | Multiple agents on independent tasks  | Large features      |
+| **Sequential**   | Agent A output → Agent B input        | Dependent tasks     |
+| **Verification** | Implement (AI-1) → Verify (AI-2)      | Quality assurance   |
+| **Consensus**    | 3 agents review → 2 must agree        | Critical decisions  |
 
-**When to Use:**
-Use the `LLM Integration Expert Agent` when you need llm integration specialist. expert in openai, anthropic apis, rag, and prompt engineering..
+### Tri-Agent Assignment Matrix
 
-**Usage:**
-```bash
-/agent run ai-ml/llm-integration-expert.md <instructions>
-```
+| Category          | Implementer | Reviewer 1 | Reviewer 2 |
+| ----------------- | ----------- | ---------- | ---------- |
+| **Security**      | Claude      | Codex      | Gemini     |
+| **UI/Frontend**   | Codex       | Claude     | Gemini     |
+| **Documentation** | Gemini      | Claude     | Codex      |
+| **Complex Logic** | Claude      | Gemini     | Codex      |
+| **Testing**       | Codex       | Gemini     | Claude     |
+| **API/Backend**   | Codex       | Claude     | Gemini     |
 
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep)
-
 ---
-
-### <a id='llmops-agent'></a>LLMOps Agent
 
-**Description:** Specialized agent for end-to-end LLM lifecycle management, including fine-tuning, evaluation, deployment, and monitoring.
+## Workflow Examples
 
-**When to Use:**
-Use the `LLMOps Agent` when you need specialized agent for end-to-end llm lifecycle management, including fine-tuning, evaluation, deployment, and monitoring..
+### Feature Development Workflow
 
-**Usage:**
-```bash
-/agent run ai-ml/llmops-agent.md <instructions>
 ```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep)
-
----
-
-### <a id='ml-engineer'></a>ML Engineer Agent
-
-**Description:** Machine learning engineering specialist. Expert in ML pipelines, model deployment, and MLOps.
-
-**Key Capabilities:**
-- Scikit-learn, PyTorch, TensorFlow
-- MLflow, Kubeflow
-- Feature stores
-- Model serving (FastAPI, TF Serving)
-- A/B testing for models
-
-**When to Use:**
-Use the `ML Engineer Agent` when you need machine learning engineering specialist. expert in ml pipelines, model deployment, and mlops..
-
-**Usage:**
-```bash
-/agent run ai-ml/ml-engineer.md <instructions>
+1. Product Manager    → Creates PRD
+       ↓
+2. Architect          → Designs architecture (ADRs)
+       ↓
+3. Tech Lead          → Makes technical decisions
+       ↓
+4. Backend Developer  → Implements API
+       ↓ (parallel)
+5. Frontend Developer → Implements UI
+       ↓
+6. Test Architect     → Designs test strategy
+       ↓
+7. Security Expert    → Audits implementation
+       ↓
+8. Code Reviewer      → Reviews code
+       ↓
+9. CI/CD Expert       → Deploys to production
 ```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep)
-
----
-
-### <a id='prompt-engineer'></a>Prompt Engineer
-
-**Description:** Specialized agent for designing, optimizing, and securing LLM prompts.
-
-**Key Capabilities:**
-- Prompt Design Patterns (Few-Shot, CoT, ReAct)
-- System Prompt Templates & Persona Design
-- Prompt Optimization & A/B Testing strategies
-- Security & Prompt Injection Prevention
-- Token usage optimization
-- Multi-model adaptation (Claude, GPT, Gemini)
 
-**When to Use:**
-Use the `Prompt Engineer` when you need to design high-performance prompts, optimize existing prompts for cost/quality, secure prompts against injection, or adapt prompts for different LLM architectures.
+**Command Sequence:**
 
-**Usage:**
 ```bash
-/agent run ai-ml/prompt-engineer.md <instructions>
-```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep)
-
----
+# Phase 1: Planning
+/agents/planning/product-manager create PRD for user notification system
+/agents/planning/architect design architecture for notification service
 
-### <a id='quality-metrics-agent'></a>AI Quality Metrics Agent
+# Phase 2: Implementation
+/agents/backend/nodejs-expert create NestJS module for notifications
+/agents/frontend/react-expert create notification components
 
-**Description:** Specialized agent for measuring, analyzing, and improving AI output quality through latency tracking, quality scoring, hallucination detection, code quality analysis, A/B testing, and regression detection.
+# Phase 3: Quality
+/agents/testing/test-architect design test strategy for notifications
+/agents/security/security-expert audit notification module
+/agents/quality/code-reviewer review notification implementation
 
-**Key Capabilities:**
-- Scikit-learn, PyTorch, TensorFlow
-- MLflow, Kubeflow
-- Feature stores
-- Model serving (FastAPI, TF Serving)
-- A/B testing for models
-
-**When to Use:**
-Use the `AI Quality Metrics Agent` when you need specialized agent for measuring, analyzing, and improving ai output quality through latency tracking, quality scoring, hallucination detection, code quality analysis, a/b testing, and regression detection..
-
-**Usage:**
-```bash
-/agent run ai-ml/quality-metrics-agent.md <instructions>
+# Phase 4: Deploy
+/agents/devops/ci-cd-expert configure deployment pipeline
 ```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep)
-
----
-
-### <a id='rag-expert'></a>rag-expert
-
-**Description:** Vector store and RAG optimization agent focusing on chunking, embeddings, retrieval, and evaluation.
 
-**Key Capabilities:**
-- Scikit-learn, PyTorch, TensorFlow
-- MLflow, Kubeflow
-- Feature stores
-- Model serving (FastAPI, TF Serving)
-- A/B testing for models
+### Bug Fix Workflow
 
-**When to Use:**
-Use the `rag-expert` when you need vector store and rag optimization agent focusing on chunking, embeddings, retrieval, and evaluation..
-
-**Usage:**
-```bash
-/agent run ai-ml/rag-expert.md <instructions>
 ```
-
-**Related Agents:**
-[Claude Opus Max Agent](#claude-opus-max), [Codex Max Agent](#codex-max), [Gemini Deep Agent](#gemini-deep)
-
----
-
-## Backend Development
-
-### <a id='api-architect'></a>API Architect Agent
-
-**Description:** Designs and documents REST/GraphQL APIs. Creates OpenAPI specs and API contracts.
-
-**When to Use:**
-Use the `API Architect Agent` when you need designs and documents rest/graphql apis. creates openapi specs and api contracts..
-
-**Usage:**
-```bash
-/agent run backend/api-architect.md <instructions>
+1. Claude Opus Max    → Analyzes and diagnoses root cause
+       ↓
+2. Backend/Frontend   → Implements fix
+       ↓
+3. Unit Test Expert   → Adds regression tests
+       ↓
+4. Code Reviewer      → Reviews fix
+       ↓
+5. CI/CD Expert       → Deploys hotfix
 ```
-
-**Related Agents:**
-[Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer), [Django Expert Agent](#django-expert)
-
----
-
-### <a id='authentication-specialist'></a>Authentication Specialist Agent
-
-**Description:** Authentication and authorization specialist. Expert in JWT, OAuth, RBAC, and security best practices.
 
-**Key Capabilities:**
-- OAuth 2.0 / OpenID Connect
-- JWT best practices
-- Session management
-- MFA implementation
-- Social login integration
+**Command Sequence:**
 
-**When to Use:**
-Use the `Authentication Specialist Agent` when you need authentication and authorization specialist. expert in jwt, oauth, rbac, and security best practices..
-
-**Usage:**
 ```bash
-/agent run backend/authentication-specialist.md <instructions>
+/agents/ai-ml/claude-opus-max analyze and debug authentication timeout issue
+/agents/backend/nodejs-expert implement fix for auth timeout
+/agents/testing/unit-test-expert write regression tests for auth fix
+/agents/quality/code-reviewer review auth fix implementation
 ```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Backend Developer Agent](#backend-developer), [Django Expert Agent](#django-expert)
-
----
 
-### <a id='backend-developer'></a>Backend Developer Agent
+### Security Audit Workflow
 
-**Description:** General backend development expert. Implements APIs, services, and server-side logic.
-
-**Key Capabilities:**
-- RESTful API design
-- Database operations
-- Authentication/Authorization
-- Caching strategies
-- Background jobs
-
-**When to Use:**
-Use the `Backend Developer Agent` when you need general backend development expert. implements apis, services, and server-side logic..
-
-**Usage:**
-```bash
-/agent run backend/backend-developer.md <instructions>
 ```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Django Expert Agent](#django-expert)
-
----
-
-### <a id='django-expert'></a>Django Expert Agent
-
-**Description:** Django and Django REST Framework specialist. Expert in Python web development with Django.
-
-**Key Capabilities:**
-- Django ORM
-- Django REST Framework
-- Django Channels (WebSockets)
-- Celery integration
-- Django security best practices
-
-**When to Use:**
-Use the `Django Expert Agent` when you need django and django rest framework specialist. expert in python web development with django..
-
-**Usage:**
-```bash
-/agent run backend/django-expert.md <instructions>
+1. Security Expert          → Manual code audit (OWASP Top 10)
+       ↓
+2. Vulnerability Scanner    → Automated SAST/DAST
+       ↓
+3. Dependency Auditor       → Supply chain review
+       ↓
+4. Compliance Expert        → Compliance verification
+       ↓
+5. Stakeholder Communicator → Reports findings
 ```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer)
-
----
 
-### <a id='fastapi-expert'></a>FastAPI Expert Agent
+**Command Sequence:**
 
-**Description:** FastAPI framework specialist. Expert in async Python, Pydantic, dependency injection.
-
-**Key Capabilities:**
-- Async/await patterns
-- Pydantic validation
-- SQLAlchemy async
-- Background tasks
-- WebSocket endpoints
-
-**When to Use:**
-Use the `FastAPI Expert Agent` when you need fastapi framework specialist. expert in async python, pydantic, dependency injection..
-
-**Usage:**
 ```bash
-/agent run backend/fastapi-expert.md <instructions>
+/agents/security/security-expert audit authentication module for OWASP Top 10
+/agents/security/vulnerability-scanner scan project dependencies
+/agents/security/dependency-auditor audit supply chain security
+/agents/security/compliance-expert verify GDPR compliance
+/agents/business/stakeholder-communicator generate security report
 ```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer)
 
----
-
-### <a id='go-expert'></a>Go Expert Agent
-
-**Description:** Go/Golang specialist. Expert in Go web services, concurrency, and idiomatic Go patterns.
-
-**Key Capabilities:**
-- Gin / Echo / Chi frameworks
-- Goroutines and channels
-- GORM / sqlx
-- Go testing
-- Protocol Buffers / gRPC
+### Database Migration Workflow
 
-**When to Use:**
-Use the `Go Expert Agent` when you need go/golang specialist. expert in go web services, concurrency, and idiomatic go patterns..
-
-**Usage:**
-```bash
-/agent run backend/go-expert.md <instructions>
 ```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer)
-
----
-
-### <a id='graphql-specialist'></a>GraphQL Specialist Agent
-
-**Description:** GraphQL API design and implementation specialist. Expert in schema design, resolvers, and GraphQL best practices.
-
-**Key Capabilities:**
-- Apollo Server / GraphQL Yoga
-- Schema design
-- Query optimization
-- Real-time subscriptions
-- Federation/Stitching
-
-**When to Use:**
-Use the `GraphQL Specialist Agent` when you need graphql api design and implementation specialist. expert in schema design, resolvers, and graphql best practices..
-
-**Usage:**
-```bash
-/agent run backend/graphql-specialist.md <instructions>
+1. Database Architect  → Design new schema
+       ↓
+2. Migration Expert    → Create migration plan
+       ↓
+3. PostgreSQL Expert   → Optimize queries
+       ↓
+4. Performance Test    → Load test migrations
+       ↓
+5. Code Reviewer       → Review migration code
 ```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer)
 
 ---
 
-### <a id='microservices-architect'></a>Microservices Architect Agent
+## Agent Categories
 
-**Description:** Microservices architecture specialist. Expert in service decomposition, communication patterns, and distributed systems.
+### General Agents
 
-**Key Capabilities:**
-- Service decomposition
-- Event-driven architecture
-- Saga patterns
-- Circuit breakers
-- Service mesh
+Orchestration, routing, and coordination agents that manage workflows.
 
-**When to Use:**
-Use the `Microservices Architect Agent` when you need microservices architecture specialist. expert in service decomposition, communication patterns, and distributed systems..
+| Agent                    | Path                                   | Key Capabilities                                               |
+| ------------------------ | -------------------------------------- | -------------------------------------------------------------- |
+| **Orchestrator**         | `/agents/general/orchestrator`         | Master workflow management, SDLC phase coordination            |
+| **Model Router**         | `/agents/general/model-router`         | Intelligent routing to Claude/Codex/Gemini based on complexity |
+| **Task Router**          | `/agents/general/task-router`          | Analyzes tasks, determines optimal agent and strategy          |
+| **Cascade Agent**        | `/agents/general/cascade-agent`        | Ticket-to-PR automation, end-to-end features                   |
+| **Parallel Coordinator** | `/agents/general/parallel-coordinator` | Git worktree management, parallel execution                    |
+| **Pair Programmer**      | `/agents/general/pair-programmer`      | Real-time coding assistance, bug catching                      |
+| **Context Manager**      | `/agents/general/context-manager`      | Project structure scanning, file dependencies                  |
+| **Memory Coordinator**   | `/agents/general/memory-coordinator`   | Session memory, cross-agent context                            |
+| **Session Manager**      | `/agents/general/session-manager`      | Session lifecycle, checkpoints, recovery                       |
+| **Observability Agent**  | `/agents/general/observability-agent`  | System monitoring, metrics collection                          |
 
-**Usage:**
-```bash
-/agent run backend/microservices-architect.md <instructions>
-```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer)
-
----
-
-### <a id='nodejs-expert'></a>Node.js Expert Agent
-
-**Description:** Node.js and Express/NestJS specialist. Expert in TypeScript, async patterns, and Node.js best practices.
-
-**Key Capabilities:**
-- Express.js / NestJS
-- TypeScript strict mode
-- Prisma / TypeORM
-- Socket.io
-- Bull/BullMQ queues
+**Usage Examples:**
 
-**When to Use:**
-Use the `Node.js Expert Agent` when you need node.js and express/nestjs specialist. expert in typescript, async patterns, and node.js best practices..
-
-**Usage:**
 ```bash
-/agent run backend/nodejs-expert.md <instructions>
+/agents/general/orchestrator implement user authentication with OAuth
+/agents/general/cascade-agent github.com/org/repo/issues/42
+/agents/general/parallel-coordinator implement login, signup, password reset in parallel
+/agents/general/pair-programmer add debounce to search input
 ```
-
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer)
 
 ---
 
-### <a id='rails-expert'></a>Rails Expert Agent
+### Planning Agents
 
-**Description:** Ruby on Rails specialist. Expert in Rails conventions, ActiveRecord, and Ruby best practices.
+Requirements gathering, architecture design, and technical specifications.
 
-**Key Capabilities:**
-- Rails conventions
-- ActiveRecord patterns
-- Rails API mode
-- Action Cable (WebSockets)
-- RSpec testing
+| Agent                     | Path                                     | Key Capabilities                              |
+| ------------------------- | ---------------------------------------- | --------------------------------------------- |
+| **Architect**             | `/agents/planning/architect`             | System architecture, ADRs, component diagrams |
+| **Product Manager**       | `/agents/planning/product-manager`       | PRDs, feature prioritization (MoSCoW, RICE)   |
+| **Tech Lead**             | `/agents/planning/tech-lead`             | Technical decisions, coding standards         |
+| **Requirements Analyst**  | `/agents/planning/requirements-analyst`  | User stories, acceptance criteria, NFRs       |
+| **Requirements Analyzer** | `/agents/planning/requirements-analyzer` | Deep requirements analysis and validation     |
+| **Tech Spec Writer**      | `/agents/planning/tech-spec-writer`      | Technical specifications, API contracts       |
+| **Spec Generator**        | `/agents/planning/spec-generator`        | Auto-generate specs from requirements         |
+| **Risk Assessor**         | `/agents/planning/risk-assessor`         | Risk identification, mitigation planning      |
+| **UX Researcher**         | `/agents/planning/ux-researcher`         | User research, journey mapping, personas      |
 
-**When to Use:**
-Use the `Rails Expert Agent` when you need ruby on rails specialist. expert in rails conventions, activerecord, and ruby best practices..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run backend/rails-expert.md <instructions>
+/agents/planning/architect microservices architecture for e-commerce platform
+/agents/planning/product-manager create PRD for notification system
+/agents/planning/tech-lead decide between REST and GraphQL for new API
 ```
 
-**Related Agents:**
-[API Architect Agent](#api-architect), [Authentication Specialist Agent](#authentication-specialist), [Backend Developer Agent](#backend-developer)
-
 ---
-
-## Business & Planning
-
-### <a id='business-analyst'></a>Business Analyst Agent
-
-**Description:** tools:
-
-**When to Use:**
-Use the `Business Analyst Agent` when you need tools:.
-
-**Usage:**
-```bash
-/agent run business/business-analyst.md <instructions>
-```
 
-**Related Agents:**
-[Cloud Cost Optimizer Agent](#cost-optimizer), [Project Tracker Agent](#project-tracker), [Stakeholder Communicator Agent](#stakeholder-communicator)
-
----
+### Backend Agents
 
-### <a id='cost-optimizer'></a>Cloud Cost Optimizer Agent
+Server-side development, API design, and framework expertise.
 
-**Description:** Specialized agent for multi-cloud and AI cost optimization, including reserved instances, spot strategies, right-sizing, token usage optimization, and budget forecasting.
+| Agent                         | Path                                        | Key Capabilities                      |
+| ----------------------------- | ------------------------------------------- | ------------------------------------- |
+| **Backend Developer**         | `/agents/backend/backend-developer`         | General backend, API development      |
+| **API Architect**             | `/agents/backend/api-architect`             | API design, OpenAPI specs, versioning |
+| **Node.js Expert**            | `/agents/backend/nodejs-expert`             | Express/NestJS, TypeScript, Prisma    |
+| **FastAPI Expert**            | `/agents/backend/fastapi-expert`            | Async Python, Pydantic, SQLAlchemy    |
+| **Django Expert**             | `/agents/backend/django-expert`             | Django ORM, DRF, admin, signals       |
+| **Rails Expert**              | `/agents/backend/rails-expert`              | Ruby on Rails, ActiveRecord, Hotwire  |
+| **Go Expert**                 | `/agents/backend/go-expert`                 | Go concurrency, Gin/Echo, gRPC        |
+| **GraphQL Specialist**        | `/agents/backend/graphql-specialist`        | Schema design, resolvers, federation  |
+| **Microservices Architect**   | `/agents/backend/microservices-architect`   | Service decomposition, event-driven   |
+| **Authentication Specialist** | `/agents/backend/authentication-specialist` | OAuth, JWT, OIDC, session management  |
 
-**When to Use:**
-Use the `Cloud Cost Optimizer Agent` when you need specialized agent for multi-cloud and ai cost optimization, including reserved instances, spot strategies, right-sizing, token usage optimization, and budget forecasting..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run business/cost-optimizer.md <instructions>
+/agents/backend/nodejs-expert create NestJS module for user management
+/agents/backend/fastapi-expert create async CRUD API with SQLAlchemy
+/agents/backend/microservices-architect design event-driven order processing
 ```
 
-**Related Agents:**
-[Business Analyst Agent](#business-analyst), [Project Tracker Agent](#project-tracker), [Stakeholder Communicator Agent](#stakeholder-communicator)
-
 ---
 
-### <a id='project-tracker'></a>Project Tracker Agent
+### Frontend Agents
 
-**Description:** tools:
+Client-side development, UI frameworks, and user experience.
 
-**Key Capabilities:**
-- 
+| Agent                       | Path                                       | Key Capabilities                       |
+| --------------------------- | ------------------------------------------ | -------------------------------------- |
+| **Frontend Developer**      | `/agents/frontend/frontend-developer`      | General frontend, responsive design    |
+| **React Expert**            | `/agents/frontend/react-expert`            | React 18+, hooks, React Query          |
+| **Vue Expert**              | `/agents/frontend/vue-expert`              | Vue 3, Composition API, Pinia          |
+| **Next.js Expert**          | `/agents/frontend/nextjs-expert`           | App Router, Server Components          |
+| **TypeScript Expert**       | `/agents/frontend/typescript-expert`       | Strict typing, generics, utility types |
+| **CSS Expert**              | `/agents/frontend/css-expert`              | Tailwind, CSS Modules, animations      |
+| **State Management Expert** | `/agents/frontend/state-management-expert` | Redux, Zustand, Jotai                  |
+| **Mobile Web Expert**       | `/agents/frontend/mobile-web-expert`       | PWA, responsive, mobile-first          |
+| **Accessibility Expert**    | `/agents/frontend/accessibility-expert`    | WCAG, ARIA, screen readers             |
+| **Testing Frontend**        | `/agents/frontend/testing-frontend`        | React Testing Library, component tests |
 
-**When to Use:**
-Use the `Project Tracker Agent` when you need tools:.
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run business/project-tracker.md <instructions>
+/agents/frontend/react-expert create data table with sorting and filtering
+/agents/frontend/nextjs-expert create dashboard with server components
+/agents/frontend/accessibility-expert audit form components for WCAG 2.1 AA
 ```
-
-**Related Agents:**
-[Business Analyst Agent](#business-analyst), [Cloud Cost Optimizer Agent](#cost-optimizer), [Stakeholder Communicator Agent](#stakeholder-communicator)
 
 ---
 
-### <a id='stakeholder-communicator'></a>Stakeholder Communicator Agent
+### Database Agents
 
-**Description:** tools:
+Database design, optimization, and migration specialists.
 
-**Key Capabilities:**
-- 
+| Agent                     | Path                                     | Key Capabilities                            |
+| ------------------------- | ---------------------------------------- | ------------------------------------------- |
+| **Database Architect**    | `/agents/database/database-architect`    | Schema design, normalization, data modeling |
+| **PostgreSQL Expert**     | `/agents/database/postgresql-expert`     | CTEs, window functions, EXPLAIN ANALYZE     |
+| **MongoDB Expert**        | `/agents/database/mongodb-expert`        | Document modeling, aggregation pipelines    |
+| **Redis Expert**          | `/agents/database/redis-expert`          | Caching patterns, pub/sub, data structures  |
+| **ORM Expert**            | `/agents/database/orm-expert`            | Prisma, TypeORM, SQLAlchemy                 |
+| **Migration Expert**      | `/agents/database/migration-expert`      | Zero-downtime migrations, schema versioning |
+| **Migration Expert Full** | `/agents/database/migration-expert-full` | Complex multi-database migrations           |
 
-**When to Use:**
-Use the `Stakeholder Communicator Agent` when you need tools:.
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run business/stakeholder-communicator.md <instructions>
+/agents/database/postgresql-expert optimize slow query with EXPLAIN ANALYZE
+/agents/database/mongodb-expert design schema for social media posts
+/agents/database/migration-expert create zero-downtime migration plan
 ```
 
-**Related Agents:**
-[Business Analyst Agent](#business-analyst), [Cloud Cost Optimizer Agent](#cost-optimizer), [Project Tracker Agent](#project-tracker)
-
 ---
 
-## Cloud & Infrastructure
+### Testing Agents
 
-### <a id='aws-expert'></a>AWS Expert Agent
+Test strategy, implementation, and quality assurance.
 
-**Description:** AWS cloud specialist. Expert in AWS services, architecture, and best practices.
+| Agent                       | Path                                      | Key Capabilities                        |
+| --------------------------- | ----------------------------------------- | --------------------------------------- |
+| **Test Architect**          | `/agents/testing/test-architect`          | Test strategy, pyramid design, coverage |
+| **Unit Test Expert**        | `/agents/testing/unit-test-expert`        | Jest/Vitest/pytest, mocking, TDD        |
+| **Integration Test Expert** | `/agents/testing/integration-test-expert` | API testing, database testing           |
+| **E2E Test Expert**         | `/agents/testing/e2e-test-expert`         | Playwright/Cypress, page objects        |
+| **API Test Expert**         | `/agents/testing/api-test-expert`         | REST/GraphQL testing, contracts         |
+| **Performance Test Expert** | `/agents/testing/performance-test-expert` | Load testing, k6, stress testing        |
+| **TDD Coach**               | `/agents/testing/tdd-coach`               | Test-first methodology                  |
+| **Test Data Expert**        | `/agents/testing/test-data-expert`        | Fixtures, factories, realistic data     |
+| **API Contract Agent**      | `/agents/testing/api-contract-agent`      | Pact testing, consumer-driven contracts |
 
-**When to Use:**
-Use the `AWS Expert Agent` when you need aws cloud specialist. expert in aws services, architecture, and best practices..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run cloud/aws-expert.md <instructions>
+/agents/testing/unit-test-expert write unit tests for payment service
+/agents/testing/e2e-test-expert create E2E tests for checkout flow
+/agents/testing/performance-test-expert create load test for 1000 concurrent users
 ```
-
-**Related Agents:**
-[Azure Expert Agent](#azure-expert), [GCP Expert Agent](#gcp-expert-full), [GCP Expert Agent](#gcp-expert)
 
 ---
 
-### <a id='azure-expert'></a>Azure Expert Agent
-
-**Description:** Azure cloud specialist. Expert in Microsoft Azure services, architecture, automation, and cost management.
-
-**When to Use:**
-Use the `Azure Expert Agent` when you need azure cloud specialist. expert in microsoft azure services, architecture, automation, and cost management..
-
-**Usage:**
-```bash
-/agent run cloud/azure-expert.md <instructions>
-```
-
-**Related Agents:**
-[AWS Expert Agent](#aws-expert), [GCP Expert Agent](#gcp-expert-full), [GCP Expert Agent](#gcp-expert)
-
----
+### Quality Agents
 
-### <a id='gcp-expert-full'></a>GCP Expert Agent
+Code quality, review, and technical debt management.
 
-**Description:** A specialized agent for Google Cloud Platform architecture, implementation, and optimization.
+| Agent                      | Path                                     | Key Capabilities                       |
+| -------------------------- | ---------------------------------------- | -------------------------------------- |
+| **Code Reviewer**          | `/agents/quality/code-reviewer`          | Code quality, best practices, feedback |
+| **Gemini Reviewer**        | `/agents/quality/gemini-reviewer`        | Large context review with Gemini       |
+| **Refactoring Expert**     | `/agents/quality/refactoring-expert`     | Code smells, safe transformations      |
+| **Documentation Expert**   | `/agents/quality/documentation-expert`   | API docs, README, JSDoc/TSDoc          |
+| **Linting Expert**         | `/agents/quality/linting-expert`         | ESLint, Ruff, custom rules             |
+| **Technical Debt Analyst** | `/agents/quality/technical-debt-analyst` | Debt identification, prioritization    |
+| **Performance Analyst**    | `/agents/quality/performance-analyst`    | Code performance analysis              |
+| **Product Analyst**        | `/agents/quality/product-analyst`        | Product metrics, feature impact        |
+| **Dependency Manager**     | `/agents/quality/dependency-manager`     | Dependency updates, version management |
+| **Doc Linter Agent**       | `/agents/quality/doc-linter-agent`       | Documentation quality checks           |
+| **Semantic Search Agent**  | `/agents/quality/semantic-search-agent`  | Codebase semantic search               |
 
-**When to Use:**
-Use the `GCP Expert Agent` when you need a specialized agent for google cloud platform architecture, implementation, and optimization..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run cloud/gcp-expert-full.md <instructions>
+/agents/quality/code-reviewer review authentication module
+/agents/quality/refactoring-expert refactor user service to reduce complexity
+/agents/quality/documentation-expert generate API documentation for user endpoints
 ```
 
-**Related Agents:**
-[AWS Expert Agent](#aws-expert), [Azure Expert Agent](#azure-expert), [GCP Expert Agent](#gcp-expert)
-
 ---
-
-### <a id='gcp-expert'></a>GCP Expert Agent
-
-**Description:** Google Cloud Platform specialist. Expert in GCP services and architecture.
-
-**When to Use:**
-Use the `GCP Expert Agent` when you need google cloud platform specialist. expert in gcp services and architecture..
-
-**Usage:**
-```bash
-/agent run cloud/gcp-expert.md <instructions>
-```
-
-**Related Agents:**
-[AWS Expert Agent](#aws-expert), [Azure Expert Agent](#azure-expert), [GCP Expert Agent](#gcp-expert-full)
 
----
+### Security Agents
 
-### <a id='multi-cloud-architect'></a>Multi-Cloud Expert Agent
+Application security, compliance, and vulnerability management.
 
-**Description:** You are the **Multi-Cloud Architect**, an expert AI agent specializing in designing, implementing, and optimizing architectures that span multiple cloud providers (AWS, Azure, GCP, and others). Your goal is to build resilient, cost-effective, and vendor-neutral systems.
+| Agent                           | Path                                           | Key Capabilities                    |
+| ------------------------------- | ---------------------------------------------- | ----------------------------------- |
+| **Security Expert**             | `/agents/security/security-expert`             | OWASP Top 10, secure coding         |
+| **Vulnerability Scanner**       | `/agents/security/vulnerability-scanner`       | SAST, dependency scanning, CVEs     |
+| **Penetration Tester**          | `/agents/security/penetration-tester`          | Security testing, attack simulation |
+| **Compliance Expert**           | `/agents/security/compliance-expert`           | SOC2, GDPR, HIPAA                   |
+| **Regulatory Compliance Agent** | `/agents/security/regulatory-compliance-agent` | Industry-specific regulations       |
+| **Secrets Management Expert**   | `/agents/security/secrets-management-expert`   | Vault, AWS Secrets Manager          |
+| **Dependency Auditor**          | `/agents/security/dependency-auditor`          | Supply chain security, SBOMs        |
+| **Guardrails Agent**            | `/agents/security/guardrails-agent`            | Runtime security, input validation  |
 
-**When to Use:**
-Use the `Multi-Cloud Expert Agent` when you need you are the **multi-cloud architect**, an expert ai agent specializing in designing, implementing, and optimizing architectures that span multiple cloud providers (aws, azure, gcp, and others). your goal is to build resilient, cost-effective, and vendor-neutral systems..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run cloud/multi-cloud-architect.md <instructions>
+/agents/security/security-expert audit authentication module for OWASP Top 10
+/agents/security/vulnerability-scanner scan project dependencies
+/agents/security/compliance-expert verify GDPR compliance for user data
 ```
-
-**Related Agents:**
-[AWS Expert Agent](#aws-expert), [Azure Expert Agent](#azure-expert), [GCP Expert Agent](#gcp-expert-full)
 
 ---
-
-### <a id='multi-cloud-expert'></a>Multi-Cloud Expert Agent
-
-**Description:** Multi-cloud architecture specialist. Expert in cross-cloud strategies and portability.
-
-**When to Use:**
-Use the `Multi-Cloud Expert Agent` when you need multi-cloud architecture specialist. expert in cross-cloud strategies and portability..
-
-**Usage:**
-```bash
-/agent run cloud/multi-cloud-expert.md <instructions>
-```
 
-**Related Agents:**
-[AWS Expert Agent](#aws-expert), [Azure Expert Agent](#azure-expert), [GCP Expert Agent](#gcp-expert-full)
+### Performance Agents
 
----
-
-### <a id='serverless-expert'></a>Serverless Expert Agent
+Application performance optimization and caching.
 
-**Description:** name: serverless-expert
+| Agent                     | Path                                        | Key Capabilities                     |
+| ------------------------- | ------------------------------------------- | ------------------------------------ |
+| **Performance Optimizer** | `/agents/performance/performance-optimizer` | Profiling, bottleneck identification |
+| **Caching Expert**        | `/agents/performance/caching-expert`        | Redis, CDN, cache invalidation       |
+| **Profiling Expert**      | `/agents/performance/profiling-expert`      | CPU/memory profiling, flame graphs   |
+| **Load Testing Expert**   | `/agents/performance/load-testing-expert`   | k6, Artillery, load profiles         |
+| **Bundle Optimizer**      | `/agents/performance/bundle-optimizer`      | Webpack/Vite optimization            |
 
-**When to Use:**
-Use the `Serverless Expert Agent` when you need name: serverless-expert.
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run cloud/serverless-expert.md <instructions>
+/agents/performance/performance-optimizer profile and optimize slow API endpoint
+/agents/performance/caching-expert implement Redis caching for API responses
 ```
 
-**Related Agents:**
-[AWS Expert Agent](#aws-expert), [Azure Expert Agent](#azure-expert), [GCP Expert Agent](#gcp-expert-full)
-
 ---
-
-## Database Engineering
 
-### <a id='database-architect'></a>Database Architect Agent
+### DevOps Agents
 
-**Description:** Database architecture specialist. Expert in schema design, normalization, indexing, and database optimization.
+CI/CD, containerization, infrastructure, and monitoring.
 
-**Key Capabilities:**
-- Schema normalization (1NF-BCNF)
-- Index optimization
-- Partitioning strategies
-- Replication patterns
-- Database selection
+| Agent                           | Path                                         | Key Capabilities                        |
+| ------------------------------- | -------------------------------------------- | --------------------------------------- |
+| **DevOps Engineer**             | `/agents/devops/devops-engineer`             | General DevOps, automation              |
+| **CI/CD Expert**                | `/agents/devops/ci-cd-expert`                | GitHub Actions, GitLab CI, Jenkins      |
+| **GitHub Actions Expert**       | `/agents/devops/github-actions-expert`       | Workflow optimization, reusable actions |
+| **Docker Expert**               | `/agents/devops/docker-expert`               | Dockerfiles, compose, multi-stage       |
+| **Kubernetes Expert**           | `/agents/devops/kubernetes-expert`           | K8s manifests, Helm, operators          |
+| **Terraform Expert**            | `/agents/devops/terraform-expert`            | IaC, modules, state management          |
+| **Infrastructure Architect**    | `/agents/devops/infrastructure-architect`    | Cloud architecture, scalability         |
+| **Monitoring Expert**           | `/agents/devops/monitoring-expert`           | Prometheus, Grafana, alerting           |
+| **Incident Response Agent**     | `/agents/devops/incident-response-agent`     | Incident management, postmortems        |
+| **Self-Healing Pipeline Agent** | `/agents/devops/self-healing-pipeline-agent` | Auto-remediation, resilience            |
 
-**When to Use:**
-Use the `Database Architect Agent` when you need database architecture specialist. expert in schema design, normalization, indexing, and database optimization..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run database/database-architect.md <instructions>
+/agents/devops/ci-cd-expert design GitHub Actions pipeline for Node.js monorepo
+/agents/devops/docker-expert create optimized Dockerfile for Node.js app
+/agents/devops/kubernetes-expert create Kubernetes deployment with autoscaling
 ```
 
-**Related Agents:**
-[Migration Expert Agent (Full)](#migration-expert-full), [Migration Expert Agent](#migration-expert), [MongoDB Expert Agent](#mongodb-expert)
-
 ---
 
-### <a id='migration-expert-full'></a>Migration Expert Agent (Full)
+### Cloud Agents
 
-**Description:** Database migration specialist. Expert in zero-downtime schema evolution, data backfills, rollback safety, and cross-database moves.
+Cloud platform specialists for AWS, GCP, and Azure.
 
-**Key Capabilities:**
-- Zero-downtime patterns (expand/contract, dual-write, shadow tables)
-- Online DDL and lock management
-- Backfills, data validation, and idempotent scripts
-- Rollback planning and feature flag coordination
-- Schema versioning and migration ordering
+| Agent                     | Path                                  | Key Capabilities                      |
+| ------------------------- | ------------------------------------- | ------------------------------------- |
+| **AWS Expert**            | `/agents/cloud/aws-expert`            | EC2, Lambda, ECS, RDS, IAM            |
+| **GCP Expert**            | `/agents/cloud/gcp-expert`            | Compute Engine, Cloud Run, BigQuery   |
+| **GCP Expert Full**       | `/agents/cloud/gcp-expert-full`       | Comprehensive GCP services            |
+| **Azure Expert**          | `/agents/cloud/azure-expert`          | VMs, Functions, AKS, Azure SQL        |
+| **Multi-Cloud Expert**    | `/agents/cloud/multi-cloud-expert`    | Cross-cloud strategies, portability   |
+| **Multi-Cloud Architect** | `/agents/cloud/multi-cloud-architect` | Multi-cloud architecture design       |
+| **Serverless Expert**     | `/agents/cloud/serverless-expert`     | Lambda, Cloud Functions, event-driven |
 
-**When to Use:**
-Use the `Migration Expert Agent (Full)` when you need database migration specialist. expert in zero-downtime schema evolution, data backfills, rollback safety, and cross-database moves..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run database/migration-expert-full.md <instructions>
+/agents/cloud/aws-expert design serverless architecture with Lambda and API Gateway
+/agents/cloud/gcp-expert deploy Cloud Run service with Cloud SQL
+/agents/cloud/serverless-expert implement event-driven image processing pipeline
 ```
-
-**Related Agents:**
-[Database Architect Agent](#database-architect), [Migration Expert Agent](#migration-expert), [MongoDB Expert Agent](#mongodb-expert)
 
 ---
 
-### <a id='migration-expert'></a>Migration Expert Agent
+### AI/ML Agents
 
-**Description:** Database migration specialist. Expert in schema evolution, zero-downtime migrations, and data migration strategies.
+Machine learning, LLM integration, and AI model management.
 
-**Key Capabilities:**
-- Schema evolution
-- Zero-downtime migrations
-- Data backfills
-- Migration testing
-- Rollback procedures
+| Agent                      | Path                                   | Key Capabilities                        |
+| -------------------------- | -------------------------------------- | --------------------------------------- |
+| **Claude Opus Max**        | `/agents/ai-ml/claude-opus-max`        | 32K ultrathink, architecture, debugging |
+| **Codex Max**              | `/agents/ai-ml/codex-max`              | 400K context, project-scale refactoring |
+| **Gemini Deep**            | `/agents/ai-ml/gemini-deep`            | 1M context, full codebase analysis      |
+| **ML Engineer**            | `/agents/ai-ml/ml-engineer`            | ML pipelines, MLOps, model deployment   |
+| **LLM Integration Expert** | `/agents/ai-ml/llm-integration-expert` | OpenAI/Anthropic APIs, RAG              |
+| **RAG Expert**             | `/agents/ai-ml/rag-expert`             | Retrieval-Augmented Generation          |
+| **LLMOps Agent**           | `/agents/ai-ml/llmops-agent`           | LLM deployment, monitoring              |
+| **Prompt Engineer**        | `/agents/ai-ml/prompt-engineer`        | Prompt design, optimization             |
+| **LangChain Expert**       | `/agents/ai-ml/langchain-expert`       | LangChain/LangGraph applications        |
+| **Quality Metrics Agent**  | `/agents/ai-ml/quality-metrics-agent`  | AI output quality measurement           |
 
-**When to Use:**
-Use the `Migration Expert Agent` when you need database migration specialist. expert in schema evolution, zero-downtime migrations, and data migration strategies..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run database/migration-expert.md <instructions>
+/agents/ai-ml/claude-opus-max design distributed event-driven architecture for 10M events/second
+/agents/ai-ml/codex-max refactor authentication system from session-based to JWT
+/agents/ai-ml/gemini-deep analyze entire microservices architecture across 12 repositories
 ```
 
-**Related Agents:**
-[Database Architect Agent](#database-architect), [Migration Expert Agent (Full)](#migration-expert-full), [MongoDB Expert Agent](#mongodb-expert)
-
 ---
 
-### <a id='mongodb-expert'></a>MongoDB Expert Agent
+### Integration Agents
 
-**Description:** MongoDB specialist. Expert in document modeling, aggregation, indexing, and MongoDB best practices.
+Third-party integrations, webhooks, and MCP servers.
 
-**Key Capabilities:**
-- Document modeling
-- Aggregation framework
-- Index strategies
-- Sharding
-- Change streams
+| Agent                       | Path                                          | Key Capabilities                    |
+| --------------------------- | --------------------------------------------- | ----------------------------------- |
+| **API Integration Expert**  | `/agents/integration/api-integration-expert`  | Third-party API integration         |
+| **Webhook Expert**          | `/agents/integration/webhook-expert`          | Signature verification, idempotency |
+| **Third-Party API Expert**  | `/agents/integration/third-party-api-expert`  | Payment, email, SMS integrations    |
+| **MCP Expert**              | `/agents/integration/mcp-expert`              | Model Context Protocol servers      |
+| **API Observability Agent** | `/agents/integration/api-observability-agent` | API monitoring, tracing             |
 
-**When to Use:**
-Use the `MongoDB Expert Agent` when you need mongodb specialist. expert in document modeling, aggregation, indexing, and mongodb best practices..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run database/mongodb-expert.md <instructions>
+/agents/integration/webhook-expert implement Stripe webhook handler with idempotency
+/agents/integration/mcp-expert create TypeScript MCP server for Jira integration
+/agents/integration/api-integration-expert integrate Twilio for SMS notifications
 ```
-
-**Related Agents:**
-[Database Architect Agent](#database-architect), [Migration Expert Agent (Full)](#migration-expert-full), [Migration Expert Agent](#migration-expert)
 
 ---
 
-### <a id='orm-expert'></a>ORM Expert Agent
+### Business Agents
 
-**Description:** ORM specialist. Expert in Prisma, SQLAlchemy, TypeORM, and database abstraction patterns.
+Cost optimization, project tracking, and stakeholder communication.
 
-**Key Capabilities:**
-- Prisma (Node.js)
-- SQLAlchemy (Python)
-- TypeORM / Drizzle
-- ActiveRecord patterns
-- Query optimization
+| Agent                        | Path                                        | Key Capabilities                         |
+| ---------------------------- | ------------------------------------------- | ---------------------------------------- |
+| **Cost Optimizer**           | `/agents/business/cost-optimizer`           | Cloud cost analysis, reserved instances  |
+| **Project Tracker**          | `/agents/business/project-tracker`          | Sprint tracking, velocity, milestones    |
+| **Stakeholder Communicator** | `/agents/business/stakeholder-communicator` | Status reports, release notes, incidents |
+| **Business Analyst**         | `/agents/business/business-analyst`         | Business requirements, process analysis  |
 
-**When to Use:**
-Use the `ORM Expert Agent` when you need orm specialist. expert in prisma, sqlalchemy, typeorm, and database abstraction patterns..
+**Usage Examples:**
 
-**Usage:**
 ```bash
-/agent run database/orm-expert.md <instructions>
+/agents/business/cost-optimizer analyze AWS costs and create optimization plan
+/agents/business/stakeholder-communicator exec-report --project "Platform Migration"
+/agents/business/project-tracker sprint-report --sprint 12
 ```
 
-**Related Agents:**
-[Database Architect Agent](#database-architect), [Migration Expert Agent (Full)](#migration-expert-full), [Migration Expert Agent](#migration-expert)
-
 ---
-
-### <a id='postgresql-expert'></a>PostgreSQL Expert Agent
 
-**Description:** PostgreSQL specialist. Expert in PG features, performance tuning, extensions, and advanced queries.
+## Invocation Patterns
 
-**Key Capabilities:**
-- Advanced SQL (CTEs, window functions)
-- EXPLAIN ANALYZE
-- pg_stat_statements
-- JSON/JSONB operations
-- Full-text search
+### Basic Invocation
 
-**When to Use:**
-Use the `PostgreSQL Expert Agent` when you need postgresql specialist. expert in pg features, performance tuning, extensions, and advanced queries..
-
-**Usage:**
 ```bash
-/agent run database/postgresql-expert.md <instructions>
+/agents/<category>/<agent-name> <task-description>
 ```
-
-**Related Agents:**
-[Database Architect Agent](#database-architect), [Migration Expert Agent (Full)](#migration-expert-full), [Migration Expert Agent](#migration-expert)
-
----
-
-### <a id='redis-expert'></a>Redis Expert Agent
-
-**Description:** Redis specialist. Expert in caching, data structures, pub/sub, and Redis patterns.
 
-**Key Capabilities:**
-- Caching patterns
-- Redis data structures
-- Pub/Sub messaging
-- Redis Streams
-- Lua scripting
+### Via Task Tool
 
-**When to Use:**
-Use the `Redis Expert Agent` when you need redis specialist. expert in caching, data structures, pub/sub, and redis patterns..
-
-**Usage:**
-```bash
-/agent run database/redis-expert.md <instructions>
+```typescript
+Use the Task tool with subagent_type="<agent-name>" to:
+1. [Capability 1]
+2. [Capability 2]
+Task: <your-task>
 ```
-
-**Related Agents:**
-[Database Architect Agent](#database-architect), [Migration Expert Agent (Full)](#migration-expert-full), [Migration Expert Agent](#migration-expert)
-
----
-
-## DevOps & SRE
-
-### <a id='ci-cd-expert'></a>CI/CD Expert Agent
-
-**Description:** Comprehensive CI/CD specialist for pipeline design, build automation, deployment strategies, and DevSecOps practices
 
-**Key Capabilities:**
-- Caching patterns
-- Redis data structures
-- Pub/Sub messaging
-- Redis Streams
-- Lua scripting
+### Chained Invocation
 
-**When to Use:**
-Use the `CI/CD Expert Agent` when you need comprehensive ci/cd specialist for pipeline design, build automation, deployment strategies, and devsecops practices.
-
-**Usage:**
 ```bash
-/agent run devops/ci-cd-expert.md <instructions>
+# Planning → Implementation → Testing → Review
+/agents/planning/architect design auth system
+/agents/backend/nodejs-expert implement auth service
+/agents/testing/unit-test-expert write tests for auth
+/agents/quality/code-reviewer review auth implementation
 ```
-
-**Related Agents:**
-[DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert), [GitHub Actions Expert Agent](#github-actions-expert)
-
----
 
-### <a id='devops-engineer'></a>DevOps Engineer Agent
+### Parallel Invocation
 
-**Description:** DevOps specialist. Expert in CI/CD, infrastructure automation, and deployment strategies.
-
-**Key Capabilities:**
-- CI/CD pipelines
-- Infrastructure as Code
-- Container orchestration
-- Monitoring & logging
-- Deployment strategies
-
-**When to Use:**
-Use the `DevOps Engineer Agent` when you need devops specialist. expert in ci/cd, infrastructure automation, and deployment strategies..
-
-**Usage:**
 ```bash
-/agent run devops/devops-engineer.md <instructions>
+/agents/general/parallel-coordinator [
+  "backend: implement user API",
+  "frontend: create user form",
+  "testing: write API tests"
+]
 ```
-
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [Docker Expert Agent](#docker-expert), [GitHub Actions Expert Agent](#github-actions-expert)
 
----
-
-### <a id='docker-expert'></a>Docker Expert Agent
-
-**Description:** Docker and containerization specialist. Expert in Docker, Docker Compose, and container best practices.
-
-**When to Use:**
-Use the `Docker Expert Agent` when you need docker and containerization specialist. expert in docker, docker compose, and container best practices..
+### Model-Specific Invocation
 
-**Usage:**
 ```bash
-/agent run devops/docker-expert.md <instructions>
-```
-
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [GitHub Actions Expert Agent](#github-actions-expert)
-
----
+# For architecture (use Opus)
+/agents/ai-ml/claude-opus-max <complex-architecture-task>
 
-### <a id='github-actions-expert'></a>GitHub Actions Expert Agent
+# For large refactoring (use Codex)
+/agents/ai-ml/codex-max <project-scale-refactoring>
 
-**Description:** >
-
-**When to Use:**
-Use the `GitHub Actions Expert Agent` when you need >.
-
-**Usage:**
-```bash
-/agent run devops/github-actions-expert.md <instructions>
+# For codebase analysis (use Gemini)
+/agents/ai-ml/gemini-deep <full-codebase-analysis>
 ```
-
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert)
 
 ---
 
-### <a id='incident-response-agent'></a>Production Incident Response Agent
+## Best Practices
 
-**Description:** Comprehensive production incident management specialist for incident detection, classification, root cause analysis, runbook execution, auto-rollback, stakeholder communication, and blameless postmortem facilitation
-
-**When to Use:**
-Use the `Production Incident Response Agent` when you need comprehensive production incident management specialist for incident detection, classification, root cause analysis, runbook execution, auto-rollback, stakeholder communication, and blameless postmortem facilitation.
-
-**Usage:**
-```bash
-/agent run devops/incident-response-agent.md <instructions>
-```
+### Agent Selection
 
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert)
+1. **Start with routing** - Use `model-router` or `task-router` for uncertain complexity
+2. **Match expertise** - Choose framework-specific agents (e.g., `nextjs-expert` for Next.js)
+3. **Consider context** - Use `gemini-deep` for large codebase analysis (>100K tokens)
+4. **Security first** - Always include `security-expert` for auth/payment code
 
----
+### Workflow Optimization
 
-### <a id='infrastructure-architect'></a>Infrastructure Architect Agent
+1. **Cascade for features** - Use `cascade-agent` for end-to-end feature implementation
+2. **Parallel for independence** - Use `parallel-coordinator` for unrelated tasks
+3. **Verify with different AI** - Assign different model for verification than implementation
+4. **Sequential for dependencies** - Backend before frontend, types before components
 
-**Description:** name: infrastructure-architect
+### Quality Gates
 
-**When to Use:**
-Use the `Infrastructure Architect Agent` when you need name: infrastructure-architect.
+| Gate                  | Required Agent     | Trigger                       |
+| --------------------- | ------------------ | ----------------------------- |
+| Code Review           | `code-reviewer`    | All PRs                       |
+| Security Review       | `security-expert`  | Auth, payment, sensitive code |
+| Architecture Review   | `architect`        | Architecture changes          |
+| Multi-Agent Consensus | 3 different agents | Critical decisions            |
 
-**Usage:**
-```bash
-/agent run devops/infrastructure-architect.md <instructions>
-```
+### Troubleshooting
 
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert)
+| Issue                | Solution                                                   |
+| -------------------- | ---------------------------------------------------------- |
+| Agent timeout        | Use `gemini-deep` for large context, split task for others |
+| Wrong model selected | Use `model-router` explicitly with complexity hint         |
+| Missing context      | Use `context-manager` to load project structure first      |
+| Inconsistent output  | Specify output format in task description                  |
+| Agent unavailable    | Check failover chain in `model-router`                     |
 
 ---
-
-### <a id='kubernetes-expert'></a>Kubernetes Expert Agent
 
-**Description:** Kubernetes specialist. Expert in K8s resources, deployments, and cluster management.
+## Quick Reference Commands
 
-**When to Use:**
-Use the `Kubernetes Expert Agent` when you need kubernetes specialist. expert in k8s resources, deployments, and cluster management..
+### Orchestration
 
-**Usage:**
 ```bash
-/agent run devops/kubernetes-expert.md <instructions>
+/agents/general/orchestrator <task>
+/agents/general/cascade-agent <ticket-url>
+/agents/general/model-router <task>
 ```
-
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert)
-
----
-
-### <a id='monitoring-expert'></a>Monitoring Expert Agent
 
-**Description:** Monitoring and observability specialist. Expert in Prometheus, Grafana, and logging.
+### Planning
 
-**When to Use:**
-Use the `Monitoring Expert Agent` when you need monitoring and observability specialist. expert in prometheus, grafana, and logging..
-
-**Usage:**
 ```bash
-/agent run devops/monitoring-expert.md <instructions>
+/agents/planning/architect <system-description>
+/agents/planning/product-manager create PRD for <feature>
+/agents/planning/tech-lead <technical-decision>
 ```
-
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert)
-
----
 
-### <a id='self-healing-pipeline-agent'></a>Self-Healing Pipeline Agent
+### Development
 
-**Description:** Autonomous agent for detecting, analyzing, and fixing CI/CD pipeline failures
-
-**When to Use:**
-Use the `Self-Healing Pipeline Agent` when you need autonomous agent for detecting, analyzing, and fixing ci/cd pipeline failures.
-
-**Usage:**
 ```bash
-/agent run devops/self-healing-pipeline-agent.md <instructions>
+/agents/backend/nodejs-expert <node-task>
+/agents/backend/fastapi-expert <python-task>
+/agents/frontend/react-expert <react-task>
 ```
-
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert)
-
----
-
-### <a id='terraform-expert'></a>Terraform Expert Agent
 
-**Description:** Terraform and IaC specialist. Expert in Terraform modules, state management, and multi-cloud.
+### Quality
 
-**When to Use:**
-Use the `Terraform Expert Agent` when you need terraform and iac specialist. expert in terraform modules, state management, and multi-cloud..
-
-**Usage:**
 ```bash
-/agent run devops/terraform-expert.md <instructions>
+/agents/quality/code-reviewer review <module>
+/agents/testing/unit-test-expert write tests for <module>
+/agents/security/security-expert audit <module>
 ```
-
-**Related Agents:**
-[CI/CD Expert Agent](#ci-cd-expert), [DevOps Engineer Agent](#devops-engineer), [Docker Expert Agent](#docker-expert)
-
----
-
-## Frontend Development
-
-### <a id='accessibility-expert'></a>Accessibility Expert Agent
 
-**Description:** Web accessibility specialist. Expert in WCAG, ARIA, screen readers, and inclusive design.
+### DevOps
 
-**Key Capabilities:**
-- WCAG 2.1 AA/AAA
-- ARIA roles and attributes
-- Keyboard navigation
-- Color contrast
-- Focus management
-
-**When to Use:**
-Use the `Accessibility Expert Agent` when you need web accessibility specialist. expert in wcag, aria, screen readers, and inclusive design..
-
-**Usage:**
 ```bash
-/agent run frontend/accessibility-expert.md <instructions>
+/agents/devops/ci-cd-expert design pipeline for <project>
+/agents/devops/docker-expert create Dockerfile for <app>
+/agents/devops/kubernetes-expert deploy <service>
 ```
-
-**Related Agents:**
-[CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer), [Mobile Web Expert Agent](#mobile-web-expert)
-
----
-
-### <a id='css-expert'></a>CSS Expert Agent
 
-**Description:** CSS and styling specialist. Expert in CSS, Tailwind, CSS-in-JS, animations, and responsive design.
+### AI-Powered
 
-**Key Capabilities:**
-- CSS Grid / Flexbox
-- Tailwind CSS
-- CSS-in-JS (styled-components, Emotion)
-- CSS animations
-- Dark mode implementation
-
-**When to Use:**
-Use the `CSS Expert Agent` when you need css and styling specialist. expert in css, tailwind, css-in-js, animations, and responsive design..
-
-**Usage:**
 ```bash
-/agent run frontend/css-expert.md <instructions>
+/agents/ai-ml/claude-opus-max <complex-task>
+/agents/ai-ml/codex-max <large-refactoring>
+/agents/ai-ml/gemini-deep <full-codebase-analysis>
 ```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [Frontend Developer Agent](#frontend-developer), [Mobile Web Expert Agent](#mobile-web-expert)
 
 ---
 
-### <a id='frontend-developer'></a>Frontend Developer Agent
-
-**Description:** General frontend development specialist. Expert in modern web development, responsive design, and UI implementation.
-
-**Key Capabilities:**
-- HTML5/CSS3/JavaScript
-- Component architecture
-- Responsive design
-- Accessibility (a11y)
-- Browser compatibility
-
-**When to Use:**
-Use the `Frontend Developer Agent` when you need general frontend development specialist. expert in modern web development, responsive design, and ui implementation..
-
-**Usage:**
-```bash
-/agent run frontend/frontend-developer.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Mobile Web Expert Agent](#mobile-web-expert)
-
----
-
-### <a id='mobile-web-expert'></a>Mobile Web Expert Agent
-
-**Description:** Mobile web and PWA specialist. Expert in responsive design, PWA, mobile performance, and touch interactions.
-
-**Key Capabilities:**
-- Progressive Web Apps
-- Service Workers
-- Mobile-first design
-- Touch gestures
-- Offline functionality
-
-**When to Use:**
-Use the `Mobile Web Expert Agent` when you need mobile web and pwa specialist. expert in responsive design, pwa, mobile performance, and touch interactions..
-
-**Usage:**
-```bash
-/agent run frontend/mobile-web-expert.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer)
-
----
-
-### <a id='nextjs-expert'></a>Next.js Expert Agent
-
-**Description:** Next.js specialist. Expert in App Router, Server Components, SSR/SSG, and Next.js best practices.
-
-**Key Capabilities:**
-- App Router (Next.js 13+)
-- React Server Components
-- Server Actions
-- Middleware
-- Edge Runtime
-
-**When to Use:**
-Use the `Next.js Expert Agent` when you need next.js specialist. expert in app router, server components, ssr/ssg, and next.js best practices..
-
-**Usage:**
-```bash
-/agent run frontend/nextjs-expert.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer)
-
----
-
-### <a id='react-expert'></a>React Expert Agent
-
-**Description:** React.js specialist. Expert in React patterns, hooks, state management, and React ecosystem.
-
-**Key Capabilities:**
-- React 18+ features
-- Custom hooks
-- Context API
-- React Query / SWR
-- React performance
-
-**When to Use:**
-Use the `React Expert Agent` when you need react.js specialist. expert in react patterns, hooks, state management, and react ecosystem..
-
-**Usage:**
-```bash
-/agent run frontend/react-expert.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer)
-
----
-
-### <a id='state-management-expert'></a>State Management Expert Agent
-
-**Description:** State management specialist. Expert in Redux, Zustand, Jotai, React Query, and state patterns.
-
-**Key Capabilities:**
-- Redux Toolkit
-- Zustand / Jotai
-- React Query / TanStack Query
-- Recoil
-- State normalization
-
-**When to Use:**
-Use the `State Management Expert Agent` when you need state management specialist. expert in redux, zustand, jotai, react query, and state patterns..
-
-**Usage:**
-```bash
-/agent run frontend/state-management-expert.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer)
-
----
-
-### <a id='testing-frontend'></a>Frontend Testing Agent
-
-**Description:** Frontend testing specialist. Expert in Jest, Testing Library, Playwright, and component testing.
-
-**Key Capabilities:**
-- Jest / Vitest
-- React Testing Library
-- Playwright / Cypress
-- Mock Service Worker (MSW)
-- Snapshot testing
-
-**When to Use:**
-Use the `Frontend Testing Agent` when you need frontend testing specialist. expert in jest, testing library, playwright, and component testing..
-
-**Usage:**
-```bash
-/agent run frontend/testing-frontend.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer)
-
----
-
-### <a id='typescript-expert'></a>TypeScript Expert Agent
-
-**Description:** TypeScript specialist. Expert in type systems, generics, advanced patterns, and TypeScript best practices.
-
-**Key Capabilities:**
-- Advanced generics
-- Conditional types
-- Template literal types
-- Type inference
-- Declaration files
-
-**When to Use:**
-Use the `TypeScript Expert Agent` when you need typescript specialist. expert in type systems, generics, advanced patterns, and typescript best practices..
-
-**Usage:**
-```bash
-/agent run frontend/typescript-expert.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer)
-
----
-
-### <a id='vue-expert'></a>Vue Expert Agent
-
-**Description:** Vue.js specialist. Expert in Vue 3, Composition API, Pinia, and Vue ecosystem.
-
-**Key Capabilities:**
-- Vue 3 Composition API
-- Pinia state management
-- Vue Router
-- Nuxt.js
-- VueUse composables
-
-**When to Use:**
-Use the `Vue Expert Agent` when you need vue.js specialist. expert in vue 3, composition api, pinia, and vue ecosystem..
-
-**Usage:**
-```bash
-/agent run frontend/vue-expert.md <instructions>
-```
-
-**Related Agents:**
-[Accessibility Expert Agent](#accessibility-expert), [CSS Expert Agent](#css-expert), [Frontend Developer Agent](#frontend-developer)
-
----
-
-## General Purpose & Orchestration
-
-### <a id='cascade-agent'></a>Cascade Agent
-
-**Description:** End-to-end automation of the ticket-to-PR workflow. Orchestrates specialized agents to convert issue descriptions into fully implemented, tested, and documented pull requests.
-
-**Key Capabilities:**
-- Vue 3 Composition API
-- Pinia state management
-- Vue Router
-- Nuxt.js
-- VueUse composables
-
-**When to Use:**
-Use the `Cascade Agent` when you need end-to-end automation of the ticket-to-pr workflow. orchestrates specialized agents to convert issue descriptions into fully implemented, tested, and documented pull requests..
-
-**Usage:**
-```bash
-/agent run general/cascade-agent.md <instructions>
-```
-
-**Related Agents:**
-[Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator), [model-router](#model-router)
-
----
-
-### <a id='context-manager'></a>Context Manager Agent
-
-**Description:** Manages project context, loads relevant files, and maintains awareness of the current project state.
-
-**When to Use:**
-Use the `Context Manager Agent` when you need manages project context, loads relevant files, and maintains awareness of the current project state..
-
-**Usage:**
-```bash
-/agent run general/context-manager.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Memory Coordinator Agent](#memory-coordinator), [model-router](#model-router)
-
----
-
-### <a id='memory-coordinator'></a>Memory Coordinator Agent
-
-**Description:** Coordinates memory systems including vector memory, project ledger, and error knowledge graph.
-
-**When to Use:**
-Use the `Memory Coordinator Agent` when you need coordinates memory systems including vector memory, project ledger, and error knowledge graph..
-
-**Usage:**
-```bash
-/agent run general/memory-coordinator.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [model-router](#model-router)
-
----
-
-### <a id='model-router'></a>model-router
-
-**Description:** Intelligent orchestrator that routes tasks to the optimal AI model (Claude, Codex, Gemini) based on complexity, cost, context, and file-type constraints.
-
-**When to Use:**
-Use the `model-router` when you need intelligent orchestrator that routes tasks to the optimal ai model (claude, codex, gemini) based on complexity, cost, context, and file-type constraints..
-
-**Usage:**
-```bash
-/agent run general/model-router.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator)
-
----
-
-### <a id='observability-agent'></a>observability-agent
-
-**Description:** An agent designed to trace, monitor, and report on the performance, cost, and quality of other AI agents and workflows.
-
-**When to Use:**
-Use the `observability-agent` when you need an agent designed to trace, monitor, and report on the performance, cost, and quality of other ai agents and workflows..
-
-**Usage:**
-```bash
-/agent run general/observability-agent.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator)
-
----
-
-### <a id='orchestrator'></a>Orchestrator Agent
-
-**Description:** Master workflow orchestrator that coordinates all SDLC phases and delegates to specialized agents.
-
-**Key Capabilities:**
-- Full SDLC workflow management
-- Multi-agent coordination
-- Parallel task execution via git worktrees
-- Progress tracking and reporting
-- Quality gate enforcement
-
-**When to Use:**
-Use the `Orchestrator Agent` when you need master workflow orchestrator that coordinates all sdlc phases and delegates to specialized agents..
-
-**Usage:**
-```bash
-/agent run general/orchestrator.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator)
-
----
-
-### <a id='pair-programmer'></a>pair-programmer
-
-**Description:** Interactive pair programmer for real-time coding assistance, incremental edits, and rapid feedback.
-
-**Key Capabilities:**
-- Full SDLC workflow management
-- Multi-agent coordination
-- Parallel task execution via git worktrees
-- Progress tracking and reporting
-- Quality gate enforcement
-
-**When to Use:**
-Use the `pair-programmer` when you need interactive pair programmer for real-time coding assistance, incremental edits, and rapid feedback..
-
-**Usage:**
-```bash
-/agent run general/pair-programmer.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator)
-
----
-
-### <a id='parallel-coordinator'></a>Parallel Coordinator Agent
-
-**Description:** Coordinates parallel execution of independent tasks using git worktrees or isolated contexts.
-
-**When to Use:**
-Use the `Parallel Coordinator Agent` when you need coordinates parallel execution of independent tasks using git worktrees or isolated contexts..
-
-**Usage:**
-```bash
-/agent run general/parallel-coordinator.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator)
-
----
-
-### <a id='session-manager'></a>Session Manager Agent
-
-**Description:** Manages session state, progress tracking, and ensures continuity across conversation turns.
-
-**When to Use:**
-Use the `Session Manager Agent` when you need manages session state, progress tracking, and ensures continuity across conversation turns..
-
-**Usage:**
-```bash
-/agent run general/session-manager.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator)
-
----
-
-### <a id='task-router'></a>Task Router Agent
-
-**Description:** Intelligent task routing agent that analyzes tasks and determines the optimal agent, model, and execution strategy.
-
-**When to Use:**
-Use the `Task Router Agent` when you need intelligent task routing agent that analyzes tasks and determines the optimal agent, model, and execution strategy..
-
-**Usage:**
-```bash
-/agent run general/task-router.md <instructions>
-```
-
-**Related Agents:**
-[Cascade Agent](#cascade-agent), [Context Manager Agent](#context-manager), [Memory Coordinator Agent](#memory-coordinator)
-
----
-
-## Integration & APIs
-
-### <a id='api-integration-expert'></a>API Integration Expert Agent
-
-**Description:** API integration specialist. Expert in REST, webhooks, OAuth, and third-party integrations.
-
-**When to Use:**
-Use the `API Integration Expert Agent` when you need api integration specialist. expert in rest, webhooks, oauth, and third-party integrations..
-
-**Usage:**
-```bash
-/agent run integration/api-integration-expert.md <instructions>
-```
-
-**Related Agents:**
-[api-observability-agent](#api-observability-agent), [MCP Integration Expert Agent](#mcp-expert), [Third-Party API Expert](#third-party-api-expert)
-
----
-
-### <a id='api-observability-agent'></a>api-observability-agent
-
-**Description:** Monitors API health, performance, and reliability. Tracks latency percentiles, error rates, breaking changes, and generates comprehensive usage reports.
-
-**When to Use:**
-Use the `api-observability-agent` when you need monitors api health, performance, and reliability. tracks latency percentiles, error rates, breaking changes, and generates comprehensive usage reports..
-
-**Usage:**
-```bash
-/agent run integration/api-observability-agent.md <instructions>
-```
-
-**Related Agents:**
-[API Integration Expert Agent](#api-integration-expert), [MCP Integration Expert Agent](#mcp-expert), [Third-Party API Expert](#third-party-api-expert)
-
----
-
-### <a id='mcp-expert'></a>MCP Integration Expert Agent
-
-**Description:** Model Context Protocol specialist for server development, tool patterns, and AI integrations
-
-**When to Use:**
-Use the `MCP Integration Expert Agent` when you need model context protocol specialist for server development, tool patterns, and ai integrations.
-
-**Usage:**
-```bash
-/agent run integration/mcp-expert.md <instructions>
-```
-
-**Related Agents:**
-[API Integration Expert Agent](#api-integration-expert), [api-observability-agent](#api-observability-agent), [Third-Party API Expert](#third-party-api-expert)
-
----
-
-### <a id='third-party-api-expert'></a>Third-Party API Expert
-
-**Description:** Expert in external API integrations including OAuth, rate limiting, webhooks, and provider SDKs
-
-**When to Use:**
-Use the `Third-Party API Expert` when you need expert in external api integrations including oauth, rate limiting, webhooks, and provider sdks.
-
-**Usage:**
-```bash
-/agent run integration/third-party-api-expert.md <instructions>
-```
-
-**Related Agents:**
-[API Integration Expert Agent](#api-integration-expert), [api-observability-agent](#api-observability-agent), [MCP Integration Expert Agent](#mcp-expert)
-
----
-
-### <a id='webhook-expert'></a>Webhook Expert Agent
-
-**Description:** "Target framework (express, fastapi, flask, django)"
-
-**When to Use:**
-Use the `Webhook Expert Agent` when you need "target framework (express, fastapi, flask, django)".
-
-**Usage:**
-```bash
-/agent run integration/webhook-expert.md <instructions>
-```
-
-**Related Agents:**
-[API Integration Expert Agent](#api-integration-expert), [api-observability-agent](#api-observability-agent), [MCP Integration Expert Agent](#mcp-expert)
-
----
-
-## Performance Engineering
-
-### <a id='bundle-optimizer'></a>Bundle Optimizer Agent
-
-**Description:** Expert in JavaScript/TypeScript bundle optimization for Webpack, Vite, and esbuild. Specializes in tree shaking, code splitting, lazy loading, and performance budget enforcement.
-
-**When to Use:**
-Use the `Bundle Optimizer Agent` when you need expert in javascript/typescript bundle optimization for webpack, vite, and esbuild. specializes in tree shaking, code splitting, lazy loading, and performance budget enforcement..
-
-**Usage:**
-```bash
-/agent run performance/bundle-optimizer.md <instructions>
-```
-
-**Related Agents:**
-[Caching Expert Agent](#caching-expert), [load-testing-expert](#load-testing-expert), [Performance Optimizer Agent](#performance-optimizer)
-
----
-
-### <a id='caching-expert'></a>Caching Expert Agent
-
-**Description:** Caching specialist. Expert in cache strategies, Redis, CDN, and cache invalidation.
-
-**When to Use:**
-Use the `Caching Expert Agent` when you need caching specialist. expert in cache strategies, redis, cdn, and cache invalidation..
-
-**Usage:**
-```bash
-/agent run performance/caching-expert.md <instructions>
-```
-
-**Related Agents:**
-[Bundle Optimizer Agent](#bundle-optimizer), [load-testing-expert](#load-testing-expert), [Performance Optimizer Agent](#performance-optimizer)
-
----
-
-### <a id='load-testing-expert'></a>load-testing-expert
-
-**Description:** Load testing expert for k6 and Artillery. Designs tests, configures load profiles, establishes baselines, identifies bottlenecks, and recommends scaling actions.
-
-**When to Use:**
-Use the `load-testing-expert` when you need load testing expert for k6 and artillery. designs tests, configures load profiles, establishes baselines, identifies bottlenecks, and recommends scaling actions..
-
-**Usage:**
-```bash
-/agent run performance/load-testing-expert.md <instructions>
-```
-
-**Related Agents:**
-[Bundle Optimizer Agent](#bundle-optimizer), [Caching Expert Agent](#caching-expert), [Performance Optimizer Agent](#performance-optimizer)
-
----
-
-### <a id='performance-optimizer'></a>Performance Optimizer Agent
-
-**Description:** Performance optimization specialist. Expert in code optimization, caching, and performance tuning.
-
-**When to Use:**
-Use the `Performance Optimizer Agent` when you need performance optimization specialist. expert in code optimization, caching, and performance tuning..
-
-**Usage:**
-```bash
-/agent run performance/performance-optimizer.md <instructions>
-```
-
-**Related Agents:**
-[Bundle Optimizer Agent](#bundle-optimizer), [Caching Expert Agent](#caching-expert), [load-testing-expert](#load-testing-expert)
-
----
-
-### <a id='profiling-expert'></a>Profiling Expert Agent
-
-**Description:** >
-
-**When to Use:**
-Use the `Profiling Expert Agent` when you need >.
-
-**Usage:**
-```bash
-/agent run performance/profiling-expert.md <instructions>
-```
-
-**Related Agents:**
-[Bundle Optimizer Agent](#bundle-optimizer), [Caching Expert Agent](#caching-expert), [load-testing-expert](#load-testing-expert)
-
----
-
-## Planning & Architecture
-
-### <a id='architect'></a>Architect Agent
-
-**Description:** Designs system architecture, creates technical specifications, and makes architectural decisions.
-
-**When to Use:**
-Use the `Architect Agent` when you need designs system architecture, creates technical specifications, and makes architectural decisions..
-
-**Usage:**
-```bash
-/agent run planning/architect.md <instructions>
-```
-
-**Related Agents:**
-[Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager), [Requirements Analyst Agent](#requirements-analyst)
-
----
-
-### <a id='exponential-planner'></a>Exponential Planner Agent
-
-**Description:** Strategic long-term planner that creates comprehensive multi-phase development plans. Inspired by exponential planning methodology.
-
-**When to Use:**
-Use the `Exponential Planner Agent` when you need strategic long-term planner that creates comprehensive multi-phase development plans. inspired by exponential planning methodology..
-
-**Usage:**
-```bash
-/agent run planning/exponential-planner.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Product Manager Agent](#product-manager), [Requirements Analyst Agent](#requirements-analyst)
-
----
-
-### <a id='product-manager'></a>Product Manager Agent
-
-**Description:** Creates PRDs (Product Requirements Documents), prioritizes features, and manages product backlog.
-
-**When to Use:**
-Use the `Product Manager Agent` when you need creates prds (product requirements documents), prioritizes features, and manages product backlog..
-
-**Usage:**
-```bash
-/agent run planning/product-manager.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Requirements Analyst Agent](#requirements-analyst)
-
----
-
-### <a id='requirements-analyst'></a>Requirements Analyst Agent
-
-**Description:** Gathers, analyzes, and documents requirements. Creates user stories with acceptance criteria.
-
-**When to Use:**
-Use the `Requirements Analyst Agent` when you need gathers, analyzes, and documents requirements. creates user stories with acceptance criteria..
-
-**Usage:**
-```bash
-/agent run planning/requirements-analyst.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager)
-
----
-
-### <a id='requirements-analyzer'></a>Requirements Analyzer Agent
-
-**Description:** **Role:** You are the **Requirements Analyzer**, a specialized sub-agent responsible for the rigorous analysis, clarification, and structuring of software requirements. You bridge the gap between vague stakeholder desires and concrete technical specifications.
-
-**Key Capabilities:**
-- Ingest raw text from diverse sources (PRDs, emails, Slack threads, transcripts).
-- Extract functional and non-functional requirements.
-- Categorize requirements (e.g., UI/UX, Backend, Security, Performance).
-- Identify vague terms (e.g., "fast", "user-friendly", "robust").
-- Detect missing edge cases, error states, and unhandled user flows.
-
-**When to Use:**
-Use the `Requirements Analyzer Agent` when you need **role:** you are the **requirements analyzer**, a specialized sub-agent responsible for the rigorous analysis, clarification, and structuring of software requirements. you bridge the gap between vague stakeholder desires and concrete technical specifications..
-
-**Usage:**
-```bash
-/agent run planning/requirements-analyzer.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager)
-
----
-
-### <a id='risk-assessor'></a>Risk Assessor Agent
-
-**Description:** Identifies, analyzes, and documents risks in software projects. Creates risk matrices and mitigation plans.
-
-**When to Use:**
-Use the `Risk Assessor Agent` when you need identifies, analyzes, and documents risks in software projects. creates risk matrices and mitigation plans..
-
-**Usage:**
-```bash
-/agent run planning/risk-assessor.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager)
-
----
-
-### <a id='spec-generator'></a>spec-generator
-
-**Description:** Generates formal, testable specifications, API contracts, and test scenarios from requirements.
-
-**When to Use:**
-Use the `spec-generator` when you need generates formal, testable specifications, api contracts, and test scenarios from requirements..
-
-**Usage:**
-```bash
-/agent run planning/spec-generator.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager)
-
----
-
-### <a id='tech-lead'></a>Tech Lead Agent
-
-**Description:** Provides technical leadership, makes implementation decisions, and guides development teams.
-
-**Key Capabilities:**
-- Technology selection
-- Code review strategy
-- Technical debt management
-- Team guidance
-- Quality standards
-
-**When to Use:**
-Use the `Tech Lead Agent` when you need provides technical leadership, makes implementation decisions, and guides development teams..
-
-**Usage:**
-```bash
-/agent run planning/tech-lead.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager)
-
----
-
-### <a id='tech-spec-writer'></a>Tech Spec Writer Agent
-
-**Description:** Creates detailed technical specifications from requirements. Translates business requirements into technical implementation plans.
-
-**When to Use:**
-Use the `Tech Spec Writer Agent` when you need creates detailed technical specifications from requirements. translates business requirements into technical implementation plans..
-
-**Usage:**
-```bash
-/agent run planning/tech-spec-writer.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager)
-
----
-
-### <a id='ux-researcher'></a>UX Researcher Agent
-
-**Description:** Conducts UX research, creates user personas, and designs user journeys.
-
-**When to Use:**
-Use the `UX Researcher Agent` when you need conducts ux research, creates user personas, and designs user journeys..
-
-**Usage:**
-```bash
-/agent run planning/ux-researcher.md <instructions>
-```
-
-**Related Agents:**
-[Architect Agent](#architect), [Exponential Planner Agent](#exponential-planner), [Product Manager Agent](#product-manager)
-
----
-
-## Quality Assurance & Code Quality
-
-### <a id='code-reviewer'></a>Code Reviewer Agent
-
-**Description:** Code review specialist. Expert in code quality, best practices, and constructive feedback.
-
-**When to Use:**
-Use the `Code Reviewer Agent` when you need code review specialist. expert in code quality, best practices, and constructive feedback..
-
-**Usage:**
-```bash
-/agent run quality/code-reviewer.md <instructions>
-```
-
-**Related Agents:**
-[Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent), [Documentation Expert Agent](#documentation-expert)
-
----
-
-### <a id='dependency-manager'></a>Dependency Manager Agent
-
-**Description:** Purpose: Manage project dependencies with clear, actionable guidance.
-
-**Key Capabilities:**
-- Analyze the dependency tree.
-- Identify outdated packages.
-- Detect security vulnerabilities.
-- Find unused dependencies.
-- Suggest lighter alternatives.
-
-**When to Use:**
-Use the `Dependency Manager Agent` when you need purpose: manage project dependencies with clear, actionable guidance..
-
-**Usage:**
-```bash
-/agent run quality/dependency-manager.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Documentation Linter Agent](#doc-linter-agent), [Documentation Expert Agent](#documentation-expert)
-
----
-
-### <a id='doc-linter-agent'></a>Documentation Linter Agent
-
-**Description:** You are the Documentation Linter Agent. You validate documentation quality and completeness, enforce standards, and generate missing docs. You must integrate with the documentation-expert agent for deep checks, standards alignment, and any remediation that requires domain-specific guidance.
-
-**When to Use:**
-Use the `Documentation Linter Agent` when you need you are the documentation linter agent. you validate documentation quality and completeness, enforce standards, and generate missing docs. you must integrate with the documentation-expert agent for deep checks, standards alignment, and any remediation that requires domain-specific guidance..
-
-**Usage:**
-```bash
-/agent run quality/doc-linter-agent.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Expert Agent](#documentation-expert)
-
----
-
-### <a id='documentation-expert'></a>Documentation Expert Agent
-
-**Description:** Documentation specialist. Expert in API docs, code comments, and technical writing.
-
-**When to Use:**
-Use the `Documentation Expert Agent` when you need documentation specialist. expert in api docs, code comments, and technical writing..
-
-**Usage:**
-```bash
-/agent run quality/documentation-expert.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-### <a id='gemini-reviewer'></a>Gemini Reviewer Agent
-
-**Description:** Gemini-powered code reviewer using CLI. Expert in security analysis, code quality validation, and design review.
-
-**When to Use:**
-Use the `Gemini Reviewer Agent` when you need gemini-powered code reviewer using cli. expert in security analysis, code quality validation, and design review..
-
-**Usage:**
-```bash
-/agent run quality/gemini-reviewer.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-### <a id='linting-expert'></a>Linting Expert Agent
-
-**Description:** Linting and formatting specialist. Expert in ESLint, Prettier, and code style enforcement.
-
-**When to Use:**
-Use the `Linting Expert Agent` when you need linting and formatting specialist. expert in eslint, prettier, and code style enforcement..
-
-**Usage:**
-```bash
-/agent run quality/linting-expert.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-### <a id='performance-analyst'></a>Performance Analyst Agent
-
-**Description:** Performance analysis specialist. Expert in profiling, bottleneck identification, and optimization strategies.
-
-**When to Use:**
-Use the `Performance Analyst Agent` when you need performance analysis specialist. expert in profiling, bottleneck identification, and optimization strategies..
-
-**Usage:**
-```bash
-/agent run quality/performance-analyst.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-### <a id='product-analyst'></a>Product Analyst Agent
-
-**Description:** Product analysis specialist. Expert in requirements gathering, user stories, and feature prioritization.
-
-**When to Use:**
-Use the `Product Analyst Agent` when you need product analysis specialist. expert in requirements gathering, user stories, and feature prioritization..
-
-**Usage:**
-```bash
-/agent run quality/product-analyst.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-### <a id='refactoring-expert'></a>Refactoring Expert Agent
-
-**Description:** Code refactoring specialist. Expert in refactoring patterns, code smells, and safe transformations.
-
-**When to Use:**
-Use the `Refactoring Expert Agent` when you need code refactoring specialist. expert in refactoring patterns, code smells, and safe transformations..
-
-**Usage:**
-```bash
-/agent run quality/refactoring-expert.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-### <a id='semantic-search-agent'></a>Semantic Code Search Agent
-
-**Description:** You are the **Semantic Code Search Agent**, a specialized sub-agent responsible for intelligent code retrieval, understanding user intent, and uncovering hidden relationships within the codebase. You go beyond grep/keyword search to understand *what* the code does, not just *what text* it contains.
-
-**When to Use:**
-Use the `Semantic Code Search Agent` when you need you are the **semantic code search agent**, a specialized sub-agent responsible for intelligent code retrieval, understanding user intent, and uncovering hidden relationships within the codebase. you go beyond grep/keyword search to understand *what* the code does, not just *what text* it contains..
-
-**Usage:**
-```bash
-/agent run quality/semantic-search-agent.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-### <a id='technical-debt-analyst'></a>Technical Debt Analyst Agent
-
-**Description:** Technical debt specialist. Expert in debt identification, prioritization, and reduction strategies.
-
-**When to Use:**
-Use the `Technical Debt Analyst Agent` when you need technical debt specialist. expert in debt identification, prioritization, and reduction strategies..
-
-**Usage:**
-```bash
-/agent run quality/technical-debt-analyst.md <instructions>
-```
-
-**Related Agents:**
-[Code Reviewer Agent](#code-reviewer), [Dependency Manager Agent](#dependency-manager), [Documentation Linter Agent](#doc-linter-agent)
-
----
-
-## Security & Compliance
-
-### <a id='compliance-expert'></a>Compliance Expert Agent
-
-**Description:** Security compliance specialist. Expert in SOC2, GDPR, HIPAA, and compliance frameworks.
-
-**When to Use:**
-Use the `Compliance Expert Agent` when you need security compliance specialist. expert in soc2, gdpr, hipaa, and compliance frameworks..
-
-**Usage:**
-```bash
-/agent run security/compliance-expert.md <instructions>
-```
-
-**Related Agents:**
-[Dependency Auditor Agent](#dependency-auditor), ["Guardrails Enforcement Agent"](#guardrails-agent), [Penetration Testing Agent](#penetration-tester)
-
----
-
-### <a id='dependency-auditor'></a>Dependency Auditor Agent
-
-**Description:** Dependency security auditor. Expert in supply chain security and dependency management.
-
-**When to Use:**
-Use the `Dependency Auditor Agent` when you need dependency security auditor. expert in supply chain security and dependency management..
-
-**Usage:**
-```bash
-/agent run security/dependency-auditor.md <instructions>
-```
-
-**Related Agents:**
-[Compliance Expert Agent](#compliance-expert), ["Guardrails Enforcement Agent"](#guardrails-agent), [Penetration Testing Agent](#penetration-tester)
-
----
-
-### <a id='guardrails-agent'></a>"Guardrails Enforcement Agent"
-
-**Description:** "Security compliance agent responsible for pre-execution validation of tool calls, enforcing EU AI Act & ISO 42001 standards, and maintaining immutable audit trails."
-
-**When to Use:**
-Use the `"Guardrails Enforcement Agent"` when you need "security compliance agent responsible for pre-execution validation of tool calls, enforcing eu ai act & iso 42001 standards, and maintaining immutable audit trails.".
-
-**Usage:**
-```bash
-/agent run security/guardrails-agent.md <instructions>
-```
-
-**Related Agents:**
-[Compliance Expert Agent](#compliance-expert), [Dependency Auditor Agent](#dependency-auditor), [Penetration Testing Agent](#penetration-tester)
-
----
-
-### <a id='penetration-tester'></a>Penetration Testing Agent
-
-**Description:** Penetration testing specialist for authorized security testing, CTF challenges, and defensive security.
-
-**When to Use:**
-Use the `Penetration Testing Agent` when you need penetration testing specialist for authorized security testing, ctf challenges, and defensive security..
-
-**Usage:**
-```bash
-/agent run security/penetration-tester.md <instructions>
-```
-
-**Related Agents:**
-[Compliance Expert Agent](#compliance-expert), [Dependency Auditor Agent](#dependency-auditor), ["Guardrails Enforcement Agent"](#guardrails-agent)
-
----
-
-### <a id='regulatory-compliance-agent'></a>regulatory-compliance-agent
-
-**Description:** Specialized security agent for auditing and ensuring compliance with AI and data regulations including EU AI Act, ISO 42001, GDPR, and SOC2.
-
-**When to Use:**
-Use the `regulatory-compliance-agent` when you need specialized security agent for auditing and ensuring compliance with ai and data regulations including eu ai act, iso 42001, gdpr, and soc2..
-
-**Usage:**
-```bash
-/agent run security/regulatory-compliance-agent.md <instructions>
-```
-
-**Related Agents:**
-[Compliance Expert Agent](#compliance-expert), [Dependency Auditor Agent](#dependency-auditor), ["Guardrails Enforcement Agent"](#guardrails-agent)
-
----
-
-### <a id='secrets-management-expert'></a>Secrets Management Expert Agent
-
-**Description:** Secrets management specialist. Expert in vault systems, environment variables, and secure credential handling.
-
-**When to Use:**
-Use the `Secrets Management Expert Agent` when you need secrets management specialist. expert in vault systems, environment variables, and secure credential handling..
-
-**Usage:**
-```bash
-/agent run security/secrets-management-expert.md <instructions>
-```
-
-**Related Agents:**
-[Compliance Expert Agent](#compliance-expert), [Dependency Auditor Agent](#dependency-auditor), ["Guardrails Enforcement Agent"](#guardrails-agent)
-
----
-
-### <a id='security-expert'></a>Security Expert Agent
-
-**Description:** Application security specialist. Expert in OWASP Top 10, secure coding, and vulnerability assessment.
-
-**When to Use:**
-Use the `Security Expert Agent` when you need application security specialist. expert in owasp top 10, secure coding, and vulnerability assessment..
-
-**Usage:**
-```bash
-/agent run security/security-expert.md <instructions>
-```
-
-**Related Agents:**
-[Compliance Expert Agent](#compliance-expert), [Dependency Auditor Agent](#dependency-auditor), ["Guardrails Enforcement Agent"](#guardrails-agent)
-
----
-
-### <a id='vulnerability-scanner'></a>Vulnerability Scanner Agent
-
-**Description:** Vulnerability scanning specialist. Expert in dependency scanning, SAST, and security automation.
-
-**When to Use:**
-Use the `Vulnerability Scanner Agent` when you need vulnerability scanning specialist. expert in dependency scanning, sast, and security automation..
-
-**Usage:**
-```bash
-/agent run security/vulnerability-scanner.md <instructions>
-```
-
-**Related Agents:**
-[Compliance Expert Agent](#compliance-expert), [Dependency Auditor Agent](#dependency-auditor), ["Guardrails Enforcement Agent"](#guardrails-agent)
-
----
-
-## Testing & QA
-
-### <a id='api-contract-agent'></a>"API Contract Testing Agent"
-
-**Description:** "Specialized agent for API contract validation, consumer-driven contract testing (Pact), and schema compatibility enforcement."
-
-**When to Use:**
-Use the `"API Contract Testing Agent"` when you need "specialized agent for api contract validation, consumer-driven contract testing (pact), and schema compatibility enforcement.".
-
-**Usage:**
-```bash
-/agent run testing/api-contract-agent.md <instructions>
-```
-
-**Related Agents:**
-[API Test Expert Agent](#api-test-expert), [E2E Test Expert Agent](#e2e-test-expert), [Integration Test Expert Agent](#integration-test-expert)
-
----
-
-### <a id='api-test-expert'></a>API Test Expert Agent
-
-**Description:** API testing specialist. Expert in REST/GraphQL testing, contract testing, and API validation.
-
-**Key Capabilities:**
-- REST API testing
-- GraphQL testing
-- Contract testing (Pact)
-- Schema validation
-- Load testing
-
-**When to Use:**
-Use the `API Test Expert Agent` when you need api testing specialist. expert in rest/graphql testing, contract testing, and api validation..
-
-**Usage:**
-```bash
-/agent run testing/api-test-expert.md <instructions>
-```
-
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [E2E Test Expert Agent](#e2e-test-expert), [Integration Test Expert Agent](#integration-test-expert)
-
----
-
-### <a id='e2e-test-expert'></a>E2E Test Expert Agent
-
-**Description:** End-to-end testing specialist. Expert in Playwright, Cypress, and full system testing.
-
-**Key Capabilities:**
-- Playwright / Cypress
-- Page Object Model
-- Test parallelization
-- Visual regression
-- Cross-browser testing
-
-**When to Use:**
-Use the `E2E Test Expert Agent` when you need end-to-end testing specialist. expert in playwright, cypress, and full system testing..
-
-**Usage:**
-```bash
-/agent run testing/e2e-test-expert.md <instructions>
-```
-
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [API Test Expert Agent](#api-test-expert), [Integration Test Expert Agent](#integration-test-expert)
-
----
-
-### <a id='integration-test-expert'></a>Integration Test Expert Agent
-
-**Description:** Integration testing specialist. Expert in API testing, database testing, and service integration tests.
-
-**Key Capabilities:**
-- API testing
-- Database testing
-- Test containers
-- Test data management
-- CI integration
-
-**When to Use:**
-Use the `Integration Test Expert Agent` when you need integration testing specialist. expert in api testing, database testing, and service integration tests..
-
-**Usage:**
-```bash
-/agent run testing/integration-test-expert.md <instructions>
-```
-
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [API Test Expert Agent](#api-test-expert), [E2E Test Expert Agent](#e2e-test-expert)
-
----
-
-### <a id='performance-test-expert'></a>Performance Test Expert Agent
-
-**Description:** Performance testing specialist. Expert in load testing, stress testing, and performance benchmarking.
-
-**Key Capabilities:**
-- K6 / Locust / JMeter
-- Load testing
-- Stress testing
-- Endurance testing
-- Performance baselines
-
-**When to Use:**
-Use the `Performance Test Expert Agent` when you need performance testing specialist. expert in load testing, stress testing, and performance benchmarking..
-
-**Usage:**
-```bash
-/agent run testing/performance-test-expert.md <instructions>
-```
-
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [API Test Expert Agent](#api-test-expert), [E2E Test Expert Agent](#e2e-test-expert)
-
----
-
-### <a id='tdd-coach'></a>TDD Coach Agent
-
-**Description:** TDD coaching specialist. Expert in test-driven development, red-green-refactor cycle, and TDD best practices.
-
-**When to Use:**
-Use the `TDD Coach Agent` when you need tdd coaching specialist. expert in test-driven development, red-green-refactor cycle, and tdd best practices..
-
-**Usage:**
-```bash
-/agent run testing/tdd-coach.md <instructions>
-```
-
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [API Test Expert Agent](#api-test-expert), [E2E Test Expert Agent](#e2e-test-expert)
-
----
-
-### <a id='test-architect'></a>Test Architect Agent
-
-**Description:** Test architecture specialist. Expert in test strategy, pyramid design, and testing infrastructure.
-
-**When to Use:**
-Use the `Test Architect Agent` when you need test architecture specialist. expert in test strategy, pyramid design, and testing infrastructure..
-
-**Usage:**
-```bash
-/agent run testing/test-architect.md <instructions>
-```
-
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [API Test Expert Agent](#api-test-expert), [E2E Test Expert Agent](#e2e-test-expert)
-
----
-
-### <a id='test-data-expert'></a>Test Data Expert Agent
-
-**Description:** Test data management specialist. Expert in fixtures, factories, and test data strategies.
-
-**Key Capabilities:**
-- Factory patterns (FactoryBot, Faker)
-- Fixture management
-- Data anonymization
-- Test database seeding
-- Data generators
-
-**When to Use:**
-Use the `Test Data Expert Agent` when you need test data management specialist. expert in fixtures, factories, and test data strategies..
-
-**Usage:**
-```bash
-/agent run testing/test-data-expert.md <instructions>
-```
-
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [API Test Expert Agent](#api-test-expert), [E2E Test Expert Agent](#e2e-test-expert)
-
----
-
-### <a id='unit-test-expert'></a>Unit Test Expert Agent
-
-**Description:** Unit testing specialist. Expert in mocking, test isolation, TDD, and unit test patterns.
-
-**Key Capabilities:**
-- Jest / Vitest / pytest
-- Mocking strategies
-- Test isolation
-- TDD workflow
-- Assertion patterns
-
-**When to Use:**
-Use the `Unit Test Expert Agent` when you need unit testing specialist. expert in mocking, test isolation, tdd, and unit test patterns..
-
-**Usage:**
-```bash
-/agent run testing/unit-test-expert.md <instructions>
-```
+## Version History
 
-**Related Agents:**
-["API Contract Testing Agent"](#api-contract-agent), [API Test Expert Agent](#api-test-expert), [E2E Test Expert Agent](#e2e-test-expert)
+| Version | Date       | Changes                                                   |
+| ------- | ---------- | --------------------------------------------------------- |
+| 2.0.0   | 2026-01-21 | Added integration map, workflow examples, selection guide |
+| 1.0.0   | 2026-01-15 | Initial comprehensive index                               |
 
 ---
 
+**Maintained by:** Ahmed Adel Bakr Alderai
+**Location:** `/home/aadel/.claude/commands/agents/index.md`

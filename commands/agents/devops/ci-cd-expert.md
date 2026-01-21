@@ -1,7 +1,7 @@
 ---
 name: CI/CD Expert Agent
 description: Comprehensive CI/CD specialist for pipeline design, build automation, deployment strategies, and DevSecOps practices
-version: 2.0.0
+version: 3.0.0
 author: Ahmed Adel Bakr Alderai
 category: devops
 tools:
@@ -18,12 +18,13 @@ integrates_with:
   - /agents/devops/terraform-expert
   - /agents/security/secrets-management-expert
   - /agents/security/vulnerability-scanner
+  - /agents/security/security-expert
   - /agents/testing/integration-test-expert
 ---
 
 # CI/CD Expert Agent
 
-Comprehensive CI/CD specialist. Expert in pipeline design, build automation, deployment strategies, and DevSecOps practices across GitHub Actions, GitLab CI/CD, Jenkins, and other CI/CD platforms.
+Comprehensive CI/CD specialist. Expert in pipeline design, build automation, deployment strategies, and DevSecOps practices across GitHub Actions, GitLab CI/CD, Jenkins, CircleCI, and other CI/CD platforms.
 
 ## Arguments
 
@@ -34,13 +35,16 @@ Comprehensive CI/CD specialist. Expert in pipeline design, build automation, dep
 ```
 Use the Task tool with subagent_type="ci-cd-expert" to:
 
-1. Design CI/CD pipelines (GitHub Actions, GitLab CI, Jenkins)
+1. Design CI/CD pipelines (GitHub Actions, GitLab CI, Jenkins, CircleCI)
 2. Implement deployment strategies (blue-green, canary, rolling)
 3. Configure build optimization and caching
 4. Set up secret management in pipelines
-5. Implement quality gates and security scanning
+5. Implement quality gates and security scanning (SAST, DAST, SCA)
 6. Create reusable pipeline components
 7. Troubleshoot pipeline failures
+8. Design branching and release strategies
+9. Configure artifact management and versioning
+10. Implement rollback strategies
 
 Task: $ARGUMENTS
 ```
@@ -56,6 +60,268 @@ Task: $ARGUMENTS
 | Jenkins         | `Jenkinsfile`             | Extensive plugins, on-premise control          |
 | CircleCI        | `.circleci/config.yml`    | Fast builds, orbs ecosystem                    |
 | Azure Pipelines | `azure-pipelines.yml`     | Azure integration, YAML templates              |
+
+---
+
+## Pipeline Design Patterns
+
+### Branching Strategies Comparison
+
+| Strategy    | Best For                   | Branch Structure                            | Release Cadence       |
+| ----------- | -------------------------- | ------------------------------------------- | --------------------- |
+| Trunk-Based | Continuous deployment      | `main` + short-lived feature branches       | Multiple times/day    |
+| GitHub Flow | SaaS, web applications     | `main` + feature branches + PR              | On demand             |
+| GitFlow     | Scheduled releases, mobile | `main`, `develop`, `feature/*`, `release/*` | Scheduled (bi-weekly) |
+| GitLab Flow | Environment-based releases | `main` + environment branches               | Environment-driven    |
+
+### Trunk-Based Development Pipeline
+
+```yaml
+# .github/workflows/trunk-based.yml
+name: Trunk-Based CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Fast feedback loop - runs in parallel
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [lint, typecheck, unit-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Run ${{ matrix.check }}
+        run: |
+          case "${{ matrix.check }}" in
+            lint) npm run lint ;;
+            typecheck) npm run typecheck ;;
+            unit-test) npm run test:unit -- --coverage ;;
+          esac
+
+  # Integration tests after validation
+  integration-test:
+    needs: validate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:integration
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/test
+
+  # Build and deploy on main branch only
+  build-and-deploy:
+    needs: integration-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Deploy to production
+        run: |
+          # Trunk-based: deploy directly to production with feature flags
+          kubectl set image deployment/app app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          kubectl rollout status deployment/app --timeout=300s
+```
+
+### GitHub Flow Pipeline
+
+```yaml
+# .github/workflows/github-flow.yml
+name: GitHub Flow CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test -- --coverage
+      - uses: codecov/codecov-action@v4
+
+  # Preview environment for PRs
+  preview:
+    needs: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: preview
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Preview
+        id: deploy
+        run: |
+          # Deploy to preview environment (e.g., Vercel, Netlify, or custom)
+          PREVIEW_URL="https://pr-${{ github.event.number }}.preview.example.com"
+          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'Preview deployed: ${{ steps.deploy.outputs.url }}'
+            })
+
+  # Production deployment when merged to main
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://example.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Production
+        run: ./scripts/deploy-production.sh
+```
+
+### GitFlow Pipeline
+
+```yaml
+# .github/workflows/gitflow.yml
+name: GitFlow CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "feature/**"
+      - "release/**"
+      - "hotfix/**"
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test
+
+  # Deploy to dev environment from develop branch
+  deploy-dev:
+    needs: test
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Development
+        run: ./scripts/deploy.sh development
+
+  # Deploy to staging from release branches
+  deploy-staging:
+    needs: test
+    if: startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/heads/release/}" >> $GITHUB_OUTPUT
+      - name: Deploy to Staging
+        run: ./scripts/deploy.sh staging ${{ steps.version.outputs.version }}
+
+  # Deploy to production from main branch
+  deploy-production:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get latest tag
+        id: tag
+        run: echo "version=$(git describe --tags --abbrev=0)" >> $GITHUB_OUTPUT
+      - name: Deploy to Production
+        run: ./scripts/deploy.sh production ${{ steps.tag.outputs.version }}
+
+  # Hotfix fast-track to production
+  hotfix:
+    needs: test
+    if: startsWith(github.ref, 'refs/heads/hotfix/')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Hotfix
+        run: ./scripts/deploy-hotfix.sh
+```
 
 ---
 
@@ -504,6 +770,350 @@ def call(Map config) {
 
 ---
 
+## CircleCI Pipeline Templates
+
+### Standard Pipeline with Orbs
+
+```yaml
+# .circleci/config.yml
+version: 2.1
+
+orbs:
+  node: circleci/node@5.2.0
+  docker: circleci/docker@2.6.0
+  kubernetes: circleci/kubernetes@1.3.1
+  slack: circleci/slack@4.13.1
+
+parameters:
+  run-deploy:
+    type: boolean
+    default: false
+
+executors:
+  node-executor:
+    docker:
+      - image: cimg/node:20.11
+    resource_class: medium
+  docker-executor:
+    docker:
+      - image: cimg/base:stable
+    resource_class: medium
+
+commands:
+  install-deps:
+    steps:
+      - restore_cache:
+          keys:
+            - v1-deps-{{ checksum "package-lock.json" }}
+            - v1-deps-
+      - run: npm ci
+      - save_cache:
+          key: v1-deps-{{ checksum "package-lock.json" }}
+          paths:
+            - node_modules
+
+  notify-status:
+    parameters:
+      status:
+        type: string
+    steps:
+      - slack/notify:
+          event: << parameters.status >>
+          template: basic_<< parameters.status >>_1
+
+jobs:
+  lint:
+    executor: node-executor
+    steps:
+      - checkout
+      - install-deps
+      - run: npm run lint
+      - run: npm run typecheck
+
+  test:
+    executor: node-executor
+    parallelism: 4
+    steps:
+      - checkout
+      - install-deps
+      - run:
+          name: Run tests
+          command: |
+            TESTFILES=$(circleci tests glob "src/**/*.test.ts" | circleci tests split --split-by=timings)
+            npm run test -- --coverage $TESTFILES
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: coverage
+
+  security-scan:
+    executor: node-executor
+    steps:
+      - checkout
+      - install-deps
+      - run:
+          name: Audit dependencies
+          command: npm audit --audit-level=high
+      - run:
+          name: Run Snyk
+          command: npx snyk test --severity-threshold=high
+
+  build:
+    executor: docker-executor
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: 20.10.24
+          docker_layer_caching: true
+      - docker/build:
+          image: $DOCKER_REGISTRY/$CIRCLE_PROJECT_REPONAME
+          tag: $CIRCLE_SHA1
+      - docker/push:
+          image: $DOCKER_REGISTRY/$CIRCLE_PROJECT_REPONAME
+          tag: $CIRCLE_SHA1
+
+  deploy-staging:
+    executor: docker-executor
+    steps:
+      - checkout
+      - kubernetes/install-kubectl
+      - run:
+          name: Deploy to staging
+          command: |
+            kubectl config set-cluster staging --server=$KUBE_SERVER_STAGING
+            kubectl config set-credentials deploy --token=$KUBE_TOKEN_STAGING
+            kubectl config set-context staging --cluster=staging --user=deploy
+            kubectl config use-context staging
+            kubectl set image deployment/app app=$DOCKER_REGISTRY/$CIRCLE_PROJECT_REPONAME:$CIRCLE_SHA1
+            kubectl rollout status deployment/app --timeout=300s
+      - notify-status:
+          status: pass
+
+  deploy-production:
+    executor: docker-executor
+    steps:
+      - checkout
+      - kubernetes/install-kubectl
+      - run:
+          name: Deploy to production
+          command: |
+            kubectl config set-cluster production --server=$KUBE_SERVER_PROD
+            kubectl config set-credentials deploy --token=$KUBE_TOKEN_PROD
+            kubectl config set-context production --cluster=production --user=deploy
+            kubectl config use-context production
+            kubectl set image deployment/app app=$DOCKER_REGISTRY/$CIRCLE_PROJECT_REPONAME:$CIRCLE_SHA1
+            kubectl rollout status deployment/app --timeout=300s
+      - notify-status:
+          status: pass
+
+workflows:
+  ci-cd:
+    jobs:
+      - lint
+      - test:
+          requires:
+            - lint
+      - security-scan:
+          requires:
+            - lint
+      - build:
+          requires:
+            - test
+            - security-scan
+          filters:
+            branches:
+              only: main
+      - deploy-staging:
+          requires:
+            - build
+          filters:
+            branches:
+              only: main
+      - hold-production:
+          type: approval
+          requires:
+            - deploy-staging
+          filters:
+            branches:
+              only: main
+      - deploy-production:
+          requires:
+            - hold-production
+          filters:
+            branches:
+              only: main
+
+  nightly-security:
+    triggers:
+      - schedule:
+          cron: "0 2 * * *"
+          filters:
+            branches:
+              only: main
+    jobs:
+      - security-scan
+```
+
+---
+
+## Testing Strategies in Pipelines
+
+### Test Pyramid Implementation
+
+```yaml
+# .github/workflows/test-pyramid.yml
+name: Test Pyramid
+
+on: [push, pull_request]
+
+jobs:
+  # Base of pyramid - fast, many tests
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:unit -- --coverage --maxWorkers=4
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
+          if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+            echo "Coverage $COVERAGE% is below 80% threshold"
+            exit 1
+          fi
+      - uses: codecov/codecov-action@v4
+
+  # Middle of pyramid - moderate speed, fewer tests
+  integration-tests:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Run database migrations
+        run: npm run migrate:test
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/test
+      - run: npm run test:integration
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/test
+          REDIS_URL: redis://localhost:6379
+
+  # Top of pyramid - slow, few tests
+  e2e-tests:
+    needs: integration-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Start application
+        run: npm run start:test &
+        env:
+          NODE_ENV: test
+      - name: Wait for app
+        run: npx wait-on http://localhost:3000
+      - name: Run E2E tests
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  # Performance tests (optional, on main branch)
+  performance-tests:
+    needs: e2e-tests
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run k6 load tests
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: tests/performance/load.js
+          flags: --out json=results.json
+      - name: Check performance thresholds
+        run: |
+          # Fail if p95 latency > 500ms
+          P95=$(cat results.json | jq '.metrics.http_req_duration.values["p(95)"]')
+          if (( $(echo "$P95 > 500" | bc -l) )); then
+            echo "P95 latency $P95ms exceeds 500ms threshold"
+            exit 1
+          fi
+
+  # Contract tests for microservices
+  contract-tests:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Run Pact tests
+        run: npm run test:contract
+      - name: Publish contracts
+        if: github.ref == 'refs/heads/main'
+        run: npm run pact:publish
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+```
+
+### Test Parallelization Strategies
+
+```yaml
+# GitLab CI - Test sharding
+test:
+  stage: test
+  parallel: 4
+  script:
+    - npm ci
+    - |
+      # Split tests across parallel jobs
+      TOTAL_JOBS=4
+      JOB_INDEX=$((CI_NODE_INDEX - 1))
+      npm run test -- --shard=$((JOB_INDEX + 1))/$TOTAL_JOBS
+  artifacts:
+    reports:
+      junit: junit.xml
+```
+
+---
+
 ## Deployment Strategies
 
 ### Blue-Green Deployment
@@ -642,6 +1252,567 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 20
 ```
+
+### Deployment Strategy Comparison
+
+| Strategy    | Downtime | Rollback Speed | Resource Usage | Risk Level | Best For                |
+| ----------- | -------- | -------------- | -------------- | ---------- | ----------------------- |
+| Rolling     | None     | Minutes        | 1.2x normal    | Medium     | Standard deployments    |
+| Blue-Green  | None     | Instant        | 2x normal      | Low        | Critical applications   |
+| Canary      | None     | Fast           | 1.1x normal    | Low        | High-traffic services   |
+| Recreate    | Yes      | N/A            | 1x normal      | High       | Dev/test environments   |
+| A/B Testing | None     | Fast           | 1.1x normal    | Low        | Feature experimentation |
+
+---
+
+## Environment Management
+
+### Environment Configuration Matrix
+
+```yaml
+# .github/workflows/deploy-environments.yml
+name: Multi-Environment Deployment
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+jobs:
+  determine-env:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      url: ${{ steps.env.outputs.url }}
+    steps:
+      - id: env
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            ENV="staging"
+          else
+            ENV="development"
+          fi
+
+          case $ENV in
+            development)
+              URL="https://dev.example.com"
+              ;;
+            staging)
+              URL="https://staging.example.com"
+              ;;
+            production)
+              URL="https://example.com"
+              ;;
+          esac
+
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: determine-env
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.determine-env.outputs.environment }}
+      url: ${{ needs.determine-env.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to ${{ needs.determine-env.outputs.environment }}
+        env:
+          # Environment-specific secrets
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          echo "Deploying to ${{ needs.determine-env.outputs.environment }}"
+          ./scripts/deploy.sh ${{ needs.determine-env.outputs.environment }}
+```
+
+### Environment-Specific Configuration
+
+```yaml
+# config/environments.yml
+environments:
+  development:
+    replicas: 1
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    features:
+      debug: true
+      mock_services: true
+    secrets_prefix: DEV_
+
+  staging:
+    replicas: 2
+    resources:
+      cpu: 250m
+      memory: 512Mi
+    features:
+      debug: false
+      mock_services: false
+    secrets_prefix: STAGING_
+
+  production:
+    replicas: 5
+    resources:
+      cpu: 500m
+      memory: 1Gi
+    features:
+      debug: false
+      mock_services: false
+    secrets_prefix: PROD_
+    extra:
+      auto_scaling: true
+      min_replicas: 3
+      max_replicas: 20
+```
+
+### Environment Promotion Pipeline
+
+```yaml
+# GitLab CI - Environment promotion
+stages:
+  - build
+  - deploy-dev
+  - test-dev
+  - promote-staging
+  - test-staging
+  - promote-production
+
+variables:
+  IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+
+build:
+  stage: build
+  script:
+    - docker build -t $IMAGE_TAG .
+    - docker push $IMAGE_TAG
+
+deploy-dev:
+  stage: deploy-dev
+  environment:
+    name: development
+    url: https://dev.example.com
+  script:
+    - kubectl apply -f k8s/dev/
+    - kubectl set image deployment/app app=$IMAGE_TAG
+
+test-dev:
+  stage: test-dev
+  script:
+    - npm run test:smoke -- --url=https://dev.example.com
+  needs:
+    - deploy-dev
+
+promote-staging:
+  stage: promote-staging
+  environment:
+    name: staging
+    url: https://staging.example.com
+  when: manual
+  script:
+    - kubectl apply -f k8s/staging/
+    - kubectl set image deployment/app app=$IMAGE_TAG
+  needs:
+    - test-dev
+
+test-staging:
+  stage: test-staging
+  script:
+    - npm run test:integration -- --url=https://staging.example.com
+    - npm run test:performance -- --url=https://staging.example.com
+  needs:
+    - promote-staging
+
+promote-production:
+  stage: promote-production
+  environment:
+    name: production
+    url: https://example.com
+  when: manual
+  script:
+    - kubectl apply -f k8s/production/
+    - kubectl set image deployment/app app=$IMAGE_TAG
+  needs:
+    - test-staging
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+```
+
+---
+
+## Artifact Management and Versioning
+
+### Semantic Versioning Pipeline
+
+````yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.version.outputs.new_version }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get next version
+        id: version
+        run: |
+          # Analyze commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          COMMITS=$(git log $LAST_TAG..HEAD --pretty=format:"%s")
+
+          # Determine version bump based on conventional commits
+          if echo "$COMMITS" | grep -qE "^BREAKING CHANGE:|^[a-z]+!:"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE "^feat"; then
+            BUMP="minor"
+          else
+            BUMP="patch"
+          fi
+
+          # Calculate new version
+          IFS='.' read -r major minor patch <<< "${LAST_TAG#v}"
+          case $BUMP in
+            major) new_version="$((major + 1)).0.0" ;;
+            minor) new_version="$major.$((minor + 1)).0" ;;
+            patch) new_version="$major.$minor.$((patch + 1))" ;;
+          esac
+
+          echo "new_version=v$new_version" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            CHANGELOG=$(git log $LAST_TAG..HEAD --pretty=format:"- %s (%h)")
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)")
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --label "org.opencontainers.image.version=${{ needs.version.outputs.new_version }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.new_version }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            .
+
+      - name: Push to registry
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.new_version }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.version.outputs.new_version }}
+          name: Release ${{ needs.version.outputs.new_version }}
+          body: |
+            ## Changes
+            ${{ needs.version.outputs.changelog }}
+
+            ## Docker Image
+            ```
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.new_version }}
+            ```
+          generate_release_notes: true
+
+  publish-npm:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm version ${{ needs.version.outputs.new_version }} --no-git-tag-version
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+````
+
+### Artifact Storage and Retention
+
+```yaml
+# GitHub Actions - Artifact management
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+
+      # Upload build artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.sha }}
+          path: |
+            dist/
+            !dist/**/*.map
+          retention-days: 30
+          compression-level: 9
+
+      # Upload test results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.sha }}
+          path: |
+            test-results/
+            coverage/
+          retention-days: 14
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Download artifacts from build job
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-${{ github.sha }}
+          path: dist/
+
+      - name: Deploy artifacts
+        run: ./scripts/deploy.sh
+```
+
+### Container Image Versioning
+
+```dockerfile
+# Dockerfile with build metadata
+ARG VERSION=dev
+ARG BUILD_DATE
+ARG VCS_REF
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+
+# OCI Image Labels
+LABEL org.opencontainers.image.title="My Application"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.revision="${VCS_REF}"
+LABEL org.opencontainers.image.source="https://github.com/org/repo"
+
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY package.json ./
+
+USER node
+EXPOSE 3000
+CMD ["node", "dist/main.js"]
+```
+
+---
+
+## Rollback Strategies
+
+### Automated Rollback Pipeline
+
+```yaml
+# .github/workflows/rollback.yml
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to rollback"
+        type: choice
+        options:
+          - staging
+          - production
+      version:
+        description: "Version to rollback to (leave empty for previous)"
+        required: false
+      reason:
+        description: "Reason for rollback"
+        required: true
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine rollback version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # Get previous deployment version from history
+            VERSION=$(kubectl rollout history deployment/app -n ${{ github.event.inputs.environment }} | \
+              tail -2 | head -1 | awk '{print $1}')
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create rollback record
+        run: |
+          echo "Rollback initiated" >> rollback.log
+          echo "Environment: ${{ github.event.inputs.environment }}" >> rollback.log
+          echo "Target version: ${{ steps.version.outputs.version }}" >> rollback.log
+          echo "Reason: ${{ github.event.inputs.reason }}" >> rollback.log
+          echo "Initiated by: ${{ github.actor }}" >> rollback.log
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> rollback.log
+
+      - name: Execute rollback
+        run: |
+          # Kubernetes rollback
+          kubectl rollout undo deployment/app \
+            -n ${{ github.event.inputs.environment }} \
+            --to-revision=${{ steps.version.outputs.version }}
+
+          # Wait for rollback to complete
+          kubectl rollout status deployment/app \
+            -n ${{ github.event.inputs.environment }} \
+            --timeout=300s
+
+      - name: Verify rollback
+        run: |
+          # Health check
+          HEALTH=$(curl -s https://${{ github.event.inputs.environment }}.example.com/health | jq -r '.status')
+          if [ "$HEALTH" != "healthy" ]; then
+            echo "Rollback verification failed!"
+            exit 1
+          fi
+          echo "Rollback successful - application healthy"
+
+      - name: Notify team
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "Rollback completed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Rollback Completed*\n*Environment:* ${{ github.event.inputs.environment }}\n*Version:* ${{ steps.version.outputs.version }}\n*Reason:* ${{ github.event.inputs.reason }}\n*Initiated by:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Create incident ticket
+        if: github.event.inputs.environment == 'production'
+        run: |
+          # Create incident record for production rollbacks
+          curl -X POST "${{ secrets.INCIDENT_API_URL }}" \
+            -H "Authorization: Bearer ${{ secrets.INCIDENT_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "title": "Production Rollback - ${{ github.event.inputs.reason }}",
+              "severity": "high",
+              "description": "Automated rollback triggered by ${{ github.actor }}",
+              "version_from": "current",
+              "version_to": "${{ steps.version.outputs.version }}"
+            }'
+```
+
+### Database Rollback Strategy
+
+```yaml
+# .github/workflows/db-rollback.yml
+name: Database Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration_version:
+        description: "Target migration version"
+        required: true
+      dry_run:
+        description: "Dry run (show what would be rolled back)"
+        type: boolean
+        default: true
+
+jobs:
+  db-rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Backup current state
+        run: |
+          pg_dump $DATABASE_URL > backup-$(date +%Y%m%d-%H%M%S).sql
+          aws s3 cp backup-*.sql s3://backups/db/
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Preview rollback
+        if: github.event.inputs.dry_run == 'true'
+        run: |
+          npm run migrate:rollback -- --to=${{ github.event.inputs.migration_version }} --dry-run
+
+      - name: Execute rollback
+        if: github.event.inputs.dry_run == 'false'
+        run: |
+          npm run migrate:rollback -- --to=${{ github.event.inputs.migration_version }}
+
+      - name: Verify database health
+        run: |
+          npm run db:health-check
+```
+
+### Rollback Decision Matrix
+
+| Metric                | Threshold      | Action             |
+| --------------------- | -------------- | ------------------ |
+| Error rate            | > 5%           | Auto-rollback      |
+| P99 latency           | > 2x baseline  | Alert + manual     |
+| Health check failures | > 3 in 1 min   | Auto-rollback      |
+| Memory usage          | > 90%          | Alert + manual     |
+| CPU usage             | > 95% for 5min | Alert + scale/roll |
+| Failed requests       | > 10/min       | Auto-rollback      |
 
 ---
 
@@ -849,29 +2020,12 @@ pipeline {
 
 ---
 
-## Security Best Practices
+## Pipeline Security (SAST, DAST, SCA)
 
-### Pipeline Security Checklist
-
-| Category     | Practice                     | Implementation               |
-| ------------ | ---------------------------- | ---------------------------- |
-| Secrets      | Never hardcode secrets       | Use platform secret managers |
-| Secrets      | Rotate credentials regularly | Automate with Vault/AWS SM   |
-| Secrets      | Use OIDC for cloud auth      | Eliminate static credentials |
-| Code         | Scan for vulnerabilities     | Trivy, Snyk, npm audit       |
-| Code         | Static analysis (SAST)       | Semgrep, CodeQL, SonarQube   |
-| Dependencies | Check for CVEs               | Dependabot, Renovate         |
-| Images       | Scan container images        | Trivy, Clair, Anchore        |
-| Images       | Use minimal base images      | Distroless, Alpine           |
-| Access       | Principle of least privilege | Scoped tokens, RBAC          |
-| Access       | Require PR reviews           | Branch protection rules      |
-| Audit        | Log all pipeline runs        | Centralized logging          |
-| Audit        | Sign commits and images      | GPG, Cosign                  |
-
-### Security Scanning Integration
+### Comprehensive Security Pipeline
 
 ```yaml
-# Comprehensive Security Pipeline
+# .github/workflows/security.yml
 name: Security Checks
 
 on:
@@ -882,55 +2036,207 @@ on:
     - cron: "0 6 * * *"
 
 jobs:
+  # Static Application Security Testing (SAST)
   sast:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Run Semgrep
         uses: returntocorp/semgrep-action@v1
         with:
-          config: p/default p/security-audit p/owasp-top-ten
+          config: >-
+            p/default
+            p/security-audit
+            p/owasp-top-ten
+            p/cwe-top-25
 
-  dependency-check:
+      - name: Run CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript, typescript
+      - uses: github/codeql-action/analyze@v3
+
+      - name: Run Bandit (Python)
+        if: hashFiles('**/*.py') != ''
+        run: |
+          pip install bandit
+          bandit -r . -f json -o bandit-results.json || true
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bandit-results.json
+
+  # Software Composition Analysis (SCA)
+  sca:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Run Snyk
         uses: snyk/actions/node@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          args: --severity-threshold=high
+          args: --severity-threshold=high --sarif-file-output=snyk.sarif
 
+      - name: Run Trivy (filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          severity: "CRITICAL,HIGH"
+          format: "sarif"
+          output: "trivy-fs.sarif"
+
+      - name: Run npm audit
+        run: npm audit --audit-level=high --json > npm-audit.json || true
+
+      - name: Upload SARIF files
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk.sarif
+
+  # Container Security
   container-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build image
         run: docker build -t app:${{ github.sha }} .
-      - name: Run Trivy
+
+      - name: Run Trivy (image)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: app:${{ github.sha }}
           format: "sarif"
-          output: "trivy-results.sarif"
+          output: "trivy-image.sarif"
           severity: "CRITICAL,HIGH"
+
+      - name: Run Grype
+        uses: anchore/scan-action@v3
+        with:
+          image: app:${{ github.sha }}
+          fail-build: true
+          severity-cutoff: high
+
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: "trivy-results.sarif"
+          sarif_file: trivy-image.sarif
 
-  secret-scanning:
+  # Dynamic Application Security Testing (DAST)
+  dast:
+    needs: [sast, sca]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start application
+        run: |
+          docker-compose up -d
+          sleep 30
+
+      - name: Run OWASP ZAP
+        uses: zaproxy/action-full-scan@v0.9.0
+        with:
+          target: "http://localhost:3000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a"
+
+      - name: Run Nuclei
+        uses: projectdiscovery/nuclei-action@main
+        with:
+          target: http://localhost:3000
+          flags: "-severity critical,high -sarif-export nuclei.sarif"
+
+  # Secret Scanning
+  secret-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+  # Infrastructure Security
+  iac-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform,kubernetes,dockerfile
+          output_format: sarif
+          output_file_path: checkov.sarif
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          soft_fail: true
 ```
+
+### Security Gate Configuration
+
+```yaml
+# Branch protection rules (configure via API or UI)
+security-gate:
+  runs-on: ubuntu-latest
+  needs: [sast, sca, container-scan, secret-scan]
+  if: always()
+  steps:
+    - name: Check security results
+      run: |
+        # Fail if any critical vulnerabilities found
+        if [ "${{ needs.sast.result }}" == "failure" ]; then
+          echo "SAST checks failed"
+          exit 1
+        fi
+        if [ "${{ needs.sca.result }}" == "failure" ]; then
+          echo "SCA checks failed"
+          exit 1
+        fi
+        if [ "${{ needs.container-scan.result }}" == "failure" ]; then
+          echo "Container scan failed"
+          exit 1
+        fi
+        if [ "${{ needs.secret-scan.result }}" == "failure" ]; then
+          echo "Secret scan failed - potential credential leak!"
+          exit 1
+        fi
+        echo "All security checks passed"
+```
+
+### Security Checklist
+
+| Category     | Practice                     | Tool                        |
+| ------------ | ---------------------------- | --------------------------- |
+| Secrets      | Never hardcode secrets       | Gitleaks, TruffleHog        |
+| Secrets      | Rotate credentials regularly | Vault, AWS Secrets Manager  |
+| Secrets      | Use OIDC for cloud auth      | GitHub OIDC, GitLab JWT     |
+| Code         | Scan for vulnerabilities     | Semgrep, CodeQL, Bandit     |
+| Code         | Static analysis (SAST)       | SonarQube, Checkmarx        |
+| Dependencies | Check for CVEs               | Snyk, npm audit, Dependabot |
+| Images       | Scan container images        | Trivy, Grype, Clair         |
+| Images       | Use minimal base images      | Distroless, Alpine          |
+| IaC          | Scan infrastructure code     | Checkov, tfsec, Terrascan   |
+| Runtime      | Dynamic testing (DAST)       | OWASP ZAP, Nuclei           |
+| Access       | Principle of least privilege | Scoped tokens, RBAC         |
+| Audit        | Sign commits and images      | GPG, Cosign, Sigstore       |
 
 ---
 
@@ -940,9 +2246,6 @@ jobs:
 
 ```yaml
 # Branch protection + required checks
-# Configure in repo settings or via Terraform
-
-# Example quality gate checks
 quality-gate:
   runs-on: ubuntu-latest
   steps:
@@ -988,6 +2291,7 @@ quality-gate:
 | `/agents/devops/terraform-expert`            | Infrastructure as Code for CI/CD resources |
 | `/agents/security/secrets-management-expert` | Vault, AWS Secrets Manager                 |
 | `/agents/security/vulnerability-scanner`     | Security scanning integration              |
+| `/agents/security/security-expert`           | Security architecture and auditing         |
 | `/agents/testing/integration-test-expert`    | Pipeline test stages                       |
 
 ---
@@ -1012,6 +2316,18 @@ quality-gate:
 
 # Add security scanning
 /agents/devops/ci-cd-expert add SAST, DAST, and container scanning to existing pipeline
+
+# Design branching strategy
+/agents/devops/ci-cd-expert design trunk-based development workflow with feature flags
+
+# Configure multi-environment deployment
+/agents/devops/ci-cd-expert set up dev/staging/production environments with promotion gates
+
+# Implement rollback strategy
+/agents/devops/ci-cd-expert create automated rollback pipeline with health checks
+
+# Set up artifact versioning
+/agents/devops/ci-cd-expert implement semantic versioning with changelog generation
 ```
 
 ---
@@ -1026,6 +2342,8 @@ quality-gate:
 | Failed deployments   | No health checks   | Add readiness/liveness probes         |
 | Pipeline timeouts    | Large artifacts    | Use artifact streaming, split stages  |
 | Concurrent conflicts | No locking         | Add concurrency groups, mutex         |
+| OOM errors           | Large builds       | Increase runner memory, optimize deps |
+| Permission denied    | Wrong credentials  | Verify OIDC/token permissions         |
 
 ---
 
@@ -1041,4 +2359,16 @@ gitlab-ci-lint .gitlab-ci.yml
 # Jenkins - Validate Jenkinsfile
 curl -X POST -F "jenkinsfile=<Jenkinsfile" \
   https://jenkins.example.com/pipeline-model-converter/validate
+
+# CircleCI - Validate config
+circleci config validate
+
+# Kubernetes - Check rollout status
+kubectl rollout status deployment/app --timeout=300s
+
+# Rollback deployment
+kubectl rollout undo deployment/app
+
+# View deployment history
+kubectl rollout history deployment/app
 ```
