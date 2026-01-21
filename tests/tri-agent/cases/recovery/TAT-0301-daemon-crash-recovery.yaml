@@ -1,0 +1,166 @@
+# Test Case: Daemon Crash Recovery
+# Category: recovery
+# Priority: critical
+
+id: "TAT-0301"
+name: "Daemon Crash Recovery - Automatic Restart"
+description: |
+  Validates that the tri-agent daemon properly recovers from unexpected
+  crashes, restores state from checkpoints, and resumes pending tasks
+  without data loss.
+
+category: "recovery"
+priority: "critical"
+tags:
+  - "recovery"
+  - "crash"
+  - "resilience"
+  - "checkpoint"
+
+setup:
+  fixtures:
+    - "running-daemon.yaml"
+    - "pending-tasks.json"
+
+  state:
+    database: "fixtures/daemon-with-tasks.db"
+    files:
+      - path: "${HOME}/.claude/sessions/checkpoints/latest.json"
+        source: "fixtures/checkpoint-with-tasks.json"
+
+  services:
+    - name: "tri-agent-daemon"
+      action: "start"
+      wait_for: "healthcheck:ready"
+    - name: "watchdog-master"
+      action: "start"
+      wait_for: "healthcheck:ready"
+
+  # Queue some tasks before crash
+  commands:
+    - "tri-agent task add 'Test task 1' --priority=high"
+    - "tri-agent task add 'Test task 2' --priority=medium"
+    - "sleep 2"  # Allow tasks to be picked up
+
+input:
+  type: "event"
+  event:
+    type: "daemon.crash"
+    source: "test-harness"
+    payload:
+      signal: "SIGKILL"
+      pid: "${DAEMON_PID}"
+      simulate: true
+      crash_reason: "simulated_crash_for_testing"
+    timestamp: "2026-01-04T12:00:00Z"
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+
+expected:
+  # Watchdog should restart daemon
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Daemon crash detected"
+      - "Watchdog initiating recovery"
+      - "Restoring from checkpoint"
+      - "Checkpoint restored successfully"
+      - "Resuming 2 pending tasks"
+      - "Daemon recovered and ready"
+
+  stderr:
+    not_contains:
+      - "FATAL"
+      - "Unrecoverable error"
+      - "Data corruption"
+
+  state:
+    processes:
+      - name: "tri-agent-daemon"
+        running: true
+        count: 1
+      - name: "watchdog-master"
+        running: true
+        count: 1
+
+    files:
+      - path: "${HOME}/.claude/state/daemon.pid"
+        exists: true
+      - path: "${HOME}/.claude/logs/recovery.log"
+        exists: true
+        content:
+          contains:
+            - "Recovery completed"
+            - "Tasks restored: 2"
+
+    database:
+      # Tasks should still exist and be resumable
+      - query: "SELECT COUNT(*) as count FROM tasks WHERE status IN ('pending', 'in_progress')"
+        expected: { "count": 2 }
+        comparison: "exact"
+
+      # Recovery event should be logged
+      - query: |
+          SELECT COUNT(*) as count FROM event_log
+          WHERE event_type = 'daemon.recovered'
+          AND created_at > datetime('now', '-5 minutes')
+        expected: { "count": 1 }
+        comparison: "exact"
+
+    agents:
+      active_count: 9
+      states:
+        claude_1: "idle"
+        codex_1: "idle"
+        gemini_1: "idle"
+
+  metrics:
+    duration_max_ms: 60000  # Recovery should complete within 60 seconds
+
+  events:
+    - type: "daemon.crash_detected"
+      count: 1
+      order: 1
+    - type: "watchdog.recovery_initiated"
+      count: 1
+      order: 2
+    - type: "checkpoint.restored"
+      count: 1
+      order: 3
+    - type: "daemon.recovered"
+      count: 1
+      order: 4
+
+teardown:
+  commands:
+    - "tri-agent stop --graceful --timeout=15"
+    - "pkill -f watchdog-master || true"
+  cleanup_files:
+    - "${HOME}/.claude/logs/recovery.log"
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 3
+  backoff:
+    type: "exponential"
+    base_seconds: 5
+    max_seconds: 60
+  on_conditions:
+    - "timeout"
+    - "transient_error"
+  reset_state: true
+
+timeout:
+  setup: 20
+  execution: 120
+  teardown: 20
+
+dependencies:
+  - "TAT-0001"

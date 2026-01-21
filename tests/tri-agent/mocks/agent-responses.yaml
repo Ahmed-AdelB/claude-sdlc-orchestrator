@@ -1,0 +1,146 @@
+# Mock Agent Responses for Testing
+# Used to simulate AI agent responses without actual API calls
+
+claude:
+  task_completion:
+    success:
+      status: "completed"
+      result: |
+        Implementation completed successfully.
+        - Created authentication handler
+        - Added JWT validation middleware
+        - Updated route protections
+      files_changed:
+        - path: "src/auth/handler.ts"
+          operation: "created"
+        - path: "src/middleware/auth.ts"
+          operation: "modified"
+      tests_run: 15
+      tests_passed: 15
+      lint_passed: true
+      build_passed: true
+
+    failure:
+      status: "failed"
+      error: "Type error in authentication handler"
+      error_details:
+        file: "src/auth/handler.ts"
+        line: 42
+        message: "Property 'token' does not exist on type 'Request'"
+
+  verification:
+    pass:
+      result: "PASS"
+      reason: |
+        Implementation verified successfully:
+        - Code follows security best practices
+        - All edge cases handled
+        - Tests cover main scenarios
+        - No regressions detected
+      checklist:
+        correctness: true
+        security: true
+        edge_cases: true
+        performance: true
+
+    fail:
+      result: "FAIL"
+      reason: |
+        Verification failed:
+        - Missing input validation on token endpoint
+        - Potential SQL injection in user lookup
+      issues:
+        - severity: "high"
+          type: "security"
+          description: "Missing input validation"
+          file: "src/auth/handler.ts"
+          line: 28
+
+codex:
+  task_completion:
+    success:
+      status: "completed"
+      result: "Implementation complete with all tests passing"
+      execution_time_ms: 15000
+      files_changed:
+        - path: "src/feature.ts"
+          operation: "created"
+          diff_lines: 150
+
+    failure:
+      status: "failed"
+      error: "Build failed due to dependency conflict"
+      stdout: "npm ERR! peer dep missing..."
+
+  verification:
+    pass:
+      result: "PASS"
+      reason: "Code verified - logic correct, security checks pass"
+      metrics:
+        complexity: "low"
+        test_coverage: 92
+        security_score: "A"
+
+    fail:
+      result: "FAIL"
+      reason: "Logic error detected in edge case handling"
+      issues:
+        - type: "logic"
+          description: "Off-by-one error in pagination"
+          suggestion: "Change < to <= on line 45"
+
+gemini:
+  task_completion:
+    success:
+      status: "completed"
+      result: |
+        Documentation and analysis complete.
+        Generated comprehensive API documentation.
+      files_changed:
+        - path: "docs/api.md"
+          operation: "created"
+      context_used_tokens: 150000
+
+    failure:
+      status: "failed"
+      error: "Context limit exceeded"
+      context_tokens: 1050000
+
+  verification:
+    pass:
+      result: "PASS"
+      reason: |
+        Full codebase analysis confirms implementation is correct.
+        Patterns match existing codebase conventions.
+        No security vulnerabilities detected.
+      analysis:
+        patterns_followed: true
+        conventions_matched: true
+        dependencies_safe: true
+
+    fail:
+      result: "FAIL"
+      reason: "Implementation deviates from established patterns"
+      issues:
+        - type: "pattern"
+          description: "Using callbacks instead of async/await"
+          recommendation: "Refactor to use async/await for consistency"
+
+# Response delays for realistic simulation (milliseconds)
+delays:
+  claude:
+    min: 500
+    max: 3000
+  codex:
+    min: 300
+    max: 2000
+  gemini:
+    min: 800
+    max: 5000
+
+# Failure injection for chaos testing
+chaos:
+  enabled: false
+  failure_rate: 0.05  # 5% chance of random failure
+  timeout_rate: 0.02  # 2% chance of timeout
+  delay_multiplier: 1.0

@@ -1,0 +1,141 @@
+# Test Case: Task Assignment and Distribution
+# Category: agent-coordination
+# Priority: critical
+
+id: "TAT-0101"
+name: "Task Assignment - Tri-Agent Distribution"
+description: |
+  Validates that tasks are correctly assigned across all three AI agents
+  (Claude, Codex, Gemini) following the minimum concurrent agent requirement
+  and proper verifier assignment rules.
+
+category: "agent-coordination"
+priority: "critical"
+tags:
+  - "assignment"
+  - "distribution"
+  - "tri-agent"
+  - "core"
+
+setup:
+  environment:
+    TRI_AGENT_ENFORCE_DISTRIBUTION: "true"
+    TRI_AGENT_MIN_CONCURRENT: "9"
+
+  fixtures:
+    - "running-daemon.yaml"
+    - "sample-tasks.json"
+
+  state:
+    database: "fixtures/running-daemon-state.db"
+
+  # Ensure daemon is running
+  services:
+    - name: "tri-agent-daemon"
+      action: "start"
+      wait_for: "healthcheck:ready"
+
+input:
+  type: "task"
+  task:
+    id: "TASK-001"
+    description: "Implement user authentication module with JWT tokens"
+    assigned_agent: null  # Let the daemon assign
+    verifier_agent: null  # Let the daemon assign
+    priority: "high"
+    context:
+      project: "test-project"
+      files:
+        - "src/auth/jwt.ts"
+        - "src/auth/middleware.ts"
+    files:
+      - "fixtures/auth-requirements.md"
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+    distribution:
+      claude: 3
+      codex: 3
+      gemini: 3
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Task TASK-001 queued"
+      - "Assigned to:"
+      - "Verifier:"
+
+  state:
+    database:
+      # Verify task was assigned
+      - query: "SELECT assigned_agent, verifier_agent FROM tasks WHERE id = 'TASK-001'"
+        comparison: "exists"
+
+      # Verify different agents for implementation and verification
+      - query: |
+          SELECT 1 FROM tasks
+          WHERE id = 'TASK-001'
+          AND assigned_agent != verifier_agent
+        expected: { "1": 1 }
+        comparison: "exists"
+
+      # Verify agents are from the pool
+      - query: |
+          SELECT COUNT(*) as count FROM tasks t
+          JOIN agents a ON t.assigned_agent = a.name
+          WHERE t.id = 'TASK-001' AND a.type IN ('claude', 'codex', 'gemini')
+        expected: { "count": 1 }
+        comparison: "exact"
+
+    agents:
+      active_count: 9
+
+  events:
+    - type: "task.queued"
+      count: 1
+      payload:
+        contains:
+          - "TASK-001"
+    - type: "task.assigned"
+      count: 1
+      payload:
+        json_path: "$.task_id"
+        value: "TASK-001"
+
+  # Verification rules
+  verification:
+    required_approvals: 2
+    approvers:
+      - "codex"
+      - "gemini"
+    result: "PASS"
+
+teardown:
+  commands:
+    - "tri-agent task cancel TASK-001 --force || true"
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "linear"
+    base_seconds: 5
+    max_seconds: 30
+  on_conditions:
+    - "state_mismatch"
+  reset_state: true
+
+timeout:
+  setup: 15
+  execution: 120
+  teardown: 10
+
+dependencies:
+  - "TAT-0001"  # Daemon must start successfully

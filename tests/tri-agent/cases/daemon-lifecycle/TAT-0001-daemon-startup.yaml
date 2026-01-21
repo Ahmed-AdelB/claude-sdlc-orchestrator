@@ -1,0 +1,164 @@
+# Test Case: Daemon Startup Validation
+# Category: daemon-lifecycle
+# Priority: critical
+
+id: "TAT-0001"
+name: "Daemon Startup - Normal Conditions"
+description: |
+  Validates that the tri-agent daemon starts correctly under normal conditions,
+  initializes all required components, and reaches a healthy state within the
+  expected timeframe.
+
+category: "daemon-lifecycle"
+priority: "critical"
+tags:
+  - "startup"
+  - "smoke"
+  - "core"
+
+# Pre-test setup
+setup:
+  environment:
+    TRI_AGENT_LOG_LEVEL: "debug"
+    TRI_AGENT_CONFIG: "/home/aadel/.claude/tests/tri-agent/fixtures/daemon-config.yaml"
+
+  # Ensure clean state
+  commands:
+    - "pkill -f tri-agent-daemon || true"
+    - "rm -f ${HOME}/.claude/state/tri-agent.db.lock"
+
+  # Required fixtures
+  fixtures:
+    - "daemon-config.yaml"
+    - "empty-task-queue.json"
+
+  state:
+    database: "fixtures/clean-state.db"
+    files:
+      - path: "${HOME}/.claude/state/task-queue.json"
+        content: "[]"
+
+# Test input specification
+input:
+  type: "command"
+  command:
+    name: "tri-agent"
+    args:
+      - "start"
+      - "--mode=daemon"
+      - "--config=/home/aadel/.claude/tests/tri-agent/fixtures/daemon-config.yaml"
+    env:
+      TRI_AGENT_TEST_MODE: "true"
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+    distribution:
+      claude: 3
+      codex: 3
+      gemini: 3
+
+# Expected output and state
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Tri-Agent Daemon starting"
+      - "Initializing agent pool"
+      - "Agent pool initialized: 9 agents ready"
+      - "Daemon ready and accepting tasks"
+
+  stderr:
+    empty: true
+
+  state:
+    processes:
+      - name: "tri-agent-daemon"
+        running: true
+        count: 1
+      - name: "tri-agent-worker"
+        running: true
+        count: 3
+      - name: "tri-agent-supervisor"
+        running: true
+        count: 1
+
+    files:
+      - path: "${HOME}/.claude/state/daemon.pid"
+        exists: true
+        content:
+          regex: "^[0-9]+$"
+      - path: "${HOME}/.claude/heartbeat"
+        exists: true
+
+    agents:
+      active_count: 9
+      completed_tasks: 0
+      failed_tasks: 0
+      states:
+        claude_1: "idle"
+        claude_2: "idle"
+        claude_3: "idle"
+        codex_1: "idle"
+        codex_2: "idle"
+        codex_3: "idle"
+        gemini_1: "idle"
+        gemini_2: "idle"
+        gemini_3: "idle"
+
+    database:
+      - query: "SELECT COUNT(*) as count FROM agents WHERE status = 'ready'"
+        expected: { "count": 9 }
+        comparison: "exact"
+      - query: "SELECT COUNT(*) as count FROM tasks WHERE status = 'pending'"
+        expected: { "count": 0 }
+        comparison: "exact"
+
+  metrics:
+    duration_max_ms: 30000  # 30 seconds max startup time
+    memory_max_mb: 512
+
+  events:
+    - type: "daemon.started"
+      count: 1
+      order: 1
+    - type: "agent_pool.initialized"
+      count: 1
+      order: 2
+    - type: "daemon.ready"
+      count: 1
+      order: 3
+
+# Post-test cleanup
+teardown:
+  commands:
+    - "tri-agent stop --graceful --timeout=10"
+  cleanup_files:
+    - "${HOME}/.claude/state/daemon.pid"
+  restore_state: true
+  always: true
+
+# Retry configuration
+retry:
+  max_attempts: 3
+  backoff:
+    type: "exponential"
+    base_seconds: 2
+    max_seconds: 30
+  on_conditions:
+    - "timeout"
+    - "transient_error"
+  reset_state: true
+
+# Timeout configuration
+timeout:
+  setup: 10
+  execution: 60
+  teardown: 15
+
+# Dependencies (none for startup test)
+dependencies: []

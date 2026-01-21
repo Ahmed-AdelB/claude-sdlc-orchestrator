@@ -1,0 +1,469 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tri-agent.local/schemas/test-case.json",
+  "title": "Tri-Agent Daemon Test Case Schema",
+  "description": "Schema for defining tri-agent daemon test cases",
+  "type": "object",
+  "required": ["id", "name", "category", "input", "expected"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^TAT-[0-9]{4}$",
+      "description": "Unique test case identifier (TAT = Tri-Agent Test)"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 100,
+      "description": "Human-readable test case name"
+    },
+    "description": {
+      "type": "string",
+      "description": "Detailed description of what this test validates"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "daemon-lifecycle",
+        "agent-coordination",
+        "task-routing",
+        "verification-flow",
+        "recovery",
+        "concurrency",
+        "state-management",
+        "budget-tracking",
+        "session-management",
+        "integration"
+      ],
+      "description": "Test category for organization and filtering"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"],
+      "default": "medium",
+      "description": "Test priority for execution ordering"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Tags for filtering and grouping tests"
+    },
+    "setup": {
+      "$ref": "#/definitions/setup",
+      "description": "Pre-test setup configuration"
+    },
+    "input": {
+      "$ref": "#/definitions/input",
+      "description": "Test input specification"
+    },
+    "expected": {
+      "$ref": "#/definitions/expected",
+      "description": "Expected output and state validation"
+    },
+    "teardown": {
+      "$ref": "#/definitions/teardown",
+      "description": "Post-test cleanup configuration"
+    },
+    "retry": {
+      "$ref": "#/definitions/retry",
+      "description": "Retry configuration on failure"
+    },
+    "timeout": {
+      "type": "object",
+      "properties": {
+        "setup": { "type": "integer", "minimum": 1, "default": 30 },
+        "execution": { "type": "integer", "minimum": 1, "default": 300 },
+        "teardown": { "type": "integer", "minimum": 1, "default": 30 }
+      },
+      "description": "Timeout values in seconds"
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^TAT-[0-9]{4}$" },
+      "description": "Test IDs that must pass before this test runs"
+    },
+    "skip": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "reason": { "type": "string" },
+        "until": { "type": "string", "format": "date" }
+      }
+    }
+  },
+  "definitions": {
+    "setup": {
+      "type": "object",
+      "properties": {
+        "fixtures": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Fixture files to load"
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables to set"
+        },
+        "mocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["target", "response"],
+            "properties": {
+              "target": { "type": "string" },
+              "method": { "type": "string" },
+              "response": {},
+              "delay_ms": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "state": {
+          "type": "object",
+          "properties": {
+            "database": { "type": "string", "description": "Database snapshot to restore" },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "content"],
+                "properties": {
+                  "path": { "type": "string" },
+                  "content": { "type": "string" },
+                  "source": { "type": "string", "description": "Source file to copy" }
+                }
+              }
+            }
+          }
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "action"],
+            "properties": {
+              "name": { "type": "string" },
+              "action": { "type": "string", "enum": ["start", "stop", "restart"] },
+              "wait_for": { "type": "string", "description": "Condition to wait for" }
+            }
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Shell commands to run before test"
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["task", "command", "event", "api", "file"],
+          "description": "Type of input being provided"
+        },
+        "task": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "description": { "type": "string" },
+            "assigned_agent": { "type": "string", "enum": ["claude", "codex", "gemini"] },
+            "verifier_agent": { "type": "string", "enum": ["claude", "codex", "gemini"] },
+            "priority": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+            "context": { "type": "object" },
+            "files": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "command": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "args": { "type": "array", "items": { "type": "string" } },
+            "stdin": { "type": "string" },
+            "env": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "event": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string" },
+            "source": { "type": "string" },
+            "payload": { "type": "object" },
+            "timestamp": { "type": "string", "format": "date-time" }
+          }
+        },
+        "api": {
+          "type": "object",
+          "properties": {
+            "endpoint": { "type": "string" },
+            "method": { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"] },
+            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "body": {},
+            "query": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "file": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" },
+            "encoding": { "type": "string", "default": "utf-8" }
+          }
+        },
+        "agents": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["claude", "codex", "gemini"] },
+              "minItems": 1
+            },
+            "concurrent": { "type": "integer", "minimum": 1, "maximum": 15, "default": 9 },
+            "distribution": {
+              "type": "object",
+              "properties": {
+                "claude": { "type": "integer", "minimum": 0 },
+                "codex": { "type": "integer", "minimum": 0 },
+                "gemini": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "properties": {
+        "exit_code": {
+          "type": "integer",
+          "description": "Expected process exit code"
+        },
+        "stdout": {
+          "$ref": "#/definitions/outputValidator"
+        },
+        "stderr": {
+          "$ref": "#/definitions/outputValidator"
+        },
+        "state": {
+          "type": "object",
+          "properties": {
+            "database": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["query", "expected"],
+                "properties": {
+                  "query": { "type": "string" },
+                  "expected": {},
+                  "comparison": { "type": "string", "enum": ["exact", "contains", "count", "exists"] }
+                }
+              }
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                  "path": { "type": "string" },
+                  "exists": { "type": "boolean" },
+                  "content": { "$ref": "#/definitions/outputValidator" },
+                  "permissions": { "type": "string" },
+                  "owner": { "type": "string" }
+                }
+              }
+            },
+            "processes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "running": { "type": "boolean" },
+                  "count": { "type": "integer" }
+                }
+              }
+            },
+            "agents": {
+              "type": "object",
+              "properties": {
+                "active_count": { "type": "integer" },
+                "completed_tasks": { "type": "integer" },
+                "failed_tasks": { "type": "integer" },
+                "states": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": ["idle", "busy", "error", "stopped"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "duration_max_ms": { "type": "integer" },
+            "memory_max_mb": { "type": "integer" },
+            "cpu_max_percent": { "type": "number" }
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 },
+              "order": { "type": "integer" },
+              "payload": { "$ref": "#/definitions/outputValidator" }
+            }
+          }
+        },
+        "verification": {
+          "type": "object",
+          "properties": {
+            "required_approvals": { "type": "integer", "minimum": 1, "default": 2 },
+            "approvers": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["claude", "codex", "gemini"] }
+            },
+            "result": { "type": "string", "enum": ["PASS", "FAIL"] }
+          }
+        }
+      }
+    },
+    "outputValidator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["exact"],
+          "properties": {
+            "exact": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["contains"],
+          "properties": {
+            "contains": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["regex"],
+          "properties": {
+            "regex": { "type": "string" },
+            "flags": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["json_path"],
+          "properties": {
+            "json_path": { "type": "string" },
+            "value": {}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["not_contains"],
+          "properties": {
+            "not_contains": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["empty"],
+          "properties": {
+            "empty": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "teardown": {
+      "type": "object",
+      "properties": {
+        "cleanup_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Files/directories to remove"
+        },
+        "restore_state": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restore pre-test state"
+        },
+        "commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Shell commands to run after test"
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "action"],
+            "properties": {
+              "name": { "type": "string" },
+              "action": { "type": "string", "enum": ["start", "stop", "restart"] }
+            }
+          }
+        },
+        "always": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run teardown even if test fails"
+        }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "default": 3,
+          "description": "Maximum retry attempts"
+        },
+        "backoff": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["fixed", "linear", "exponential"], "default": "exponential" },
+            "base_seconds": { "type": "integer", "minimum": 1, "default": 2 },
+            "max_seconds": { "type": "integer", "minimum": 1, "default": 60 }
+          }
+        },
+        "on_conditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["timeout", "exit_code_mismatch", "output_mismatch", "state_mismatch", "transient_error"]
+          },
+          "description": "Conditions that trigger retry"
+        },
+        "reset_state": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reset state before retry"
+        }
+      }
+    }
+  }
+}

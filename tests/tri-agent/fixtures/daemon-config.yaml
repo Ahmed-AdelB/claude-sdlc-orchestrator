@@ -1,0 +1,92 @@
+# Test Fixture: Daemon Configuration
+# Used by: TAT-0001, TAT-0101, and other daemon tests
+
+daemon:
+  name: "tri-agent-daemon-test"
+  mode: "test"
+  pid_file: "${HOME}/.claude/state/daemon.pid"
+  socket: "/tmp/tri-agent-test.sock"
+
+agents:
+  pool_size: 9
+  distribution:
+    claude: 3
+    codex: 3
+    gemini: 3
+
+  models:
+    claude:
+      model: "claude-sonnet-4-20250514"
+      thinking_mode: "standard"
+      context_limit: 200000
+    codex:
+      model: "gpt-5.2-codex"
+      reasoning_effort: "xhigh"
+      context_limit: 400000
+    gemini:
+      model: "gemini-3-pro-preview"
+      thinking_level: "high"
+      context_limit: 1000000
+
+  health_check:
+    interval_seconds: 30
+    timeout_seconds: 10
+    max_failures: 3
+
+tasks:
+  queue:
+    type: "sqlite"
+    path: "${HOME}/.claude/state/tri-agent-test.db"
+    max_size: 1000
+
+  execution:
+    timeout_seconds: 300
+    max_retries: 3
+    retry_backoff: "exponential"
+
+  verification:
+    required: true
+    two_key_rule: true
+    different_model_required: true
+
+state:
+  persistence:
+    enabled: true
+    checkpoint_interval_seconds: 60
+    max_checkpoints: 10
+
+  recovery:
+    enabled: true
+    auto_resume: true
+    max_recovery_time_seconds: 120
+
+logging:
+  level: "debug"
+  format: "json"
+  outputs:
+    - type: "file"
+      path: "${HOME}/.claude/logs/daemon-test.log"
+    - type: "console"
+      enabled: true
+
+watchdog:
+  enabled: true
+  heartbeat_interval_seconds: 30
+  max_missed_heartbeats: 3
+  auto_restart: true
+  restart_delay_seconds: 5
+
+budget:
+  tracking: true
+  daily_limit_tokens:
+    claude: 100000000
+    codex: 50000000
+    gemini: "unlimited"
+  warning_threshold: 0.8
+
+telemetry:
+  enabled: true
+  metrics_interval_seconds: 10
+  export:
+    prometheus: true
+    port: 9090

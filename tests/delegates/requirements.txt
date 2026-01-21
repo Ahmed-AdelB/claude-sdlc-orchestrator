@@ -1,0 +1,5 @@
+# Requirements for delegate tests
+# Install with: pip install -r requirements.txt
+
+pytest>=7.0.0
+pytest-timeout>=2.0.0

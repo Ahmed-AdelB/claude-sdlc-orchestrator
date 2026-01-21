@@ -1,0 +1,130 @@
+# Test Case: Daemon Basic Startup
+# Category: daemon-startup
+# Priority: critical
+
+id: "TAT-D001"
+name: "Daemon Basic Startup - Normal Conditions"
+description: |
+  Validates that the tri-agent daemon starts correctly under normal conditions,
+  creates required files (PID, heartbeat, state), and initializes logging.
+  This is a foundational test that must pass before other daemon tests.
+
+category: "daemon-startup"
+priority: "critical"
+tags:
+  - "startup"
+  - "smoke"
+  - "core"
+  - "pid"
+
+# Pre-test setup
+setup:
+  environment:
+    TRI_AGENT_TEST_MODE: "true"
+    TRI_AGENT_LOG_LEVEL: "debug"
+
+  # Ensure clean state before test
+  commands:
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f ${HOME}/.claude/daemon-heartbeat"
+    - "rm -f ${HOME}/.claude/daemon-state.json"
+
+  fixtures:
+    - "clean-environment"
+
+# Test input specification
+input:
+  type: "command"
+  command:
+    name: "bash"
+    args:
+      - "-c"
+      - |
+        cd ${HOME}/.claude && \
+        nohup bash tri-agent-daemon.sh > /tmp/daemon-test-output.log 2>&1 &
+        sleep 3
+        echo "Daemon launch initiated"
+    env:
+      TRI_AGENT_TEST_MODE: "true"
+    timeout: 10
+
+# Expected output and state
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Daemon launch initiated"
+
+  state:
+    files:
+      - path: "${HOME}/.claude/tri-agent-daemon.pid"
+        exists: true
+        content:
+          regex: "^[0-9]+$"
+          description: "PID file contains valid numeric PID"
+
+      - path: "${HOME}/.claude/daemon-heartbeat"
+        exists: true
+        content:
+          regex: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+          description: "Heartbeat file contains ISO timestamp"
+
+      - path: "${HOME}/.claude/daemon-state.json"
+        exists: true
+        json_valid: true
+
+    directories:
+      - path: "${HOME}/.claude/daemon-logs"
+        exists: true
+
+      - path: "${HOME}/.claude/24hr-results"
+        exists: true
+
+    processes:
+      - name: "tri-agent-daemon"
+        running: true
+        count: 1
+        check_method: "pidfile"
+        pidfile: "${HOME}/.claude/tri-agent-daemon.pid"
+
+  metrics:
+    duration_max_ms: 5000
+
+# Post-test cleanup
+teardown:
+  commands:
+    - |
+      if [[ -f ${HOME}/.claude/tri-agent-daemon.pid ]]; then
+        pid=$(cat ${HOME}/.claude/tri-agent-daemon.pid)
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 2
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f /tmp/daemon-test-output.log"
+
+  restore_state: true
+  always: true
+
+# Retry configuration
+retry:
+  max_attempts: 3
+  backoff:
+    type: "exponential"
+    base_seconds: 2
+    max_seconds: 10
+  on_conditions:
+    - "timeout"
+    - "transient_error"
+  reset_state: true
+
+# Timeout configuration
+timeout:
+  setup: 10
+  execution: 30
+  teardown: 15
+
+# No dependencies (this is a foundational test)
+dependencies: []

@@ -1,0 +1,120 @@
+# Test Case: PID File Validation
+# Category: daemon-startup
+# Priority: critical
+
+id: "TAT-D002"
+name: "PID File Creation and Validation"
+description: |
+  Validates that the daemon creates a proper PID file with a valid process ID,
+  and that the PID corresponds to a running process. Also tests that the PID
+  file is atomically written to prevent race conditions.
+
+category: "daemon-startup"
+priority: "critical"
+tags:
+  - "startup"
+  - "pid"
+  - "validation"
+  - "core"
+
+setup:
+  environment:
+    TRI_AGENT_TEST_MODE: "true"
+
+  commands:
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+
+input:
+  type: "command"
+  command:
+    name: "bash"
+    args:
+      - "-c"
+      - |
+        # Start daemon
+        cd ${HOME}/.claude
+        nohup bash tri-agent-daemon.sh > /tmp/daemon-pid-test.log 2>&1 &
+
+        # Wait for PID file
+        for i in {1..10}; do
+          if [[ -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+            break
+          fi
+          sleep 0.5
+        done
+
+        # Validate PID file
+        if [[ ! -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+          echo "FAIL: PID file not created"
+          exit 1
+        fi
+
+        pid=$(cat "${HOME}/.claude/tri-agent-daemon.pid")
+
+        # Check PID is numeric
+        if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+          echo "FAIL: PID is not numeric: $pid"
+          exit 1
+        fi
+
+        # Check process is running
+        if ! kill -0 "$pid" 2>/dev/null; then
+          echo "FAIL: Process $pid is not running"
+          exit 1
+        fi
+
+        echo "PASS: PID file valid with running process $pid"
+    timeout: 15
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "PASS: PID file valid with running process"
+    not_contains:
+      - "FAIL:"
+
+  state:
+    files:
+      - path: "${HOME}/.claude/tri-agent-daemon.pid"
+        exists: true
+        permissions: "644"
+        content:
+          regex: "^[0-9]+$"
+          min_length: 1
+          max_length: 10
+
+  metrics:
+    duration_max_ms: 10000
+
+teardown:
+  commands:
+    - |
+      if [[ -f ${HOME}/.claude/tri-agent-daemon.pid ]]; then
+        pid=$(cat ${HOME}/.claude/tri-agent-daemon.pid)
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f /tmp/daemon-pid-test.log"
+
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "linear"
+    base_seconds: 2
+  on_conditions:
+    - "timeout"
+
+timeout:
+  setup: 5
+  execution: 20
+  teardown: 10
+
+dependencies:
+  - "TAT-D001"

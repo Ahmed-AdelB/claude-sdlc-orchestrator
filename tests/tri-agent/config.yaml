@@ -1,0 +1,163 @@
+# Tri-Agent Daemon Test Framework Configuration
+# Version: 1.0.0
+
+framework:
+  name: "tri-agent-test"
+  version: "1.0.0"
+  description: "Test framework for tri-agent daemon validation"
+
+paths:
+  cases: "./cases"
+  fixtures: "./fixtures"
+  mocks: "./mocks"
+  results: "./results"
+  schemas: "./schemas"
+  runners: "./runners"
+  logs: "./logs"
+
+execution:
+  # Parallel test execution
+  parallel:
+    enabled: true
+    max_workers: 4
+    isolation: "process"  # process, container, or vm
+
+  # Default timeouts (seconds)
+  timeouts:
+    setup: 30
+    execution: 300
+    teardown: 30
+    total: 600
+
+  # Retry configuration
+  retry:
+    enabled: true
+    max_attempts: 3
+    backoff:
+      type: "exponential"
+      base_seconds: 2
+      max_seconds: 60
+    on_conditions:
+      - "timeout"
+      - "transient_error"
+
+  # Fail-fast behavior
+  fail_fast:
+    enabled: false
+    threshold: 5  # Stop after N failures
+
+# Agent configuration for tests
+agents:
+  minimum_concurrent: 9
+  distribution:
+    claude: 3
+    codex: 3
+    gemini: 3
+
+  # Mock agent configuration
+  mocks:
+    enabled: true
+    response_delay_ms: 100
+    failure_rate: 0.0  # For chaos testing
+
+# State management
+state:
+  database:
+    type: "sqlite"
+    path: "${HOME}/.claude/state/tri-agent-test.db"
+    backup_before_test: true
+
+  checkpoints:
+    enabled: true
+    directory: "./checkpoints"
+    retention_count: 10
+
+# Reporting
+reporting:
+  formats:
+    - "console"
+    - "json"
+    - "junit"
+    - "html"
+
+  output_dir: "./results"
+
+  # Report naming
+  naming:
+    pattern: "test-results-{timestamp}-{run_id}"
+    timestamp_format: "%Y%m%d_%H%M%S"
+
+  # Coverage tracking
+  coverage:
+    enabled: true
+    categories:
+      - "daemon-lifecycle"
+      - "agent-coordination"
+      - "task-routing"
+      - "verification-flow"
+      - "recovery"
+      - "concurrency"
+      - "state-management"
+      - "budget-tracking"
+      - "session-management"
+      - "integration"
+
+# Filters for test selection
+filters:
+  # Include patterns
+  include:
+    categories: []  # Empty = all
+    tags: []
+    priorities: ["critical", "high", "medium", "low"]
+
+  # Exclude patterns
+  exclude:
+    tags: ["wip", "broken"]
+    skip_slow: false
+
+# Environment
+environment:
+  # Variables set for all tests
+  global:
+    TRI_AGENT_TEST_MODE: "true"
+    TRI_AGENT_LOG_LEVEL: "debug"
+
+  # Cleanup behavior
+  cleanup:
+    on_success: true
+    on_failure: false  # Keep state for debugging
+    temp_dir: "/tmp/tri-agent-tests"
+
+# Hooks
+hooks:
+  before_suite:
+    - "scripts/setup-test-environment.sh"
+
+  after_suite:
+    - "scripts/cleanup-test-environment.sh"
+    - "scripts/generate-coverage-report.sh"
+
+  before_each:
+    - "scripts/reset-agent-state.sh"
+
+  after_each:
+    - "scripts/collect-logs.sh"
+
+# Notifications
+notifications:
+  enabled: false
+  on_failure: true
+  on_success: false
+  channels:
+    slack:
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+    email:
+      recipients: []
+
+# Logging
+logging:
+  level: "info"
+  format: "json"
+  file: "./logs/test-runner.log"
+  max_size_mb: 50
+  retention_days: 7

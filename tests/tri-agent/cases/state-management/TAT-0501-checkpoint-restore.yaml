@@ -1,0 +1,128 @@
+# Test Case: Checkpoint Create and Restore
+# Category: state-management
+# Priority: high
+
+id: "TAT-0501"
+name: "Checkpoint - Create and Restore State"
+description: |
+  Validates that the daemon correctly creates state checkpoints at
+  configured intervals and can successfully restore from them.
+  Tests data integrity during checkpoint/restore cycles.
+
+category: "state-management"
+priority: "high"
+tags:
+  - "checkpoint"
+  - "state"
+  - "persistence"
+  - "recovery"
+
+setup:
+  environment:
+    TRI_AGENT_CHECKPOINT_INTERVAL: "10"
+    TRI_AGENT_MAX_CHECKPOINTS: "5"
+
+  fixtures:
+    - "running-daemon.yaml"
+
+  state:
+    database: "fixtures/running-daemon-state.db"
+
+  services:
+    - name: "tri-agent-daemon"
+      action: "start"
+      wait_for: "healthcheck:ready"
+
+  # Create some state to checkpoint
+  commands:
+    - "tri-agent task add 'Checkpoint test task 1' --priority=high"
+    - "tri-agent task add 'Checkpoint test task 2' --priority=medium"
+    - "sleep 2"
+
+input:
+  type: "command"
+  command:
+    name: "tri-agent"
+    args:
+      - "checkpoint"
+      - "create"
+      - "--reason=test_checkpoint"
+    env:
+      TRI_AGENT_VERBOSE: "true"
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Creating checkpoint"
+      - "Checkpoint created successfully"
+      - "Checkpoint ID:"
+    regex: "Checkpoint ID: [a-f0-9]{8}-[a-f0-9]{4}"
+
+  state:
+    files:
+      - path: "${HOME}/.claude/sessions/checkpoints/latest.json"
+        exists: true
+        content:
+          contains:
+            - "tasks"
+            - "agents"
+            - "created_at"
+          json_path: "$.reason"
+          value: "test_checkpoint"
+
+    database:
+      # Checkpoint should be recorded
+      - query: |
+          SELECT COUNT(*) as count FROM checkpoints
+          WHERE reason = 'test_checkpoint'
+          AND created_at > datetime('now', '-1 minute')
+        expected: { "count": 1 }
+        comparison: "exact"
+
+      # Tasks should still exist
+      - query: "SELECT COUNT(*) as count FROM tasks"
+        comparison: "exists"
+
+  events:
+    - type: "checkpoint.created"
+      count: 1
+      payload:
+        json_path: "$.reason"
+        value: "test_checkpoint"
+
+  metrics:
+    duration_max_ms: 10000
+
+teardown:
+  commands:
+    - "tri-agent checkpoint delete --all-test || true"
+  cleanup_files:
+    - "${HOME}/.claude/sessions/checkpoints/test_*.json"
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "fixed"
+    base_seconds: 5
+  on_conditions:
+    - "timeout"
+  reset_state: true
+
+timeout:
+  setup: 20
+  execution: 60
+  teardown: 10
+
+dependencies:
+  - "TAT-0001"

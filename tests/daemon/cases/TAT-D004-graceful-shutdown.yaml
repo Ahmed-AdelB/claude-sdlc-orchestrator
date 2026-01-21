@@ -1,0 +1,199 @@
+# Test Case: Graceful Shutdown Behavior
+# Category: daemon-lifecycle
+# Priority: critical
+
+id: "TAT-D004"
+name: "Graceful Shutdown - SIGTERM and SIGINT Handling"
+description: |
+  Validates that the daemon handles shutdown signals correctly:
+  - SIGTERM triggers graceful shutdown
+  - SIGINT triggers graceful shutdown
+  - Daemon logs shutdown message
+  - PID file is cleaned up after shutdown
+  - Process terminates within acceptable timeout
+
+category: "daemon-lifecycle"
+priority: "critical"
+tags:
+  - "shutdown"
+  - "graceful"
+  - "signals"
+  - "cleanup"
+  - "core"
+
+setup:
+  environment:
+    TRI_AGENT_TEST_MODE: "true"
+
+  commands:
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f ${HOME}/.claude/daemon-heartbeat"
+
+input:
+  type: "command"
+  command:
+    name: "bash"
+    args:
+      - "-c"
+      - |
+        cd ${HOME}/.claude
+
+        echo "=== Test: SIGTERM Graceful Shutdown ==="
+
+        # Start daemon
+        nohup bash tri-agent-daemon.sh > /tmp/daemon-shutdown-test.log 2>&1 &
+
+        # Wait for daemon to be ready
+        for i in {1..10}; do
+          if [[ -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+            break
+          fi
+          sleep 0.5
+        done
+
+        if [[ ! -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+          echo "FAIL: Daemon did not start (no PID file)"
+          exit 1
+        fi
+
+        pid=$(cat "${HOME}/.claude/tri-agent-daemon.pid")
+        echo "Daemon started with PID: $pid"
+
+        # Verify process is running
+        if ! kill -0 "$pid" 2>/dev/null; then
+          echo "FAIL: Daemon process $pid is not running"
+          exit 1
+        fi
+
+        # Send SIGTERM
+        echo "Sending SIGTERM to PID $pid..."
+        kill -TERM "$pid"
+
+        # Wait for graceful shutdown (max 15 seconds)
+        shutdown_timeout=15
+        for i in $(seq 1 $shutdown_timeout); do
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Daemon stopped after ${i}s"
+            break
+          fi
+          sleep 1
+        done
+
+        # Check if process stopped
+        if kill -0 "$pid" 2>/dev/null; then
+          echo "FAIL: Daemon did not stop within ${shutdown_timeout}s timeout"
+          kill -9 "$pid" 2>/dev/null || true
+          exit 1
+        fi
+
+        echo "PASS: Daemon stopped gracefully after SIGTERM"
+
+        # Check if PID file was cleaned up
+        sleep 1
+        if [[ -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+          echo "WARN: PID file still exists after shutdown (may be expected)"
+        else
+          echo "PASS: PID file was cleaned up"
+        fi
+
+        # Check shutdown log
+        if grep -q "Shutting down" /tmp/daemon-shutdown-test.log 2>/dev/null; then
+          echo "PASS: Shutdown message found in logs"
+        else
+          echo "WARN: No shutdown message in logs (may not be captured)"
+        fi
+
+        echo ""
+        echo "=== Test: SIGINT Graceful Shutdown ==="
+
+        # Start daemon again for SIGINT test
+        rm -f "${HOME}/.claude/tri-agent-daemon.pid"
+        nohup bash tri-agent-daemon.sh > /tmp/daemon-sigint-test.log 2>&1 &
+
+        # Wait for daemon
+        for i in {1..10}; do
+          if [[ -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+            break
+          fi
+          sleep 0.5
+        done
+
+        if [[ ! -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+          echo "FAIL: Daemon did not restart for SIGINT test"
+          exit 1
+        fi
+
+        pid=$(cat "${HOME}/.claude/tri-agent-daemon.pid")
+        echo "Daemon restarted with PID: $pid"
+
+        # Send SIGINT
+        echo "Sending SIGINT to PID $pid..."
+        kill -INT "$pid"
+
+        # Wait for shutdown
+        for i in $(seq 1 $shutdown_timeout); do
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Daemon stopped after ${i}s"
+            break
+          fi
+          sleep 1
+        done
+
+        if kill -0 "$pid" 2>/dev/null; then
+          echo "FAIL: Daemon did not stop after SIGINT"
+          kill -9 "$pid" 2>/dev/null || true
+          exit 1
+        fi
+
+        echo "PASS: Daemon stopped gracefully after SIGINT"
+        echo ""
+        echo "=== All shutdown tests passed ==="
+    timeout: 60
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "PASS: Daemon stopped gracefully after SIGTERM"
+      - "PASS: Daemon stopped gracefully after SIGINT"
+      - "All shutdown tests passed"
+    not_contains:
+      - "FAIL:"
+
+  state:
+    files:
+      - path: "${HOME}/.claude/tri-agent-daemon.pid"
+        exists: false
+        description: "PID file should be cleaned up after shutdown"
+
+  metrics:
+    duration_max_ms: 90000
+
+teardown:
+  commands:
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f ${HOME}/.claude/daemon-heartbeat"
+    - "rm -f /tmp/daemon-shutdown-test.log"
+    - "rm -f /tmp/daemon-sigint-test.log"
+
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "linear"
+    base_seconds: 3
+  on_conditions:
+    - "timeout"
+
+timeout:
+  setup: 5
+  execution: 120
+  teardown: 15
+
+dependencies:
+  - "TAT-D001"
+  - "TAT-D002"

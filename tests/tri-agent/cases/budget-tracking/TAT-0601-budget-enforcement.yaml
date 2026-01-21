@@ -1,0 +1,218 @@
+# Test Case: Budget Tracking and Enforcement
+# Category: budget-tracking
+# Priority: high
+
+id: "TAT-0601"
+name: "Budget Enforcement - Token Limit"
+description: |
+  Validates that the daemon correctly tracks token usage across all agents
+  and enforces budget limits. Tests warning thresholds and hard stops.
+
+category: "budget-tracking"
+priority: "high"
+tags:
+  - "budget"
+  - "tokens"
+  - "limits"
+  - "cost"
+
+setup:
+  environment:
+    TRI_AGENT_BUDGET_ENABLED: "true"
+    TRI_AGENT_DAILY_LIMIT_TOKENS: "1000000"
+    TRI_AGENT_WARNING_THRESHOLD: "0.8"
+    TRI_AGENT_HARD_STOP_THRESHOLD: "0.95"
+
+  fixtures:
+    - "running-daemon.yaml"
+    - "budget-tracking.yaml"
+
+  state:
+    database: "fixtures/running-daemon-state.db"
+
+  services:
+    - name: "tri-agent-daemon"
+      action: "start"
+      wait_for: "healthcheck:ready"
+
+  mocks:
+    # Simulate token usage
+    - target: "budget-tracker"
+      method: "get_usage"
+      response:
+        claude: 300000
+        codex: 250000
+        gemini: 200000
+        total: 750000
+        percentage: 75.0
+
+input:
+  type: "api"
+  api:
+    endpoint: "/api/v1/budget/status"
+    method: "GET"
+    headers:
+      Authorization: "Bearer ${TEST_TOKEN}"
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Budget Status"
+      - "Total Usage:"
+      - "Remaining:"
+    regex: "Usage: [0-9]+% of daily limit"
+
+  state:
+    database:
+      # Budget tracking table populated
+      - query: |
+          SELECT SUM(tokens_used) as total FROM token_usage
+          WHERE date(created_at) = date('now')
+        comparison: "exists"
+
+      # Per-agent tracking
+      - query: |
+          SELECT agent_type, SUM(tokens_used) as tokens
+          FROM token_usage
+          WHERE date(created_at) = date('now')
+          GROUP BY agent_type
+        comparison: "exists"
+
+    files:
+      - path: "${HOME}/.claude/state/budget-daily.json"
+        exists: true
+        content:
+          json_path: "$.daily_limit"
+          value: 1000000
+
+  events:
+    - type: "budget.status_checked"
+      count: 1
+
+  # Budget response structure
+  verification:
+    required_approvals: 1
+
+teardown:
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "fixed"
+    base_seconds: 3
+  on_conditions:
+    - "timeout"
+    - "transient_error"
+
+timeout:
+  setup: 15
+  execution: 30
+  teardown: 10
+
+dependencies:
+  - "TAT-0001"
+
+---
+# Additional test for budget warning trigger
+
+id: "TAT-0602"
+name: "Budget Warning - 80% Threshold"
+description: |
+  Validates that a warning is triggered when token usage reaches 80%
+  of the daily limit and appropriate alerts are generated.
+
+category: "budget-tracking"
+priority: "high"
+tags:
+  - "budget"
+  - "warning"
+  - "threshold"
+
+setup:
+  environment:
+    TRI_AGENT_BUDGET_ENABLED: "true"
+    TRI_AGENT_DAILY_LIMIT_TOKENS: "1000000"
+    TRI_AGENT_WARNING_THRESHOLD: "0.8"
+
+  fixtures:
+    - "running-daemon.yaml"
+
+  state:
+    database: "fixtures/budget-near-limit.db"
+
+  mocks:
+    - target: "budget-tracker"
+      method: "get_usage"
+      response:
+        total: 850000
+        percentage: 85.0
+
+input:
+  type: "event"
+  event:
+    type: "budget.check_trigger"
+    source: "scheduler"
+    payload:
+      check_type: "periodic"
+    timestamp: "2026-01-04T12:00:00Z"
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "WARNING: Budget threshold exceeded"
+      - "Usage at 85%"
+      - "Remaining: 150000 tokens"
+
+  state:
+    database:
+      - query: |
+          SELECT COUNT(*) as count FROM alerts
+          WHERE type = 'budget_warning'
+          AND created_at > datetime('now', '-1 minute')
+        expected: { "count": 1 }
+
+  events:
+    - type: "budget.warning"
+      count: 1
+      payload:
+        json_path: "$.percentage"
+        value: 85.0
+    - type: "alert.created"
+      count: 1
+      payload:
+        json_path: "$.level"
+        value: "warning"
+
+teardown:
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "exponential"
+    base_seconds: 2
+  on_conditions:
+    - "state_mismatch"
+
+timeout:
+  setup: 10
+  execution: 30
+  teardown: 10
+
+dependencies:
+  - "TAT-0001"
+  - "TAT-0601"

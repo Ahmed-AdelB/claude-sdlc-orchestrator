@@ -1,0 +1,54 @@
+{
+  "tasks": [
+    {
+      "id": "FIXTURE-TASK-001",
+      "description": "Implement user authentication with JWT",
+      "category": "backend",
+      "priority": "high",
+      "assigned_agent": null,
+      "verifier_agent": null,
+      "status": "pending",
+      "context": {
+        "project": "test-project",
+        "files": ["src/auth/jwt.ts", "src/auth/middleware.ts"],
+        "requirements": ["JWT token generation", "Token validation", "Refresh token flow"]
+      },
+      "created_at": "2026-01-04T10:00:00Z"
+    },
+    {
+      "id": "FIXTURE-TASK-002",
+      "description": "Create React component for user profile",
+      "category": "frontend",
+      "priority": "medium",
+      "assigned_agent": null,
+      "verifier_agent": null,
+      "status": "pending",
+      "context": {
+        "project": "test-project",
+        "files": ["src/components/UserProfile.tsx"],
+        "requirements": ["Display user info", "Edit mode", "Avatar upload"]
+      },
+      "created_at": "2026-01-04T10:01:00Z"
+    },
+    {
+      "id": "FIXTURE-TASK-003",
+      "description": "Write unit tests for authentication module",
+      "category": "testing",
+      "priority": "high",
+      "assigned_agent": null,
+      "verifier_agent": null,
+      "status": "pending",
+      "context": {
+        "project": "test-project",
+        "files": ["tests/auth.test.ts"],
+        "requirements": ["Test token generation", "Test validation", "Test edge cases"]
+      },
+      "created_at": "2026-01-04T10:02:00Z"
+    }
+  ],
+  "metadata": {
+    "fixture_version": "1.0.0",
+    "created_for": ["TAT-0101", "TAT-0201"],
+    "description": "Sample tasks for testing task assignment and verification flows"
+  }
+}

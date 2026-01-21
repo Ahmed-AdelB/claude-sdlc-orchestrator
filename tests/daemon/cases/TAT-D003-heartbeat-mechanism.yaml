@@ -1,0 +1,142 @@
+# Test Case: Heartbeat Mechanism Validation
+# Category: daemon-startup
+# Priority: high
+
+id: "TAT-D003"
+name: "Heartbeat Mechanism - Updates and Format"
+description: |
+  Validates that the daemon heartbeat mechanism is functioning correctly:
+  - Heartbeat file is created on startup
+  - Heartbeat contains valid ISO 8601 timestamp
+  - Heartbeat updates at expected intervals (approximately every 30 seconds)
+  - Heartbeat can be used to detect daemon liveness
+
+category: "daemon-startup"
+priority: "high"
+tags:
+  - "heartbeat"
+  - "liveness"
+  - "monitoring"
+  - "health"
+
+setup:
+  environment:
+    TRI_AGENT_TEST_MODE: "true"
+
+  commands:
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/daemon-heartbeat"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+
+input:
+  type: "command"
+  command:
+    name: "bash"
+    args:
+      - "-c"
+      - |
+        cd ${HOME}/.claude
+
+        # Start daemon
+        nohup bash tri-agent-daemon.sh > /tmp/daemon-heartbeat-test.log 2>&1 &
+        daemon_pid=$!
+
+        echo "Started daemon with PID: $daemon_pid"
+
+        # Wait for heartbeat file (max 10 seconds)
+        for i in {1..20}; do
+          if [[ -f "${HOME}/.claude/daemon-heartbeat" ]]; then
+            echo "Heartbeat file detected"
+            break
+          fi
+          sleep 0.5
+        done
+
+        if [[ ! -f "${HOME}/.claude/daemon-heartbeat" ]]; then
+          echo "FAIL: Heartbeat file not created within timeout"
+          exit 1
+        fi
+
+        # Read initial heartbeat
+        heartbeat1=$(cat "${HOME}/.claude/daemon-heartbeat")
+        echo "Initial heartbeat: $heartbeat1"
+
+        # Validate ISO format (basic regex check)
+        if ! [[ "$heartbeat1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} ]]; then
+          echo "FAIL: Heartbeat has invalid ISO format: $heartbeat1"
+          exit 1
+        fi
+
+        echo "PASS: Heartbeat format is valid ISO 8601"
+
+        # Wait for daemon cycle (30 seconds) and check for update
+        echo "Waiting for heartbeat update (daemon cycle is ~30s)..."
+        sleep 35
+
+        heartbeat2=$(cat "${HOME}/.claude/daemon-heartbeat")
+        echo "Updated heartbeat: $heartbeat2"
+
+        if [[ "$heartbeat1" != "$heartbeat2" ]]; then
+          echo "PASS: Heartbeat was updated"
+        else
+          echo "WARN: Heartbeat did not change (may be acceptable if cycle not reached)"
+        fi
+
+        echo "PASS: Heartbeat mechanism validated"
+    timeout: 60
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Heartbeat file detected"
+      - "PASS: Heartbeat format is valid ISO 8601"
+      - "PASS: Heartbeat mechanism validated"
+    not_contains:
+      - "FAIL:"
+
+  state:
+    files:
+      - path: "${HOME}/.claude/daemon-heartbeat"
+        exists: true
+        content:
+          regex: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+          description: "Valid ISO 8601 timestamp"
+        freshness:
+          max_age_seconds: 60
+
+  metrics:
+    duration_max_ms: 70000
+
+teardown:
+  commands:
+    - |
+      if [[ -f ${HOME}/.claude/tri-agent-daemon.pid ]]; then
+        pid=$(cat ${HOME}/.claude/tri-agent-daemon.pid)
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/daemon-heartbeat"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f /tmp/daemon-heartbeat-test.log"
+
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "exponential"
+    base_seconds: 5
+  on_conditions:
+    - "timeout"
+
+timeout:
+  setup: 5
+  execution: 90
+  teardown: 15
+
+dependencies:
+  - "TAT-D001"

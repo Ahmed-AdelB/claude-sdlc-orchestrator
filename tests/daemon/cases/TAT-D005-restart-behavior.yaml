@@ -1,0 +1,195 @@
+# Test Case: Daemon Restart Behavior
+# Category: daemon-lifecycle
+# Priority: high
+
+id: "TAT-D005"
+name: "Daemon Restart - Stop and Start Cycle"
+description: |
+  Validates that the daemon can be properly restarted after being stopped:
+  - Stop cleanly (graceful shutdown)
+  - Start again successfully
+  - New instance has different PID
+  - State files are properly re-initialized
+  - No orphaned processes remain
+
+category: "daemon-lifecycle"
+priority: "high"
+tags:
+  - "restart"
+  - "lifecycle"
+  - "recovery"
+  - "resilience"
+
+setup:
+  environment:
+    TRI_AGENT_TEST_MODE: "true"
+
+  commands:
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f ${HOME}/.claude/daemon-heartbeat"
+    - "rm -f ${HOME}/.claude/daemon-state.json"
+
+input:
+  type: "command"
+  command:
+    name: "bash"
+    args:
+      - "-c"
+      - |
+        cd ${HOME}/.claude
+
+        echo "=== Daemon Restart Test ==="
+
+        # Function to start daemon and return PID
+        start_daemon() {
+          nohup bash tri-agent-daemon.sh > /tmp/daemon-restart-test-$1.log 2>&1 &
+          for i in {1..10}; do
+            if [[ -f "${HOME}/.claude/tri-agent-daemon.pid" ]]; then
+              cat "${HOME}/.claude/tri-agent-daemon.pid"
+              return 0
+            fi
+            sleep 0.5
+          done
+          return 1
+        }
+
+        # Function to stop daemon
+        stop_daemon() {
+          local pid=$1
+          if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid"
+            for i in {1..10}; do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+          rm -f "${HOME}/.claude/tri-agent-daemon.pid"
+          return 0
+        }
+
+        # === First Start ===
+        echo "Starting daemon (first time)..."
+        pid1=$(start_daemon 1)
+        if [[ -z "$pid1" ]]; then
+          echo "FAIL: First daemon start failed"
+          exit 1
+        fi
+        echo "First daemon PID: $pid1"
+
+        # Verify it's running
+        if ! kill -0 "$pid1" 2>/dev/null; then
+          echo "FAIL: First daemon not running"
+          exit 1
+        fi
+
+        # Let it run for a moment
+        sleep 2
+
+        # Record heartbeat timestamp
+        heartbeat1=""
+        if [[ -f "${HOME}/.claude/daemon-heartbeat" ]]; then
+          heartbeat1=$(cat "${HOME}/.claude/daemon-heartbeat")
+          echo "First daemon heartbeat: $heartbeat1"
+        fi
+
+        # === Stop ===
+        echo "Stopping first daemon..."
+        stop_daemon "$pid1"
+
+        # Verify stopped
+        sleep 1
+        if kill -0 "$pid1" 2>/dev/null; then
+          echo "FAIL: First daemon still running after stop"
+          exit 1
+        fi
+        echo "First daemon stopped successfully"
+
+        # === Second Start ===
+        echo "Starting daemon (second time)..."
+        rm -f "${HOME}/.claude/tri-agent-daemon.pid"
+        pid2=$(start_daemon 2)
+        if [[ -z "$pid2" ]]; then
+          echo "FAIL: Second daemon start failed"
+          exit 1
+        fi
+        echo "Second daemon PID: $pid2"
+
+        # Verify it's running
+        if ! kill -0 "$pid2" 2>/dev/null; then
+          echo "FAIL: Second daemon not running"
+          exit 1
+        fi
+
+        # === Validate New PID ===
+        if [[ "$pid1" == "$pid2" ]]; then
+          echo "WARN: PIDs are the same (unlikely but possible if PID recycled)"
+        else
+          echo "PASS: New daemon has different PID (was: $pid1, now: $pid2)"
+        fi
+
+        # Let second daemon run and update heartbeat
+        sleep 2
+
+        # Check heartbeat was updated
+        if [[ -f "${HOME}/.claude/daemon-heartbeat" ]]; then
+          heartbeat2=$(cat "${HOME}/.claude/daemon-heartbeat")
+          echo "Second daemon heartbeat: $heartbeat2"
+          if [[ "$heartbeat1" != "$heartbeat2" ]]; then
+            echo "PASS: Heartbeat was updated by new daemon"
+          else
+            echo "WARN: Heartbeat unchanged (may be within same second)"
+          fi
+        fi
+
+        # Cleanup
+        echo "Stopping second daemon..."
+        stop_daemon "$pid2"
+
+        echo ""
+        echo "PASS: Daemon restart test completed successfully"
+    timeout: 45
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "First daemon PID:"
+      - "First daemon stopped successfully"
+      - "Second daemon PID:"
+      - "PASS: Daemon restart test completed successfully"
+    not_contains:
+      - "FAIL:"
+
+  metrics:
+    duration_max_ms: 60000
+
+teardown:
+  commands:
+    - "pkill -f 'tri-agent-daemon' 2>/dev/null || true"
+    - "rm -f ${HOME}/.claude/tri-agent-daemon.pid"
+    - "rm -f ${HOME}/.claude/daemon-heartbeat"
+    - "rm -f /tmp/daemon-restart-test-*.log"
+
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "linear"
+    base_seconds: 2
+  on_conditions:
+    - "timeout"
+
+timeout:
+  setup: 5
+  execution: 60
+  teardown: 15
+
+dependencies:
+  - "TAT-D001"
+  - "TAT-D004"

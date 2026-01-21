@@ -1,0 +1,259 @@
+# Test Case: Full Task Lifecycle - End-to-End
+# Category: integration
+# Priority: critical
+
+id: "TAT-0901"
+name: "Integration - Full Task Lifecycle"
+description: |
+  End-to-end integration test that validates the complete task lifecycle:
+  1. Task submission
+  2. Assignment to 9 concurrent agents (3+3+3 distribution)
+  3. Implementation by assigned agent
+  4. Verification by different AI (Two-Key Rule)
+  5. Approval workflow
+  6. Task completion
+
+  This test validates all tri-agent mandatory requirements in a single flow.
+
+category: "integration"
+priority: "critical"
+tags:
+  - "integration"
+  - "e2e"
+  - "lifecycle"
+  - "core"
+  - "mandatory"
+
+setup:
+  environment:
+    TRI_AGENT_MODE: "production"
+    TRI_AGENT_MIN_CONCURRENT: "9"
+    TRI_AGENT_ENFORCE_TWO_KEY: "true"
+    TRI_AGENT_LOG_LEVEL: "debug"
+
+  fixtures:
+    - "daemon-config.yaml"
+    - "integration-context.yaml"
+
+  state:
+    database: "fixtures/clean-state.db"
+    files:
+      - path: "/tmp/tri-agent-test/project/src/feature.ts"
+        source: "fixtures/empty-feature.ts"
+
+  services:
+    - name: "tri-agent-daemon"
+      action: "start"
+      wait_for: "healthcheck:ready"
+    - name: "watchdog-master"
+      action: "start"
+      wait_for: "healthcheck:ready"
+
+  commands:
+    - "mkdir -p /tmp/tri-agent-test/project/src"
+    - "sleep 2"  # Allow services to stabilize
+
+input:
+  type: "task"
+  task:
+    id: "INTEGRATION-001"
+    description: |
+      Implement a user authentication feature with:
+      - JWT token generation
+      - Token validation middleware
+      - Refresh token flow
+    assigned_agent: null  # Auto-assign
+    verifier_agent: null  # Auto-assign (must be different)
+    priority: "high"
+    context:
+      project: "integration-test-project"
+      language: "typescript"
+      framework: "express"
+      requirements:
+        - "Generate JWT tokens on login"
+        - "Validate tokens on protected routes"
+        - "Support token refresh"
+      files:
+        - "/tmp/tri-agent-test/project/src/feature.ts"
+    verification_requirements:
+      security_review: true
+      code_review: true
+      test_coverage: 80
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+    distribution:
+      claude: 3
+      codex: 3
+      gemini: 3
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      # Task lifecycle phases
+      - "Task INTEGRATION-001 submitted"
+      - "Assigned to:"
+      - "Verifier assigned:"
+      - "Implementation started"
+      - "Implementation completed"
+      - "Verification initiated"
+      - "VERIFY:"
+      - "Verification result: PASS"
+      - "Task INTEGRATION-001 completed"
+
+    not_contains:
+      - "FATAL"
+      - "Unrecoverable"
+      - "Same model verification"  # Two-Key Rule violation
+
+    regex:
+      - "Agent distribution: 3-3-3"
+      - "Peak concurrent agents: 9"
+
+  stderr:
+    empty: true
+
+  state:
+    database:
+      # Task completed
+      - query: |
+          SELECT status, assigned_agent, verifier_agent, verification_result
+          FROM tasks WHERE id = 'INTEGRATION-001'
+        expected:
+          status: "completed"
+          verification_result: "PASS"
+        comparison: "exact"
+
+      # Different agents for implementation and verification
+      - query: |
+          SELECT 1 FROM tasks t
+          JOIN agents a1 ON t.assigned_agent = a1.id
+          JOIN agents a2 ON t.verifier_agent = a2.id
+          WHERE t.id = 'INTEGRATION-001'
+          AND a1.type != a2.type
+        expected: { "1": 1 }
+        comparison: "exists"
+
+      # 21 agent invocations recorded (7 per phase x 3 phases)
+      - query: |
+          SELECT COUNT(*) as count FROM agent_invocations
+          WHERE task_id = 'INTEGRATION-001'
+        expected: { "count": 21 }
+        comparison: "exact"
+
+      # Distribution verification
+      - query: |
+          SELECT agent_type, COUNT(*) as count
+          FROM agent_invocations
+          WHERE task_id = 'INTEGRATION-001'
+          GROUP BY agent_type
+        comparison: "count"
+        expected: 3  # 3 types (claude, codex, gemini)
+
+      # Audit trail complete
+      - query: |
+          SELECT COUNT(DISTINCT event_type) as types FROM event_log
+          WHERE task_id = 'INTEGRATION-001'
+        comparison: "exists"
+
+    files:
+      - path: "/tmp/tri-agent-test/project/src/feature.ts"
+        exists: true
+        content:
+          not_contains:
+            - "// TODO"
+            - "// FIXME"
+          contains:
+            - "jwt"  # Implementation contains JWT logic
+
+    processes:
+      - name: "tri-agent-daemon"
+        running: true
+        count: 1
+
+    agents:
+      active_count: 9
+      completed_tasks: 1
+      failed_tasks: 0
+
+  metrics:
+    duration_max_ms: 600000  # 10 minutes max for full lifecycle
+
+  events:
+    # Full event sequence
+    - type: "task.submitted"
+      count: 1
+      order: 1
+    - type: "task.assigned"
+      count: 1
+      order: 2
+    - type: "agents.activated"
+      count: 1
+      order: 3
+      payload:
+        json_path: "$.count"
+        value: 9
+    - type: "implementation.started"
+      count: 1
+      order: 4
+    - type: "implementation.completed"
+      count: 1
+      order: 5
+    - type: "verification.requested"
+      count: 1
+      order: 6
+    - type: "verification.completed"
+      count: 1
+      order: 7
+      payload:
+        json_path: "$.result"
+        value: "PASS"
+    - type: "task.completed"
+      count: 1
+      order: 8
+
+  # Tri-Agent verification
+  verification:
+    required_approvals: 2
+    approvers:
+      - "codex"
+      - "gemini"
+    result: "PASS"
+
+teardown:
+  commands:
+    - "tri-agent task cancel INTEGRATION-001 --force || true"
+    - "tri-agent stop --graceful --timeout=15 || true"
+    - "pkill -f watchdog-master || true"
+  cleanup_files:
+    - "/tmp/tri-agent-test"
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "exponential"
+    base_seconds: 10
+    max_seconds: 120
+  on_conditions:
+    - "timeout"
+    - "transient_error"
+  reset_state: true
+
+timeout:
+  setup: 30
+  execution: 660  # 11 minutes
+  teardown: 30
+
+dependencies:
+  - "TAT-0001"  # Daemon startup
+  - "TAT-0101"  # Task assignment
+  - "TAT-0201"  # Two-key verification
+  - "TAT-0401"  # 9-agent concurrency

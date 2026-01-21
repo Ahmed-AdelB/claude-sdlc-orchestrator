@@ -1,0 +1,163 @@
+# Test Case: Two-Key Verification Rule
+# Category: verification-flow
+# Priority: critical
+
+id: "TAT-0201"
+name: "Two-Key Verification - Different AI Approval"
+description: |
+  Validates the Two-Key Rule: any change must be independently verified by
+  a second agent (different AI model) before acceptance. Tests that:
+  1. Implementer and verifier are different AI models
+  2. Verification requires PASS from a different model
+  3. Same-model verification is rejected
+
+category: "verification-flow"
+priority: "critical"
+tags:
+  - "verification"
+  - "two-key"
+  - "security"
+  - "core"
+
+setup:
+  fixtures:
+    - "running-daemon.yaml"
+    - "completed-implementation.json"
+
+  state:
+    database: "fixtures/task-completed-state.db"
+    files:
+      - path: "/tmp/tri-agent-test/implementation.ts"
+        source: "fixtures/sample-implementation.ts"
+
+  services:
+    - name: "tri-agent-daemon"
+      action: "start"
+      wait_for: "healthcheck:ready"
+
+  mocks:
+    # Mock Claude implementation result
+    - target: "claude"
+      method: "complete_task"
+      response:
+        status: "completed"
+        result: "Implementation complete"
+        files_changed: ["src/feature.ts"]
+    # Mock Codex verification
+    - target: "codex"
+      method: "verify_task"
+      response:
+        status: "verified"
+        result: "PASS"
+        reason: "Implementation correct, tests passing"
+      delay_ms: 500
+
+input:
+  type: "event"
+  event:
+    type: "task.ready_for_verification"
+    source: "claude"
+    payload:
+      task_id: "TASK-VERIFY-001"
+      implementer: "claude"
+      implementation:
+        files:
+          - path: "src/feature.ts"
+            changes: "Added new authentication handler"
+        tests_passed: true
+        lint_passed: true
+      verify_request:
+        scope: ["src/feature.ts"]
+        change_summary: "Added JWT authentication handler"
+        expected_behavior: "Validates JWT tokens on protected routes"
+        repro_steps: ["npm test", "curl -H 'Authorization: Bearer xxx' /api/protected"]
+        evidence: ["test output", "curl response"]
+        risk_notes: ["Token expiry handling"]
+    timestamp: "2026-01-04T12:00:00Z"
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Verification request received for TASK-VERIFY-001"
+      - "Routing to verifier: codex"  # Different from implementer
+      - "Verification result: PASS"
+
+    not_contains:
+      - "Routing to verifier: claude"  # Same as implementer - not allowed
+
+  state:
+    database:
+      # Task marked as verified
+      - query: |
+          SELECT status, verifier_agent, verification_result
+          FROM tasks WHERE id = 'TASK-VERIFY-001'
+        expected:
+          status: "verified"
+          verifier_agent: "codex"
+          verification_result: "PASS"
+        comparison: "exact"
+
+      # Verification audit trail
+      - query: |
+          SELECT COUNT(*) as count FROM verification_logs
+          WHERE task_id = 'TASK-VERIFY-001'
+          AND implementer != verifier
+        expected: { "count": 1 }
+        comparison: "exact"
+
+  events:
+    - type: "verification.requested"
+      count: 1
+      payload:
+        json_path: "$.implementer"
+        value: "claude"
+    - type: "verification.assigned"
+      count: 1
+      payload:
+        json_path: "$.verifier"
+        value: "codex"
+    - type: "verification.completed"
+      count: 1
+      payload:
+        json_path: "$.result"
+        value: "PASS"
+
+  verification:
+    required_approvals: 2
+    approvers:
+      - "codex"
+      - "gemini"
+    result: "PASS"
+
+teardown:
+  cleanup_files:
+    - "/tmp/tri-agent-test/implementation.ts"
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "exponential"
+    base_seconds: 3
+  on_conditions:
+    - "timeout"
+    - "state_mismatch"
+
+timeout:
+  setup: 15
+  execution: 180
+  teardown: 10
+
+dependencies:
+  - "TAT-0001"
+  - "TAT-0101"

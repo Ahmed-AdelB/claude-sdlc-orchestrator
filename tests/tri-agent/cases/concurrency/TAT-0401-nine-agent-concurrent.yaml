@@ -1,0 +1,181 @@
+# Test Case: Nine Concurrent Agent Execution
+# Category: concurrency
+# Priority: critical
+
+id: "TAT-0401"
+name: "Concurrent Execution - 9 Agents Minimum"
+description: |
+  Validates the critical requirement that at least 9 concurrent agents
+  (3 Claude + 3 Codex + 3 Gemini) are running simultaneously at all times
+  during active work.
+
+category: "concurrency"
+priority: "critical"
+tags:
+  - "concurrency"
+  - "parallelism"
+  - "9-agent"
+  - "core"
+  - "mandatory"
+
+setup:
+  environment:
+    TRI_AGENT_MIN_CONCURRENT: "9"
+    TRI_AGENT_ENFORCE_PARALLELISM: "true"
+
+  fixtures:
+    - "running-daemon.yaml"
+    - "batch-tasks.json"
+
+  state:
+    database: "fixtures/empty-queue.db"
+
+  services:
+    - name: "tri-agent-daemon"
+      action: "start"
+      wait_for: "healthcheck:ready"
+
+input:
+  type: "api"
+  api:
+    endpoint: "/api/v1/tasks/batch"
+    method: "POST"
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer ${TEST_TOKEN}"
+    body:
+      tasks:
+        - id: "BATCH-001"
+          description: "Task for Claude agent 1"
+          priority: "high"
+        - id: "BATCH-002"
+          description: "Task for Claude agent 2"
+          priority: "high"
+        - id: "BATCH-003"
+          description: "Task for Claude agent 3"
+          priority: "high"
+        - id: "BATCH-004"
+          description: "Task for Codex agent 1"
+          priority: "high"
+        - id: "BATCH-005"
+          description: "Task for Codex agent 2"
+          priority: "high"
+        - id: "BATCH-006"
+          description: "Task for Codex agent 3"
+          priority: "high"
+        - id: "BATCH-007"
+          description: "Task for Gemini agent 1"
+          priority: "high"
+        - id: "BATCH-008"
+          description: "Task for Gemini agent 2"
+          priority: "high"
+        - id: "BATCH-009"
+          description: "Task for Gemini agent 3"
+          priority: "high"
+      options:
+        parallel: true
+        enforce_distribution: true
+
+  agents:
+    required:
+      - "claude"
+      - "codex"
+      - "gemini"
+    concurrent: 9
+    distribution:
+      claude: 3
+      codex: 3
+      gemini: 3
+
+expected:
+  exit_code: 0
+
+  stdout:
+    contains:
+      - "Batch submitted: 9 tasks"
+      - "Parallel execution enabled"
+      - "Agent distribution enforced: 3-3-3"
+      - "All 9 agents active"
+
+  state:
+    database:
+      # Verify all 9 tasks are being processed
+      - query: "SELECT COUNT(*) as count FROM tasks WHERE status = 'in_progress'"
+        expected: { "count": 9 }
+        comparison: "exact"
+
+      # Verify correct distribution
+      - query: |
+          SELECT agent_type, COUNT(*) as count
+          FROM tasks t
+          JOIN agents a ON t.assigned_agent = a.id
+          WHERE t.status = 'in_progress'
+          GROUP BY agent_type
+          HAVING COUNT(*) = 3
+        comparison: "count"
+        expected: 3  # 3 groups of 3
+
+      # Peak concurrency tracking
+      - query: |
+          SELECT MAX(concurrent_count) as peak
+          FROM concurrency_metrics
+          WHERE timestamp > datetime('now', '-5 minutes')
+        expected: { "peak": 9 }
+        comparison: "exact"
+
+    agents:
+      active_count: 9
+      states:
+        claude_1: "busy"
+        claude_2: "busy"
+        claude_3: "busy"
+        codex_1: "busy"
+        codex_2: "busy"
+        codex_3: "busy"
+        gemini_1: "busy"
+        gemini_2: "busy"
+        gemini_3: "busy"
+
+    processes:
+      - name: "tri-agent-worker"
+        running: true
+        count: 9
+
+  metrics:
+    duration_max_ms: 300000  # 5 minutes max
+
+  events:
+    - type: "batch.submitted"
+      count: 1
+    - type: "agent.activated"
+      count: 9
+    - type: "concurrency.peak"
+      count: 1
+      payload:
+        json_path: "$.count"
+        value: 9
+
+teardown:
+  commands:
+    - "tri-agent task cancel-batch --force || true"
+  restore_state: true
+  always: true
+
+retry:
+  max_attempts: 2
+  backoff:
+    type: "exponential"
+    base_seconds: 10
+  on_conditions:
+    - "state_mismatch"
+    - "timeout"
+  reset_state: true
+
+timeout:
+  setup: 20
+  execution: 360
+  teardown: 30
+
+dependencies:
+  - "TAT-0001"
+  - "TAT-0101"
