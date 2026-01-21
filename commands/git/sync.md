@@ -1,188 +1,139 @@
-# Sync Branch
+---
+name: git:sync
+scope: command
+version: 2.0.0
+summary: Sync local branches with remote using safe pull, rebase, and push flows.
+args:
+  - name: mode
+    type: string
+    required: false
+    enum: [status, pull, push, rebase, all]
+    description: Sync mode to run (default: status).
+  - name: base
+    type: string
+    required: false
+    default: main
+    description: Base branch used for rebase.
+  - name: force-with-lease
+    type: boolean
+    required: false
+    default: false
+    description: Allow force push with lease when required.
+  - name: dry-run
+    type: boolean
+    required: false
+    default: false
+    description: Print intended actions without executing.
+---
 
-Synchronize current branch with remote and optionally rebase on base branch.
+# /git/sync
 
-## Arguments
-- `$ARGUMENTS` - Options: 'pull', 'push', 'rebase', 'all'
+Synchronize the current branch with remotes using safe fetch, rebase, and push flows.
+
+## Usage
+
+/git/sync [status|pull|push|rebase|all] [--base main] [--force-with-lease] [--dry-run]
+
+## Git Safety Protocols (from CLAUDE.md)
+
+- Git operations require manual approval; YOLO mode is not allowed for git operations.
+- Prefer `git revert` over `git reset --hard` for rollback.
+- Rollback after 3 verification FAILs or a critical error, then re-run verification and require a new plan before retry.
+- Use git worktrees for isolation when running parallel tasks.
+- Check `git status` and warn on uncommitted tracked changes before any operation.
 
 ## Process
 
-### Step 1: Check Current State
-```bash
-# Get current branch
-git branch --show-current
+1. Inspect current status
+   - `git branch --show-current`
+   - `git status --porcelain` and `git status -sb`
+2. Fetch latest
+   - `git fetch --all --prune`
+3. Choose sync strategy
+   - pull: rebase onto remote tracking branch.
+   - rebase: rebase onto `<base>`.
+   - push: push current branch.
+   - all: fetch, rebase on base, then push.
+4. Resolve conflicts if any
+   - Fix conflicts, `git add`, then `git rebase --continue`.
+5. Push updates
+   - Use `git push` or `git push --force-with-lease` when required and approved.
 
-# Check for uncommitted changes
-git status --porcelain
+## Tri-Agent Verification Integration
 
-# Check remote status
-git remote -v
+- Use verification for risky sync actions (rebases on shared branches or force push).
+- Verification must be performed by a different AI (two-key rule).
+- If verification FAILs, stop and revert the rebase or use `git revert` for bad changes.
+
+Verification request template:
+
+```
+gemini -m gemini-3-pro-preview --approval-mode yolo "Verify: <desc>. Check correctness, security, edges. PASS/FAIL."
+codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Verify: <desc>. Check logic, completeness. PASS/FAIL."
 ```
 
-### Step 2: Fetch Latest
-```bash
-# Fetch all remotes
-git fetch --all --prune
+## Templates (Commit and PR)
 
-# Show status relative to remote
-git status -sb
+Commit message template:
+
+```
+<type>(<scope>): <subject>
+
+<context>
+- <bullet>
+- <bullet>
+
+Refs: <ticket-id>
+BREAKING CHANGE: <details> (optional)
 ```
 
-### Step 3: Display Sync Status
-```markdown
-## Branch Sync Status
+PR description template:
 
-### Current Branch: `feat/auth-oauth`
-- Local commits: 3 ahead
-- Remote commits: 0 behind
-- Uncommitted changes: 2 files
+```
+## Summary
+<short summary>
 
-### Main Branch
-- Local: abc123
-- Remote: def456 (2 commits ahead)
+## Changes
+- <change 1>
+- <change 2>
 
-### Recommended Actions
-1. ✅ Pull remote changes to current branch
-2. ⚠️ Rebase on main to get latest changes
-3. 📤 Push local commits to remote
+## Testing
+- [ ] unit
+- [ ] integration
+- [ ] manual
+- [ ] not run (explain)
+
+## Risk and Rollback
+- Risk: Low | Medium | High
+- Rollback: git revert <sha>
+
+## Verification (Two-Key Rule)
+- Scope:
+- Change summary:
+- Expected behavior:
+- Repro steps:
+- Evidence:
+- Risk notes:
+
+## Checklist
+- [ ] self-review complete
+- [ ] docs updated (if needed)
+- [ ] tests pass
 ```
 
-### Step 4: Execute Sync
+## Error Handling and Recovery
 
-#### Pull Mode
-```bash
-# Pull with rebase to keep history clean
-git pull --rebase origin $(git branch --show-current)
+- Uncommitted changes: stash or commit before syncing.
+- Rebase conflict: resolve files, `git add`, then `git rebase --continue`.
+- Need to abort rebase: `git rebase --abort` and reassess.
+- Non-fast-forward push: rebase and retry; use `--force-with-lease` only with explicit approval.
+- Remote errors: check `git remote -v`, auth, and retry fetch/push.
+
+## Examples
+
 ```
-
-#### Push Mode
-```bash
-# Push to remote
-git push origin $(git branch --show-current)
-
-# If rejected, offer force push (with warning)
-# git push --force-with-lease origin $(git branch --show-current)
-```
-
-#### Rebase Mode
-```bash
-# Rebase on main
-git fetch origin main
-git rebase origin/main
-
-# Handle conflicts if any
-# After resolution: git rebase --continue
-```
-
-#### All Mode
-```bash
-# Complete sync: fetch, rebase, push
-git fetch --all
-git rebase origin/main
-git push origin $(git branch --show-current)
-```
-
-### Step 5: Handle Conflicts
-If conflicts occur:
-
-```markdown
-## Merge Conflicts Detected
-
-### Conflicting Files
-- src/auth/login.ts
-- src/utils/helpers.ts
-
-### Resolution Options
-1. **Auto-resolve** - Use ours/theirs strategy
-2. **Manual resolve** - Edit files manually
-3. **Abort** - Cancel rebase/merge
-
-### After Resolution
-```bash
-git add <resolved-files>
-git rebase --continue
-```
-```
-
-## Sync Strategies
-
-### Keep Branch Updated
-```bash
-# Daily sync routine
-git fetch origin
-git rebase origin/main
-```
-
-### Before PR
-```bash
-# Ensure branch is up to date
-git fetch origin
-git rebase origin/main
-git push --force-with-lease
-```
-
-### After PR Feedback
-```bash
-# Sync after making changes
-git add .
-git commit --amend
-git push --force-with-lease
-```
-
-## Safety Features
-
-### Force Push Protection
-```markdown
-⚠️ **Force Push Warning**
-
-You are about to force push to: `feat/auth-oauth`
-
-This will:
-- Overwrite remote history
-- Potentially disrupt other developers
-
-Checks:
-- [ ] Branch is not protected
-- [ ] No open PRs with reviews
-- [ ] You are the only contributor
-
-Proceed? [y/N]
-```
-
-### Stash Management
-```bash
-# Auto-stash before sync
-git stash push -m "Auto-stash before sync"
-
-# After sync
-git stash pop
-```
-
-## Example Usage
-```
-/sync                    # Show status and recommend actions
-/sync pull               # Pull remote changes
-/sync push               # Push local changes
-/sync rebase             # Rebase on main
-/sync all                # Full sync (fetch, rebase, push)
-```
-
-## Sync Report
-```markdown
-## Sync Complete ✅
-
-### Actions Performed
-1. ✅ Fetched latest from origin
-2. ✅ Rebased on main (2 commits)
-3. ✅ Pushed to remote
-
-### Current State
-- Branch: `feat/auth-oauth`
-- Commits ahead: 5
-- Commits behind: 0
-- Status: Up to date with remote
-
-### Next Steps
-- Continue development
-- Create PR when ready: `/pr`
+/git/sync
+/git/sync pull
+/git/sync rebase --base main
+/git/sync all --force-with-lease
 ```

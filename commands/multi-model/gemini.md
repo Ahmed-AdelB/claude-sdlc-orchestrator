@@ -1,206 +1,123 @@
-# Gemini CLI
+---
+name: gemini-cli-execution
+description: Execute large-context analysis via Gemini CLI with max-capability settings and consensus-ready output.
+version: "1.0.0"
+command_templates:
+  claude: |
+    Claude Code (this session): "<task>"
+  codex: |
+    codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "<task>"
+  gemini: |
+    gemini -m gemini-3-pro-preview --approval-mode yolo "<task>"
+error_handling:
+  retries: 3
+  backoff: "2^n seconds"
+  timeouts_seconds:
+    default: 120
+    max: 600
+  exit_codes:
+    "0": success
+    "1": general error, check syntax and inputs
+    "2": auth failed, reauthenticate
+    "124": timeout, split task or increase timeout
+    "429": rate limited, backoff and retry
+result_aggregation:
+  output_template: Agent Review
+  required_fields:
+    - verdict
+    - findings
+    - risks
+    - recommended_actions
+    - confidence
+capability_standards:
+  source: CLAUDE.md#maximum-capability-standards
+  no_downgrade: true
+  codex_model: gpt-5.2-codex
+  codex_reasoning: xhigh
+  gemini_model: gemini-3-pro-preview
+  gemini_yolo_read_only: true
+---
 
-Execute a task using Google's Gemini CLI for large context analysis and documentation.
+# Gemini CLI Execution
+
+Use Gemini CLI for large-context analysis, documentation, and cross-file reviews.
 
 ## Arguments
 - `$ARGUMENTS` - Task description or content to analyze
 
-## Process
+## Command Templates (All Models)
+- Claude (this session):
+  - Prompt: `"<task>"`
+- Codex:
+  - `codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "<task>"`
+- Gemini (read-only analysis allowed with YOLO):
+  - `gemini -m gemini-3-pro-preview --approval-mode yolo "<task>"`
 
-### Step 1: Prepare Context
-Gather context leveraging Gemini's large context window:
-- Full file contents (up to 1M tokens)
-- Complete project documentation
-- Extensive code history
-- Related resources
+## Gemini Workflow
+1. Gather large context (full modules, docs, or long diffs).
+2. Provide a structured prompt with explicit questions.
+3. Run Gemini with the max-capability command template.
+4. Summarize findings with file references when possible.
 
-### Step 2: Format Gemini Prompt
+### Prompt Template
 ```markdown
 ## Task for Gemini
 
-### Context (Large)
-[Full project context - can include entire codebase]
-
-### Documentation
-[Complete documentation files]
+### Context
+[large context or file list]
 
 ### Task
-[User's task description]
+[analysis request]
 
 ### Requirements
-- Analyze comprehensively
-- Consider all edge cases
-- Provide detailed explanations
-- Reference specific code locations
+- Cover edge cases
+- Reference specific files when possible
+- Include risks and recommendations
 
 ### Output Format
-Detailed analysis with code references.
+Detailed analysis with actionable findings.
 ```
 
-### Step 3: Execute via Gemini CLI
-```bash
-# IMPORTANT: Use positional prompts, NOT deprecated -p flag!
+## Consensus-Ready Output (Result Aggregation)
+When Gemini is part of consensus, return this exact block.
 
-# Basic usage (positional prompt)
-gemini "Analyze this codebase for security issues"
-
-# With model selection
-gemini -m gemini-3-pro "Analyze the authentication flow"
-
-# With auto-approve (YOLO mode)
-gemini -y "Review this code"
-
-# Resume existing session
-gemini --resume session_id "Continue our discussion"
-
-# Interactive mode
-gemini -i
-
-# List available sessions
-gemini --list-sessions
-```
-
-**WARNING**: Do NOT use `gemini -p "prompt"` - the `-p` flag is deprecated!
-
-### Step 4: Process Result
 ```markdown
-## Gemini Analysis
+## Agent Review
 
-### Summary
-[High-level summary]
-
-### Detailed Analysis
-[Comprehensive analysis with code references]
+### Verdict
+APPROVE | APPROVE_WITH_COMMENTS | REQUEST_CHANGES
 
 ### Findings
-1. [Finding 1 with file:line reference]
-2. [Finding 2 with file:line reference]
+- [Finding 1]
+- [Finding 2]
 
-### Recommendations
-- [Recommendation 1]
-- [Recommendation 2]
-```
+### Risks
+- [Risk 1]
+- [Risk 2]
 
-### Step 5: Integration Options
-- **Generate report** - Create detailed documentation
-- **Code review** - Review large PRs
-- **Architecture analysis** - Analyze system design
-- **Migration planning** - Plan large refactors
-
-## Use Cases
-
-### Large Codebase Analysis
-```
-/gemini Analyze the entire authentication module and document its flow
-```
-
-### Documentation Generation
-```
-/gemini Generate comprehensive API documentation from source code
-```
-
-### Code Review (Large PRs)
-```
-/gemini Review this PR with 50+ file changes
-```
-
-### Architecture Review
-```
-/gemini Analyze the microservices architecture and identify issues
-```
-
-## Gemini Strengths
-
-### Best For
-- Large context analysis (1M tokens)
-- Documentation generation
-- Codebase understanding
-- Long-form writing
-- Cross-file analysis
-
-### Context Advantages
-| Feature | Gemini | Other Models |
-|---------|--------|--------------|
-| Max Context | 1M tokens | 128K-200K |
-| Full Project | ✅ Yes | ❌ Partial |
-| Complete History | ✅ Yes | ❌ Limited |
-
-### Example Tasks
-- "Analyze the entire /src directory"
-- "Generate documentation for all API endpoints"
-- "Review the complete PR diff"
-- "Create architecture diagram from codebase"
-
-## Configuration
-
-### Authentication
-Gemini CLI uses cached credentials (OAuth/browser-based), no API key required for CLI usage.
-
-```bash
-# For programmatic API access (optional)
-export GOOGLE_AI_API_KEY="your-api-key"
-```
-
-### Model Selection
-| Model | Context | Speed | Use Case |
-|-------|---------|-------|----------|
-| gemini-3-pro | 1M | Medium | Analysis, Review |
-| gemini-2.0-flash | 1M | Fast | Quick tasks |
-
-### CLI Flags Reference
-```bash
--m MODEL      # Select model (e.g., -m gemini-3-pro)
--y            # Auto-approve (YOLO mode)
--i            # Interactive mode
---resume ID   # Resume session by ID
---list-sessions  # List available sessions
-# NOTE: -p is DEPRECATED - use positional prompt instead
-```
-
-## Example Usage
-```
-/gemini analyze entire codebase architecture
-/gemini generate API documentation
-/gemini review large PR #123
-/gemini explain the authentication flow
-```
-
-## Response Format
-```markdown
-## Gemini Analysis
-
-### Overview
-[Comprehensive overview]
-
-### Detailed Findings
-
-#### Architecture
-[Architecture analysis]
-
-#### Code Quality
-[Code quality assessment]
-
-#### Security
-[Security considerations]
-
-### Recommendations
-
-#### Immediate Actions
+### Recommended Actions
 1. [Action 1]
 2. [Action 2]
 
-#### Long-term Improvements
-1. [Improvement 1]
-2. [Improvement 2]
-
-### References
-- `src/auth/login.ts:45` - Authentication entry point
-- `src/middleware/auth.ts:12` - Token validation
+### Confidence
+Low | Medium | High
 ```
 
-## Integration with Tri-Agent Workflow
-When used in consensus mode:
-1. Gemini provides comprehensive analysis
-2. Claude validates implementation details
-3. Codex suggests optimizations
-4. Consensus combines insights
+## Error Handling and Retry Logic
+- Retry up to 3 times with exponential backoff (2^n seconds).
+- Exit codes: 1 (syntax), 2 (auth), 124 (timeout), 429 (rate limit).
+- For timeouts, reduce context or split the task.
+- Failover chain (degraded mode): 3 Pro -> 2.5 Pro -> Claude Sonnet.
+
+## Capability Standards Integration
+- Always use `gemini-3-pro-preview`.
+- Do not use `-m pro` or lower-tier models.
+- YOLO is allowed for read-only analysis only; omit YOLO for modifications or git operations.
+- Use positional prompts; avoid deprecated flags.
+
+## Example Usage
+```
+/gemini analyze authentication flow and document risks
+/gemini review a large PR with 50+ file changes
+/gemini generate API documentation from source
+```

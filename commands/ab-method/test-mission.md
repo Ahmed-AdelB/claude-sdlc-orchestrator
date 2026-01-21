@@ -1,200 +1,129 @@
+---
+name: ab-method.test-mission
+description: Generate and organize tests for a mission's deliverables.
+version: 1.0.0
+integration_with_tri_agent_workflow: |
+  - Codex: derive test cases from acceptance criteria and implement tests.
+  - Claude Code: review test strategy for coverage gaps.
+  - Gemini CLI: analyze large codebases for related test patterns.
+templates_and_examples: |
+  - Test strategy template
+  - Unit and integration test templates
+  - Example usage
+step_by_step_execution_protocol: |
+  1) Read mission scope, acceptance criteria, and touched files.
+  2) Produce a test strategy and prioritize cases.
+  3) Write tests with fixtures and factories as needed.
+  4) Run or propose the test commands.
+  5) Summarize results and gaps.
+---
+
 # Test Mission
 
 Generate comprehensive tests for a mission's deliverables.
 
 ## Arguments
-- `$ARGUMENTS` - Mission ID or feature to test
+- `$ARGUMENTS`: Mission ID or feature to test
 
-## Process
+## Inputs
+- Mission plan or state
+- Affected files and acceptance criteria
+- Existing test setup and conventions
 
-### Step 1: Analyze Mission Scope
-Read the mission specification to identify:
-- Components created/modified
-- Expected behaviors
-- Edge cases from acceptance criteria
-- Integration points
+## Outputs
+- Test strategy
+- New or updated tests
+- Suggested test commands
 
-### Step 2: Determine Test Strategy
+## Execution Protocol
+1) Parse mission objectives and acceptance criteria.
+2) Identify component, integration, and end-to-end needs.
+3) Draft test cases with fixtures and factories.
+4) Implement tests aligned with repo patterns.
+5) Provide run commands and note gaps or risks.
 
+## Test Strategy Template
 ```markdown
-# Test Strategy for: [Mission Title]
+# Test Strategy: [Mission Title]
 
-## Test Pyramid
+## Scope
+- Components: [list]
+- APIs: [list]
+- Data flows: [list]
 
-### Unit Tests (70%)
-- Individual functions
-- Class methods
-- Utility functions
-- Pure logic
+## Priorities
+1. Critical path behaviors
+2. Edge cases and validation
+3. Error handling and security
 
-### Integration Tests (20%)
-- API endpoints
-- Database operations
-- Service interactions
-- Authentication flows
-
-### E2E Tests (10%)
-- Critical user journeys
-- Happy path scenarios
-- Key workflows
+## Coverage Targets
+- Unit tests: [target percentage]
+- Integration tests: [target percentage]
+- E2E tests: [target percentage]
 ```
 
-### Step 3: Generate Tests
-
-#### Unit Test Template
+## Unit Test Template
 ```typescript
-describe('[Component/Function Name]', () => {
-  describe('[Method/Scenario]', () => {
-    it('should [expected behavior] when [condition]', () => {
-      // Arrange
-      const input = /* test data */;
+import { describe, it, expect } from "vitest";
 
-      // Act
-      const result = functionUnderTest(input);
+describe("[Unit Under Test]", () => {
+  it("should [expected behavior]", () => {
+    const input = /* arrange */;
 
-      // Assert
-      expect(result).toBe(/* expected */);
-    });
+    const result = functionUnderTest(input);
 
-    it('should handle [edge case]', () => {
-      // Test edge case
-    });
+    expect(result).toBe(/* expected */);
+  });
 
-    it('should throw error when [invalid condition]', () => {
-      // Test error handling
+  it("should handle [edge case]", () => {
+    // Add edge case
+  });
+
+  it("should throw on [invalid input]", () => {
+    expect(() => functionUnderTest(/* invalid */)).toThrow();
+  });
+});
+```
+
+## Integration Test Template
+```typescript
+import request from "supertest";
+import { describe, it, expect } from "vitest";
+import { app } from "../app";
+
+describe("[Feature] integration", () => {
+  it("should [behavior]", async () => {
+    const response = await request(app)
+      .post("/api/resource")
+      .send({ /* payload */ })
+      .expect(201);
+
+    expect(response.body).toMatchObject({
+      id: expect.any(String)
     });
   });
 });
 ```
 
-#### Integration Test Template
+## Test Data Template
 ```typescript
-describe('[API/Feature] Integration', () => {
-  beforeAll(async () => {
-    // Setup test database/mocks
-  });
-
-  afterAll(async () => {
-    // Cleanup
-  });
-
-  describe('POST /api/resource', () => {
-    it('should create resource with valid data', async () => {
-      const response = await request(app)
-        .post('/api/resource')
-        .send(validData)
-        .expect(201);
-
-      expect(response.body).toMatchObject({
-        id: expect.any(String),
-        ...validData
-      });
-    });
-
-    it('should return 400 for invalid data', async () => {
-      const response = await request(app)
-        .post('/api/resource')
-        .send(invalidData)
-        .expect(400);
-
-      expect(response.body.error).toBeDefined();
-    });
-
-    it('should return 401 without authentication', async () => {
-      await request(app)
-        .post('/api/resource')
-        .send(validData)
-        .expect(401);
-    });
-  });
-});
-```
-
-### Step 4: Generate Test Data
-Create test fixtures and factories:
-
-```typescript
-// factories/user.factory.ts
-export const createTestUser = (overrides = {}) => ({
-  id: faker.string.uuid(),
-  email: faker.internet.email(),
-  name: faker.person.fullName(),
-  createdAt: new Date(),
-  ...overrides
-});
-
-// fixtures/auth.fixtures.ts
-export const validCredentials = {
-  email: 'test@example.com',
-  password: 'ValidP@ssw0rd'
+export const validPayload = {
+  // Populate with valid data
 };
 
-export const invalidCredentials = {
-  email: 'invalid',
-  password: '123'
+export const invalidPayload = {
+  // Populate with invalid data
 };
 ```
 
-### Step 5: Run Tests
-Execute tests and report results:
-
-```markdown
-## Test Results
-
-### Summary
-✅ Passed: 45
-❌ Failed: 2
-⏭️ Skipped: 1
-📊 Coverage: 87%
-
-### Failed Tests
-1. `auth.test.ts` - "should refresh expired token"
-   - Expected: New token returned
-   - Actual: 401 Unauthorized
-   - Suggested fix: Check token refresh logic
-
-2. `user.test.ts` - "should handle concurrent updates"
-   - Expected: Last write wins
-   - Actual: Race condition detected
-   - Suggested fix: Add optimistic locking
-
-### Coverage Report
-| File | Statements | Branches | Functions | Lines |
-|------|------------|----------|-----------|-------|
-| auth.ts | 95% | 88% | 100% | 95% |
-| user.ts | 82% | 75% | 90% | 82% |
-```
-
-### Step 6: Suggest Improvements
-- Missing test cases
-- Uncovered edge cases
-- Flaky test detection
-- Performance test suggestions
-
-## Example Usage
+## Examples
 ```
 /test-mission MISSION-001
 /test-mission authentication-feature
 /test-mission src/features/auth
 ```
 
-## Test Types Generated
-
-### Happy Path Tests
-- Normal operation with valid inputs
-- Expected successful outcomes
-
-### Edge Case Tests
-- Empty inputs
-- Maximum/minimum values
-- Boundary conditions
-
-### Error Case Tests
-- Invalid inputs
-- Missing required fields
-- Authorization failures
-
-### Security Tests
-- SQL injection attempts
-- XSS payloads
-- Authentication bypass attempts
+## Tri-Agent Workflow Integration
+- Ask Claude Code to review for missing test cases.
+- Ask Gemini CLI to find similar tests in large repos.
+- Use Codex to implement and adjust tests efficiently.

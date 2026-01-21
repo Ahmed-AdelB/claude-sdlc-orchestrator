@@ -1,21 +1,73 @@
+---
+name: tri-agent-consensus
+description: Tri-agent consensus workflow across Claude, Codex, and Gemini with standardized aggregation.
+version: "1.0.0"
+command_templates:
+  claude: |
+    Claude Code (this session): "<task>"
+  codex: |
+    codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "<task>"
+  gemini: |
+    gemini -m gemini-3-pro-preview --approval-mode yolo "<task>"
+error_handling:
+  retries: 3
+  backoff: "2^n seconds"
+  timeouts_seconds:
+    default: 180
+    max: 600
+  exit_codes:
+    "0": success
+    "1": general error, check syntax and inputs
+    "2": auth failed, reauthenticate
+    "124": timeout, split task or increase timeout
+    "429": rate limited, backoff and retry
+result_aggregation:
+  required_fields:
+    - verdict
+    - findings
+    - risks
+    - recommended_actions
+    - confidence
+  decision_rules:
+    unanimous_approve: APPROVED
+    majority_approve: APPROVED_WITH_CONDITIONS
+    split: NEEDS_RESOLUTION
+    unanimous_block: BLOCKED
+capability_standards:
+  source: CLAUDE.md#maximum-capability-standards
+  no_downgrade: true
+  codex_model: gpt-5.2-codex
+  codex_reasoning: xhigh
+  gemini_model: gemini-3-pro-preview
+  gemini_yolo_read_only: true
+---
+
 # Tri-Agent Consensus
 
-Request consensus review from all three AI agents (Claude, Codex, Gemini) for critical decisions.
+Request consensus from Claude, Codex, and Gemini for critical decisions and merge a single outcome.
 
 ## Arguments
-- `$ARGUMENTS` - Topic or code to review
+- `$ARGUMENTS` - Topic, decision, or code to review
 
-## Process
+## Command Templates (All Models)
+Use these exact templates to meet capability standards.
 
-### Step 1: Prepare Review Request
+- Claude (this session):
+  - Prompt: `"<task>"`
+- Codex:
+  - `codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "<task>"`
+- Gemini (read-only analysis allowed with YOLO):
+  - `gemini -m gemini-3-pro-preview --approval-mode yolo "<task>"`
+
+## Request Template
 ```markdown
 ## Consensus Review Request
 
 ### Topic
-[Topic or decision to review]
+[Topic or decision]
 
 ### Context
-[Relevant context and background]
+[Relevant context, constraints, and artifacts]
 
 ### Specific Questions
 1. [Question 1]
@@ -23,196 +75,91 @@ Request consensus review from all three AI agents (Claude, Codex, Gemini) for cr
 3. [Question 3]
 
 ### Artifacts
-[Code, designs, or documents to review]
+[Code snippets, file paths, or documents to review]
 ```
 
-### Step 2: Distribute to Agents
-
-#### Claude Code (Sonnet/Opus)
-Focus: Code quality, security, best practices
+## Response Template (Per Agent)
 ```markdown
-Review this for:
-- Code quality and maintainability
-- Security vulnerabilities
-- Adherence to best practices
-- Error handling completeness
+## Agent Review
+
+### Verdict
+APPROVE | APPROVE_WITH_COMMENTS | REQUEST_CHANGES
+
+### Findings
+- [Finding 1]
+- [Finding 2]
+
+### Risks
+- [Risk 1]
+- [Risk 2]
+
+### Recommended Actions
+1. [Action 1]
+2. [Action 2]
+
+### Confidence
+Low | Medium | High
 ```
 
-#### Codex (GPT-5.1 / o3-pro)
-Focus: Implementation correctness, alternatives
-```markdown
-Review this for:
-- Implementation correctness
-- Algorithm efficiency
-- Alternative approaches
-- Edge case handling
-```
+## Result Aggregation
+Combine all three responses into a single decision using the rules below.
 
-#### Gemini (2.5 Pro)
-Focus: Architecture, scalability, documentation
-```markdown
-Review this for:
-- Architectural soundness
-- Scalability considerations
-- Documentation completeness
-- Integration impacts
-```
+### Decision Rules
+- 3/3 approve: APPROVED
+- 2/3 approve: APPROVED_WITH_CONDITIONS
+- 1/3 approve or split: NEEDS_RESOLUTION
+- 0/3 approve: BLOCKED
 
-### Step 3: Collect Responses
-```markdown
-## Agent Reviews
-
-### Claude Code (Sonnet)
-**Verdict:** APPROVE / APPROVE_WITH_COMMENTS / REQUEST_CHANGES
-
-**Findings:**
-- ✅ [Positive finding]
-- ⚠️ [Warning]
-- ❌ [Issue]
-
-**Recommendations:**
-1. [Recommendation]
-
----
-
-### Codex (GPT-5.1)
-**Verdict:** APPROVE / APPROVE_WITH_COMMENTS / REQUEST_CHANGES
-
-**Findings:**
-- ✅ [Positive finding]
-- ⚠️ [Warning]
-- ❌ [Issue]
-
-**Recommendations:**
-1. [Recommendation]
-
----
-
-### Gemini (2.5 Pro)
-**Verdict:** APPROVE / APPROVE_WITH_COMMENTS / REQUEST_CHANGES
-
-**Findings:**
-- ✅ [Positive finding]
-- ⚠️ [Warning]
-- ❌ [Issue]
-
-**Recommendations:**
-1. [Recommendation]
-```
-
-### Step 4: Determine Consensus
-
-#### Voting Rules
-| Scenario | Votes | Decision |
-|----------|-------|----------|
-| Unanimous Approve | 3/3 ✅ | **APPROVED** |
-| Majority Approve | 2/3 ✅ | **APPROVED with discussion** |
-| Unanimous Changes | 3/3 ❌ | **BLOCKED** |
-| Split Decision | Mixed | **Requires resolution** |
-
-### Step 5: Generate Consensus Report
+### Aggregated Output Template
 ```markdown
 ## Consensus Report
 
-### Decision: [APPROVED / BLOCKED / NEEDS_RESOLUTION]
+### Decision
+[APPROVED | APPROVED_WITH_CONDITIONS | NEEDS_RESOLUTION | BLOCKED]
 
 ### Vote Summary
-| Agent | Vote | Confidence |
-|-------|------|------------|
-| Claude | ✅ APPROVE | High |
-| Codex | ✅ APPROVE | Medium |
-| Gemini | ⚠️ COMMENTS | High |
-
-### Consensus: 2/3 APPROVED with conditions
+| Agent  | Vote | Confidence |
+| ------ | ---- | ---------- |
+| Claude |      |            |
+| Codex  |      |            |
+| Gemini |      |            |
 
 ### Agreed Points
-All agents agree on:
-1. [Point of agreement]
-2. [Point of agreement]
+1. [Point]
+2. [Point]
 
-### Points of Disagreement
+### Disagreements
 | Topic | Claude | Codex | Gemini |
-|-------|--------|-------|--------|
-| [Topic] | [View] | [View] | [View] |
+| ----- | ------ | ----- | ------ |
+|       |        |       |        |
 
-### Required Actions Before Merge
-1. [Action from Claude's review]
-2. [Action from Codex's review]
-3. [Action from Gemini's review]
+### Required Actions
+1. [Action]
+2. [Action]
 
 ### Optional Improvements
-- [Suggested improvement 1]
-- [Suggested improvement 2]
+- [Improvement]
 ```
 
-## Consensus Types
+## Error Handling and Retry Logic
+- Retry up to 3 times with exponential backoff (2^n seconds).
+- Exit codes: 1 (syntax), 2 (auth), 124 (timeout), 429 (rate limit).
+- Split large prompts when timeouts occur.
+- Failover chain (degraded mode):
+  - Claude: Opus -> Sonnet -> Gemini Pro
+  - Codex: GPT-5.2 -> o3 -> Claude Sonnet
+  - Gemini: 3 Pro -> 2.5 Pro -> Claude Sonnet
 
-### Code Review Consensus
-```
-/consensus review src/auth/login.ts
-```
-All agents review the same code for different aspects.
-
-### Architecture Decision
-```
-/consensus architecture: microservices vs monolith
-```
-All agents evaluate architectural options.
-
-### Security Review
-```
-/consensus security: authentication implementation
-```
-All agents focus on security aspects.
-
-### Performance Review
-```
-/consensus performance: database query optimization
-```
-All agents analyze performance implications.
-
-## Conflict Resolution
-
-### When Agents Disagree
-1. **Identify the core disagreement**
-2. **Gather more context** if needed
-3. **Apply domain-specific tie-breaker:**
-
-| Domain | Lead Agent | Reason |
-|--------|------------|--------|
-| Security | Claude | Deep security analysis |
-| Algorithm | Codex | Implementation expertise |
-| Architecture | Gemini | Large context understanding |
-| Code Quality | Claude | Best practices focus |
-| Performance | Codex | Optimization expertise |
-
-### Escalation Path
-1. Majority vote decides
-2. Domain expert agent leads
-3. Human decision requested
+## Capability Standards Integration
+- Follow CLAUDE.md maximum capability standards and no-downgrade rule.
+- Codex must use `gpt-5.2-codex` with `model_reasoning_effort="xhigh"`.
+- Gemini must use `gemini-3-pro-preview`. YOLO is allowed for read-only analysis only.
+- For modifications or git operations, do not use YOLO.
+- Use `workspace-write` by default; use `danger-full-access` only after the required checklist.
 
 ## Example Usage
 ```
-/consensus review authentication PR
-/consensus architecture decision
-/consensus security audit results
-/consensus before deploying to production
-```
-
-## Commit Format with Consensus
-```
-feat(auth): implement OAuth 2.0 login
-
-- Add OAuth provider integration
-- Implement token refresh flow
-- Add session management
-
-Tri-Agent Approval:
-- Claude Code (Sonnet): APPROVE
-- Codex (GPT-5.1): APPROVE
-- Gemini (2.5 Pro): APPROVE
-
-Consensus: 3/3 UNANIMOUS
-
-Co-Authored-By: Claude <noreply@anthropic.com>
+/consensus review auth flow in src/auth
+/consensus architecture decision: monolith vs services
+/consensus security review for token storage
 ```

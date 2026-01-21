@@ -1,179 +1,145 @@
-# Create Pull Request
+---
+name: git:pr
+scope: command
+version: 2.0.0
+summary: Create pull requests with templates, safety checks, and tri-agent verification.
+args:
+  - name: title
+    type: string
+    required: false
+    description: PR title or "auto" to generate.
+  - name: base
+    type: string
+    required: false
+    default: main
+    description: Base branch for the PR.
+  - name: draft
+    type: boolean
+    required: false
+    default: false
+    description: Create a draft PR.
+  - name: reviewers
+    type: string
+    required: false
+    description: Comma-separated reviewer handles.
+  - name: labels
+    type: string
+    required: false
+    description: Comma-separated labels.
+  - name: dry-run
+    type: boolean
+    required: false
+    default: false
+    description: Print intended actions without executing.
+---
 
-Create a well-documented pull request with comprehensive description and review checklist.
+# /git/pr
 
-## Arguments
-- `$ARGUMENTS` - PR title or 'auto' for auto-generated
+Create a pull request with consistent templates, verification notes, and safety checks.
+
+## Usage
+
+/git/pr [title|auto] [--base main] [--draft] [--reviewers a,b] [--labels x,y] [--dry-run]
+
+## Git Safety Protocols (from CLAUDE.md)
+
+- Git operations require manual approval; YOLO mode is not allowed for git operations.
+- Prefer `git revert` over `git reset --hard` for rollback.
+- Rollback after 3 verification FAILs or a critical error, then re-run verification and require a new plan before retry.
+- Use git worktrees for isolation when running parallel tasks.
+- Check `git status` and warn on uncommitted tracked changes before any operation.
 
 ## Process
 
-### Step 1: Analyze Branch
-```bash
-# Get current branch
-git branch --show-current
+1. Analyze branch status
+   - `git branch --show-current`
+   - `git log <base>..HEAD --oneline`
+   - `git diff <base>...HEAD --stat`
+2. Ensure branch is pushed
+   - `git push -u origin <branch>` if upstream is missing.
+3. Generate PR title and summary
+   - Prefer a concise, conventional title aligned to the commit message.
+4. Fill PR template
+   - Include summary, changes, testing, risk, and verification notes.
+5. Create PR
+   - Use `gh pr create` with base, title, and body.
+6. Add reviewers and labels
+   - `gh pr edit --add-reviewer` and `gh pr edit --add-label`.
 
-# Get commits since diverging from base
-git log main..HEAD --oneline
+## Tri-Agent Verification Integration
 
-# Get changed files
-git diff main...HEAD --stat
+- For non-trivial changes, include a VERIFY block in the PR body.
+- Verification must be performed by a different AI (two-key rule).
+- If verification FAILs, fix issues and update the PR before requesting review again.
+
+Verification request template:
+
+```
+gemini -m gemini-3-pro-preview --approval-mode yolo "Verify: <desc>. Check correctness, security, edges. PASS/FAIL."
+codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Verify: <desc>. Check logic, completeness. PASS/FAIL."
 ```
 
-### Step 2: Generate PR Content
+## Templates (Commit and PR)
 
-```markdown
+Commit message template:
+
+```
+<type>(<scope>): <subject>
+
+<context>
+- <bullet>
+- <bullet>
+
+Refs: <ticket-id>
+BREAKING CHANGE: <details> (optional)
+```
+
+PR description template:
+
+```
 ## Summary
-[2-3 sentences describing the change]
+<short summary>
 
-## Changes Made
-- [Bullet point of change 1]
-- [Bullet point of change 2]
-- [Bullet point of change 3]
+## Changes
+- <change 1>
+- <change 2>
 
-## Type of Change
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to change)
-- [ ] Documentation update
+## Testing
+- [ ] unit
+- [ ] integration
+- [ ] manual
+- [ ] not run (explain)
 
-## How Has This Been Tested?
-- [ ] Unit tests
-- [ ] Integration tests
-- [ ] Manual testing
+## Risk and Rollback
+- Risk: Low | Medium | High
+- Rollback: git revert <sha>
 
-## Test Instructions
-1. [Step to test the change]
-2. [Another step]
-
-## Screenshots (if applicable)
-[Add screenshots here]
+## Verification (Two-Key Rule)
+- Scope:
+- Change summary:
+- Expected behavior:
+- Repro steps:
+- Evidence:
+- Risk notes:
 
 ## Checklist
-- [ ] My code follows the project's style guidelines
-- [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
-- [ ] Any dependent changes have been merged and published
-
-## Related Issues
-Closes #[issue number]
-
----
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+- [ ] self-review complete
+- [ ] docs updated (if needed)
+- [ ] tests pass
 ```
 
-### Step 3: Ensure Branch is Pushed
-```bash
-# Check if branch is pushed
-git rev-parse --abbrev-ref --symbolic-full-name @{u}
+## Error Handling and Recovery
 
-# If not pushed, push with upstream
-git push -u origin $(git branch --show-current)
+- Upstream not set: `git push -u origin <branch>` then retry PR creation.
+- Non-fast-forward push: rebase on base branch, resolve conflicts, then `git push --force-with-lease` after confirmation.
+- Missing gh auth: run `gh auth login` and retry.
+- PR body incomplete: stop and fill required sections before creating.
+- Verification FAIL: update PR with fixes and new verification evidence.
+
+## Examples
+
 ```
-
-### Step 4: Create PR
-```bash
-gh pr create \
-  --title "[PR Title]" \
-  --body "$(cat <<'EOF'
-[Generated PR body]
-EOF
-)" \
-  --base main \
-  --draft  # Optional
+/git/pr
+/git/pr "feat(auth): add oauth login" --base main
+/git/pr --draft --reviewers alice,bob --labels enhancement,security
 ```
-
-### Step 5: Add Labels and Reviewers
-```bash
-# Add labels
-gh pr edit --add-label "enhancement,needs-review"
-
-# Request reviewers
-gh pr edit --add-reviewer @teammate
-```
-
-## PR Templates
-
-### Feature PR
-```markdown
-## 🚀 Feature: [Feature Name]
-
-### Description
-[What does this feature do?]
-
-### User Story
-As a [type of user], I want [goal] so that [benefit].
-
-### Implementation Details
-[Technical details of the implementation]
-
-### Dependencies
-- [Dependency 1]
-- [Dependency 2]
-```
-
-### Bug Fix PR
-```markdown
-## 🐛 Fix: [Bug Description]
-
-### Problem
-[What was the bug?]
-
-### Root Cause
-[What caused it?]
-
-### Solution
-[How was it fixed?]
-
-### Regression Risk
-[Low/Medium/High] - [Explanation]
-```
-
-### Refactoring PR
-```markdown
-## ♻️ Refactor: [Area Refactored]
-
-### Motivation
-[Why was this refactoring needed?]
-
-### Changes
-[What was changed?]
-
-### Impact
-- No functional changes
-- [Any behavioral differences]
-
-### Performance Impact
-[Better/Same/Worse] - [Metrics if available]
-```
-
-## Example Usage
-```
-/pr                                    # Auto-generate PR
-/pr feat: add user authentication      # Use provided title
-/pr --draft                            # Create as draft
-/pr --reviewers @john,@jane            # Add reviewers
-```
-
-## PR Best Practices
-
-### Size Guidelines
-- Small: < 200 lines (ideal)
-- Medium: 200-400 lines
-- Large: > 400 lines (consider splitting)
-
-### Commit History
-- Squash messy commits
-- Keep logical commits separate
-- Write meaningful commit messages
-
-### Self-Review Checklist
-Before creating PR:
-- [ ] Diff reviewed line by line
-- [ ] No console.log or debug code
-- [ ] No commented out code
-- [ ] All tests pass
-- [ ] Documentation updated

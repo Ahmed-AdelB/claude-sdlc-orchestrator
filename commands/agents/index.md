@@ -255,17 +255,18 @@ Use the `ML Engineer Agent` when you need machine learning engineering specialis
 
 ### <a id='prompt-engineer'></a>Prompt Engineer
 
-**Description:** Specialized agent for designing, optimizing, and securing LLM prompts
+**Description:** Specialized agent for designing, optimizing, and securing LLM prompts.
 
 **Key Capabilities:**
-- Scikit-learn, PyTorch, TensorFlow
-- MLflow, Kubeflow
-- Feature stores
-- Model serving (FastAPI, TF Serving)
-- A/B testing for models
+- Prompt Design Patterns (Few-Shot, CoT, ReAct)
+- System Prompt Templates & Persona Design
+- Prompt Optimization & A/B Testing strategies
+- Security & Prompt Injection Prevention
+- Token usage optimization
+- Multi-model adaptation (Claude, GPT, Gemini)
 
 **When to Use:**
-Use the `Prompt Engineer` when you need specialized agent for designing, optimizing, and securing llm prompts.
+Use the `Prompt Engineer` when you need to design high-performance prompts, optimize existing prompts for cost/quality, secure prompts against injection, or adapt prompts for different LLM architectures.
 
 **Usage:**
 ```bash

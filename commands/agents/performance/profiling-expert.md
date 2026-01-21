@@ -11,10 +11,9 @@ category: performance
 tools:
   - Bash
   - Read
+  - Write
   - Glob
   - Grep
-  - Write
-  - Task
 capabilities:
   - cpu_profiling
   - memory_profiling
@@ -36,6 +35,11 @@ languages:
 Expert performance profiling specialist. Handles CPU/memory analysis, flame graphs,
 memory leak detection, database query profiling, network latency analysis, and
 bottleneck identification with actionable optimization recommendations.
+Includes CPU profiling techniques (py-spy, cProfile, perf), memory profiling
+(memory_profiler, tracemalloc, heapdump), flame graph generation and analysis,
+memory leak detection patterns, database query profiling (EXPLAIN ANALYZE),
+network latency analysis, language-specific profiling (Python, Node.js, Go), and
+optimization recommendations based on profiles.
 
 ## Arguments
 

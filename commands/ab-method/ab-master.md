@@ -1,181 +1,122 @@
+---
+name: ab-method.ab-master
+description: Orchestrate the full AB Method workflow from task to completion.
+version: 1.0.0
+integration_with_tri_agent_workflow: |
+  - Codex: run the workflow steps and keep artifacts consistent.
+  - Claude Code: provide architectural oversight and complex debugging.
+  - Gemini CLI: analyze large codebases and documentation for context.
+templates_and_examples: |
+  - Orchestration summary template
+  - Status template
+  - Example usage
+step_by_step_execution_protocol: |
+  1) Interpret the command mode (start, status, next, complete).
+  2) Invoke the right sub-commands in order.
+  3) Track mission progress and quality gates.
+  4) Surface blockers and suggest delegation.
+  5) Produce a concise status or completion report.
+---
+
 # AB Master
 
-Master orchestrator for the AB Method workflow, managing the complete task-to-mission-to-completion lifecycle.
+Master orchestrator for the AB Method workflow, managing the task-to-mission lifecycle.
 
 ## Arguments
-- `$ARGUMENTS` - Feature description or command (start, status, next, complete)
+- `$ARGUMENTS`: Feature description or command (start, status, next, complete)
 
-## Process
+## Inputs
+- Feature request or task ID
+- Existing task and mission artifacts
 
-### Starting a New Feature
-When given a feature description:
+## Outputs
+- Orchestration summary
+- Status updates
+- Next steps or completion report
 
+## Execution Protocol
+1) Determine the command mode: start, status, next, or complete.
+2) Start: run create-task, then create-mission, then queue Mission 1.
+3) Status: summarize task, mission progress, and quality gates.
+4) Next: close current mission, run test-mission, then open the next.
+5) Complete: verify all missions and generate completion report.
+
+## Command Modes
+
+### Start
+- Use `/create-task` to define the task.
+- Use `/create-mission` to break the task into missions.
+- Prepare Mission 1 for execution.
+
+### Status
+- Summarize overall progress, current mission, and blockers.
+
+### Next
+- Close the current mission with tests.
+- Transition to the next mission.
+
+### Complete
+- Verify all missions complete and tests pass.
+- Provide a completion report and review checklist.
+
+## Orchestration Summary Template
 ```markdown
 # AB Method Orchestration
 
 ## Feature: [Feature Name]
 
 ### Phase 1: Task Definition
-Running `/create-task` to define specifications...
-[Task specification created]
+- Task ID: [TASK-YYYYMMDD-XXX]
+- Status: [status]
 
 ### Phase 2: Mission Planning
-Running `/create-mission` to break into missions...
-[Mission plan created]
+- Total missions: [N]
+- Execution mode: Sequential | Parallel
 
 ### Phase 3: Execution
-Ready to begin Mission 1 of X
+- Current mission: [Mission Title]
+- Progress: [XX%]
 ```
 
-### Status Check
-When `status` is specified:
-
+## Status Template
 ```markdown
 # AB Method Status
 
-## Current Feature: [Feature Name]
-📊 Overall Progress: 65%
+## Current Feature
+- Feature: [Name]
+- Overall progress: [XX%]
 
-## Task Status
-- Task ID: TASK-20240115
-- Status: In Progress
-- Started: 2024-01-15
+## Task
+- Task ID: [TASK-YYYYMMDD-XXX]
+- Status: [status]
 
-## Mission Progress
-| Mission | Status | Progress | Time |
-|---------|--------|----------|------|
-| Mission 1: Database schema | ✅ Complete | 100% | 2h |
-| Mission 2: API endpoints | 🔄 In Progress | 75% | 3h |
-| Mission 3: Frontend forms | ⬜ Pending | 0% | - |
-| Mission 4: Testing | ⬜ Pending | 0% | - |
-
-## Current Mission: API Endpoints
-- Working on: Authentication middleware
-- Blockers: None
-- ETA: 1 hour remaining
+## Missions
+| Mission | Status | Progress | Notes |
+|---------|--------|----------|-------|
+| Mission 1 | complete | 100% | - |
+| Mission 2 | in_progress | 60% | - |
+| Mission 3 | pending | 0% | - |
 
 ## Quality Gates
 - [ ] All missions complete
-- [ ] Tests passing (42/50)
-- [ ] Code review pending
-- [ ] Documentation updated
+- [ ] Tests passing
+- [ ] Code review complete
+- [ ] Docs updated
 
 ## Next Steps
-1. Complete current mission
-2. Run `/test-mission` for Mission 2
-3. Begin Mission 3: Frontend forms
+1. [Action 1]
+2. [Action 2]
 ```
 
-### Next Mission
-When `next` is specified:
-- Complete current mission
-- Run tests for current mission
-- Transition to next mission
-- Initialize next mission context
-
-### Complete Feature
-When `complete` is specified:
-- Verify all missions complete
-- Run full test suite
-- Generate completion report
-- Prepare for code review
-
-## Workflow Orchestration
-
-### Sequential Mode
+## Examples
 ```
-Task Definition
-     ↓
-Mission Planning
-     ↓
-Mission 1 → Test → Review
-     ↓
-Mission 2 → Test → Review
-     ↓
-Mission N → Test → Review
-     ↓
-Feature Complete
-```
-
-### Parallel Mode (with git worktrees)
-```
-Task Definition
-     ↓
-Mission Planning
-     ↓
-     ├─→ Mission 1 (worktree 1) → Test
-     ├─→ Mission 2 (worktree 2) → Test
-     └─→ Mission 3 (worktree 3) → Test
-             ↓
-        Merge & Integration Test
-             ↓
-        Feature Complete
-```
-
-## State Management
-
-```json
-{
-  "feature": {
-    "id": "FEAT-001",
-    "name": "User Authentication",
-    "status": "in_progress",
-    "startedAt": "2024-01-15T10:00:00Z"
-  },
-  "task": {
-    "id": "TASK-001",
-    "status": "in_progress"
-  },
-  "missions": [
-    {"id": "M1", "status": "completed", "completedAt": "..."},
-    {"id": "M2", "status": "in_progress", "progress": 75},
-    {"id": "M3", "status": "pending"},
-    {"id": "M4", "status": "pending"}
-  ],
-  "currentMission": "M2",
-  "qualityGates": {
-    "allMissionsComplete": false,
-    "testsPass": false,
-    "codeReview": false,
-    "docsUpdated": false
-  }
-}
-```
-
-## Commands Integration
-
-The AB Master orchestrates these commands:
-- `/create-task` - Phase 1: Define task
-- `/create-mission` - Phase 2: Plan missions
-- `/sdlc:execute` - Phase 3: Execute missions
-- `/test-mission` - Phase 4: Test each mission
-- `/review` - Phase 5: Code review
-- `/resume-mission` - Continue interrupted work
-
-## Example Usage
-```
-/ab-master Add user authentication with OAuth support
+/ab-master Add OAuth-based authentication for users
 /ab-master status
 /ab-master next
 /ab-master complete
 ```
 
-## Quality Enforcement
-
-### Before Mission Completion
-- [ ] All acceptance criteria met
-- [ ] Tests written and passing
-- [ ] No linting errors
-- [ ] No type errors
-
-### Before Feature Completion
-- [ ] All missions complete
-- [ ] Integration tests pass
-- [ ] Documentation updated
-- [ ] Code review approved
-- [ ] Security review (if applicable)
-
-## Thinking Modes
-- Standard tasks: `think` (4K tokens)
-- Complex missions: `think hard` (10K tokens)
-- Architecture decisions: `ultrathink` (32K tokens)
+## Tri-Agent Workflow Integration
+- Use Claude Code for architectural reviews and complex debugging.
+- Use Gemini CLI to scan large codebases for context or impacts.
+- Use Codex to keep the AB artifacts and steps consistent.

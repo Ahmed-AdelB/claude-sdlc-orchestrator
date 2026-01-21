@@ -1,145 +1,161 @@
-# Smart Commit
+---
+name: git:commit
+scope: command
+version: 2.0.0
+summary: Smart commit with conventional commits, safety gates, and tri-agent approval.
+args:
+  - name: message
+    type: string
+    required: false
+    description: Commit message or "auto" to generate.
+  - name: scope
+    type: string
+    required: false
+    description: Conventional commit scope override.
+  - name: tri-agent
+    type: boolean
+    required: false
+    default: false
+    description: Require tri-agent verification before committing.
+  - name: dry-run
+    type: boolean
+    required: false
+    default: false
+    description: Print intended actions without executing.
+---
 
-Create a well-formatted git commit with conventional commit format and optional tri-agent approval.
+# /git/commit
 
-## Arguments
-- `$ARGUMENTS` - Commit message or 'auto' for auto-generated message
+Create a conventional commit with quality gates, tri-agent verification, and recovery paths.
+
+## Usage
+
+/git/commit [message|auto] [--scope name] [--tri-agent] [--dry-run]
+
+## Git Safety Protocols (from CLAUDE.md)
+
+- Git operations require manual approval; YOLO mode is not allowed for git operations.
+- Prefer `git revert` over `git reset --hard` for rollback.
+- Rollback after 3 verification FAILs or a critical error, then re-run verification and require a new plan before retry.
+- Use git worktrees for isolation when running parallel tasks.
+- Check `git status` and warn on uncommitted tracked changes before any operation.
 
 ## Process
 
-### Step 1: Analyze Changes
-```bash
-# Check for staged changes
-git diff --cached --stat
+1. Inspect staged changes
+   - `git diff --cached --stat`
+   - If nothing staged, show unstaged diff and stop for confirmation.
+2. Validate diff
+   - No secrets, large binaries, or debug artifacts.
+   - Optional: lint and tests.
+3. Generate or validate message
+   - Use conventional commits: `<type>(<scope>): <subject>`.
+   - Ensure subject is imperative, <= 72 chars.
+4. Tri-agent verification (if required)
+   - Use the two-key rule: verification by a different AI.
+   - Record PASS/FAIL and address failures before commit.
+5. Create commit
+   - `git commit -m "<message>"` (or multi-line with body).
 
-# If nothing staged, show unstaged changes
-git diff --stat
+## Conventional Commit Types
 
-# Get list of modified files
-git status --porcelain
+- feat: new feature
+- fix: bug fix
+- docs: documentation
+- style: formatting
+- refactor: code restructuring
+- perf: performance
+- test: tests
+- chore: maintenance
+
+## Tri-Agent Verification Integration
+
+- Require verification for high-risk changes or when `--tri-agent` is set.
+- Verification must be performed by a different AI (two-key rule).
+
+Verification request template:
+
+```
+gemini -m gemini-3-pro-preview --approval-mode yolo "Verify: <desc>. Check correctness, security, edges. PASS/FAIL."
+codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Verify: <desc>. Check logic, completeness. PASS/FAIL."
 ```
 
-### Step 2: Generate Commit Message
-If 'auto' or no message provided, analyze changes to generate message:
+Approval log template:
 
-```markdown
-## Commit Analysis
+```
+## Commit Verification
 
-### Files Changed
-- src/auth/login.ts (modified)
-- src/auth/types.ts (new)
-- tests/auth.test.ts (modified)
+Changes: <short summary>
+Proposed message: <message>
 
-### Change Summary
-- Added login functionality
-- Created type definitions for auth
-- Updated tests for new features
+- Claude: PASS/FAIL (notes)
+- Codex: PASS/FAIL (notes)
+- Gemini: PASS/FAIL (notes)
 
-### Suggested Commit Message
-feat(auth): add login functionality with JWT support
-
-- Implement login endpoint with email/password
-- Add JWT token generation and validation
-- Create auth type definitions
-- Update tests for authentication flow
+Decision: PROCEED | HOLD
 ```
 
-### Step 3: Format Message
-Use conventional commit format:
+## Templates (Commit and PR)
+
+Commit message template:
 
 ```
 <type>(<scope>): <subject>
 
-<body>
+<context>
+- <bullet>
+- <bullet>
 
-<footer>
+Refs: <ticket-id>
+BREAKING CHANGE: <details> (optional)
 ```
 
-Types:
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation
-- `style`: Formatting
-- `refactor`: Code restructuring
-- `perf`: Performance improvement
-- `test`: Adding tests
-- `chore`: Maintenance
+PR description template:
 
-### Step 4: Validate Commit
-Check for:
-- [ ] No sensitive files (.env, credentials)
-- [ ] No large binary files
-- [ ] No debug code (console.log, debugger)
-- [ ] Linting passes
-- [ ] Tests pass (optional)
+```
+## Summary
+<short summary>
 
-### Step 5: Create Commit
-```bash
-git commit -m "$(cat <<'EOF'
-feat(auth): add login functionality with JWT support
+## Changes
+- <change 1>
+- <change 2>
 
-- Implement login endpoint with email/password
-- Add JWT token generation and validation
-- Create auth type definitions
-- Update tests for authentication flow
+## Testing
+- [ ] unit
+- [ ] integration
+- [ ] manual
+- [ ] not run (explain)
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+## Risk and Rollback
+- Risk: Low | Medium | High
+- Rollback: git revert <sha>
 
-Co-Authored-By: Claude <noreply@anthropic.com>
-EOF
-)"
+## Verification (Two-Key Rule)
+- Scope:
+- Change summary:
+- Expected behavior:
+- Repro steps:
+- Evidence:
+- Risk notes:
+
+## Checklist
+- [ ] self-review complete
+- [ ] docs updated (if needed)
+- [ ] tests pass
 ```
 
-## Tri-Agent Approval Mode
-When enabled, request approval from all three agents:
+## Error Handling and Recovery
 
-```markdown
-## Commit Review Request
+- No staged changes: stage files (`git add ...`) and re-run.
+- Hook failures: fix issues; do not bypass with `--no-verify` unless explicitly approved.
+- Bad commit message: `git commit --amend` and re-verify if required.
+- Incorrect changes: `git revert <sha>`; do not use `git reset --hard`.
+- Verification FAIL: fix issues, re-run verification, and only then commit.
 
-### Changes
-[Summary of changes]
+## Examples
 
-### Commit Message
-[Proposed message]
-
----
-
-### Agent Reviews
-
-**Claude Code (Sonnet):** ✅ APPROVE
-- Code quality verified
-- Tests passing
-- No security concerns
-
-**Codex (GPT-5.1):** ✅ APPROVE
-- Implementation correct
-- Follows best practices
-
-**Gemini (2.5 Pro):** ✅ APPROVE
-- Logic verified
-- Documentation adequate
-
----
-
-**Consensus:** 3/3 APPROVED - Proceeding with commit
 ```
-
-## Example Usage
+/git/commit auto
+/git/commit "fix(auth): handle token refresh"
+/git/commit --tri-agent
 ```
-/commit                          # Auto-generate message
-/commit fix: resolve login bug   # Use provided message
-/commit --tri-agent              # Require tri-agent approval
-```
-
-## Safety Checks
-
-### Pre-Commit Validation
-- No secrets in staged files
-- No TODO/FIXME in production code
-- File sizes within limits
-- No merge conflict markers
-
-### Abort Conditions
-- Sensitive data detected
-- Tests failing
-- Lint errors present

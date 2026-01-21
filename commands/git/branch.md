@@ -1,152 +1,158 @@
-# Create Branch
+---
+name: git:branch
+scope: command
+version: 2.0.0
+summary: Create and manage branches with naming conventions, safety gates, and optional worktrees.
+args:
+  - name: name
+    type: string
+    required: false
+    description: Branch type/name or short description.
+  - name: base
+    type: string
+    required: false
+    default: main
+    description: Base branch to branch from.
+  - name: worktree
+    type: string
+    required: false
+    description: Optional path to create a worktree for the branch.
+  - name: push
+    type: boolean
+    required: false
+    default: false
+    description: Push and set upstream after creation.
+  - name: dry-run
+    type: boolean
+    required: false
+    default: false
+    description: Print intended actions without executing.
+---
 
-Create a feature branch with proper naming conventions and setup.
+# /git/branch
 
-## Arguments
-- `$ARGUMENTS` - Branch description or type/name
+Create and manage branches using naming conventions, safety checks, and optional worktrees.
+
+## Usage
+
+/git/branch [name] [--base main] [--worktree path] [--push] [--dry-run]
+
+## Git Safety Protocols (from CLAUDE.md)
+
+- Git operations require manual approval; YOLO mode is not allowed for git operations.
+- Prefer `git revert` over `git reset --hard` for rollback.
+- Rollback after 3 verification FAILs or a critical error, then re-run verification and require a new plan before retry.
+- Use git worktrees for isolation when running parallel tasks.
+- Check `git status` and warn on uncommitted tracked changes before any operation.
 
 ## Process
 
-### Step 1: Determine Branch Type
-Parse arguments to identify branch type:
-- `feat/` or `feature/` - New feature
-- `fix/` or `bugfix/` - Bug fix
-- `hotfix/` - Production hotfix
-- `refactor/` - Code refactoring
-- `docs/` - Documentation
-- `test/` - Test additions
-- `chore/` - Maintenance
-
-### Step 2: Generate Branch Name
-Format: `<type>/<ticket-id>-<short-description>`
-
-```markdown
-## Branch Naming
-
-### Input Analysis
-Description: "Add user authentication with OAuth"
-
-### Suggested Names
-1. `feat/auth-oauth-support`
-2. `feat/USER-123-oauth-authentication` (if ticket provided)
-3. `feature/add-oauth-login`
-
-### Selected: `feat/auth-oauth-support`
-```
-
-### Step 3: Ensure Clean State
-```bash
-# Check for uncommitted changes
-git status --porcelain
-
-# If changes exist, offer options:
-# 1. Stash changes
-# 2. Commit changes
-# 3. Abort branch creation
-```
-
-### Step 4: Update Base Branch
-```bash
-# Fetch latest
-git fetch origin
-
-# Ensure base is up to date
-git checkout main
-git pull origin main
-```
-
-### Step 5: Create and Checkout Branch
-```bash
-# Create new branch
-git checkout -b feat/auth-oauth-support
-
-# Push and set upstream (optional)
-git push -u origin feat/auth-oauth-support
-```
-
-### Step 6: Initialize Branch
-```markdown
-## Branch Created
-
-### Details
-- **Branch:** `feat/auth-oauth-support`
-- **Base:** `main` (at commit abc123)
-- **Created:** 2024-01-15 10:30:00
-
-### Next Steps
-1. Implement changes
-2. Commit with conventional commits
-3. Push and create PR
-
-### Useful Commands
-- View branch: `git log --oneline -10`
-- Switch back: `git checkout main`
-- Delete branch: `git branch -d feat/auth-oauth-support`
-```
+1. Parse branch type and name
+   - If a type prefix is provided, normalize it (feat, fix, hotfix, refactor, docs, test, chore).
+   - If no type is provided, infer from the description and confirm.
+2. Generate branch name
+   - Format: `<type>/<ticket-id>-<short-description>`
+   - Lowercase, hyphens only, no special characters.
+3. Validate working tree
+   - If uncommitted changes exist, offer: stash, commit, or abort.
+4. Update base branch
+   - `git fetch origin` then `git checkout <base>` and `git pull origin <base>`.
+5. Create branch
+   - `git checkout -b <branch>` (or `git worktree add <path> <branch>` if requested).
+6. Push (optional)
+   - `git push -u origin <branch>` if `--push` is set.
 
 ## Branch Naming Conventions
 
-### Pattern
+Pattern:
+
 ```
 <type>/<ticket-id>-<description>
 ```
 
-### Examples
-| Type | Example |
-|------|---------|
-| Feature | `feat/AUTH-123-oauth-login` |
-| Bug fix | `fix/BUG-456-login-timeout` |
-| Hotfix | `hotfix/critical-security-patch` |
-| Refactor | `refactor/auth-module-cleanup` |
-| Documentation | `docs/api-documentation` |
-| Tests | `test/auth-integration-tests` |
-| Chore | `chore/update-dependencies` |
+Examples:
 
-### Rules
-- Use lowercase
-- Use hyphens (not underscores)
-- Keep short but descriptive
-- Include ticket ID when available
-- No special characters
+- `feat/auth-oauth-support`
+- `fix/BUG-456-login-timeout`
+- `hotfix/critical-security-patch`
+- `docs/api-authentication`
+- `chore/update-dependencies`
 
-## Worktree Support
-For parallel development:
+## Tri-Agent Verification Integration
 
-```bash
-# Create branch with worktree
-git worktree add ../project-feat-auth feat/auth-oauth-support
+- If this branch is for non-trivial work, follow the unified tri-agent workflow before implementation.
+- Build the TODO table, assign verifiers, and obtain user approval before changes.
+- Use two-key verification (different AI) before merge or release.
 
-# List worktrees
-git worktree list
+Verification request template:
 
-# Remove worktree
-git worktree remove ../project-feat-auth
+```
+gemini -m gemini-3-pro-preview --approval-mode yolo "Verify: <desc>. Check correctness, security, edges. PASS/FAIL."
+codex exec -m gpt-5.2-codex -c 'model_reasoning_effort="xhigh"' -s workspace-write "Verify: <desc>. Check logic, completeness. PASS/FAIL."
 ```
 
-## Example Usage
+## Templates (Commit and PR)
+
+Commit message template:
+
 ```
-/branch add user authentication     # Auto-detect type
-/branch feat/oauth-support          # Explicit type
-/branch fix/login-timeout           # Bug fix branch
-/branch --worktree new-feature      # Create with worktree
-```
+<type>(<scope>): <subject>
 
-## Branch Management
+<context>
+- <bullet>
+- <bullet>
 
-### Check Branch Status
-```bash
-# Compare with main
-git log main..HEAD --oneline
-
-# Check if branch is stale
-git log -1 --format="%cr" HEAD
+Refs: <ticket-id>
+BREAKING CHANGE: <details> (optional)
 ```
 
-### Cleanup Old Branches
-```bash
-# List merged branches
-git branch --merged main
+PR description template:
 
-# Delete merged branches
-git branch -d $(git branch --merged main | grep -v main)
+```
+## Summary
+<short summary>
+
+## Changes
+- <change 1>
+- <change 2>
+
+## Testing
+- [ ] unit
+- [ ] integration
+- [ ] manual
+- [ ] not run (explain)
+
+## Risk and Rollback
+- Risk: Low | Medium | High
+- Rollback: git revert <sha>
+
+## Verification (Two-Key Rule)
+- Scope:
+- Change summary:
+- Expected behavior:
+- Repro steps:
+- Evidence:
+- Risk notes:
+
+## Checklist
+- [ ] self-review complete
+- [ ] docs updated (if needed)
+- [ ] tests pass
+```
+
+## Error Handling and Recovery
+
+- Branch already exists: switch to it (`git checkout <branch>`) or choose a new name.
+- Base update fails: resolve auth/remote issues, then retry `git fetch` and `git pull`.
+- Uncommitted changes: `git stash push -m "pre-branch"` or commit before branching.
+- Worktree add fails: ensure target path is empty, run `git worktree prune`, then retry.
+- Wrong base chosen: delete the branch and re-create from the correct base.
+
+## Examples
+
+```
+/git/branch feat/oauth-support
+/git/branch "add user authentication" --base main
+/git/branch fix/login-timeout --push
+/git/branch refactor/auth-cleanup --worktree ../auth-refactor
 ```

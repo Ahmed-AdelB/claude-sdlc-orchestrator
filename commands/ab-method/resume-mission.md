@@ -1,76 +1,80 @@
+---
+name: ab-method.resume-mission
+description: Resume an incomplete mission with context and progress tracking.
+version: 1.0.0
+integration_with_tri_agent_workflow: |
+  - Codex: rehydrate context, summarize progress, and continue implementation.
+  - Claude Code: diagnose blockers or architectural mismatches.
+  - Gemini CLI: locate relevant files in large codebases.
+templates_and_examples: |
+  - Progress summary template
+  - Mission state schema
+  - Example usage
+step_by_step_execution_protocol: |
+  1) Locate the latest incomplete mission or specified mission ID.
+  2) Load mission context, files, and test status.
+  3) Summarize progress and identify the next step.
+  4) Resume work and update mission state.
+  5) Surface blockers and request help if needed.
+---
+
 # Resume Mission
 
 Continue an incomplete mission from where it left off.
 
 ## Arguments
-- `$ARGUMENTS` - Mission ID or path to resume (optional - will find latest if not specified)
+- `$ARGUMENTS`: Mission ID or path to resume (optional; defaults to latest incomplete)
 
-## Process
+## Inputs
+- Mission plan or mission state file
+- Related files and recent diffs
+- Test output if available
 
-### Step 1: Find Mission State
-Look for mission state in:
-1. Active mission file (if ID provided)
-2. Latest incomplete mission
-3. Session memory for in-progress work
+## Outputs
+- Progress summary
+- Updated mission state
+- Next actionable steps
 
-### Step 2: Load Mission Context
-Restore the mission context:
-- Original mission objectives
-- Completed steps
-- Remaining steps
-- Current file states
-- Test status
+## Execution Protocol
+1) Identify the mission to resume and its current status.
+2) Load objectives, completed steps, and remaining steps.
+3) Summarize progress and confirm the next action.
+4) Continue implementation and update state as work completes.
+5) If blocked, surface the issue and propose resolution paths.
 
-### Step 3: Display Progress Summary
-
+## Progress Summary Template
 ```markdown
 # Resuming Mission: [Mission Title]
 
 ## Progress
-████████░░░░░░░░░░░░ 40%
+Progress: [XX%]
 
 ## Completed Steps
-✅ Step 1: Created user model
-✅ Step 2: Added database migration
+- [x] Step 1: [Completed item]
+- [x] Step 2: [Completed item]
 
 ## Current Step
-🔄 Step 3: Implementing API endpoints
-   - `/api/users` endpoint - Done
-   - `/api/auth/login` endpoint - In Progress
-   - `/api/auth/logout` endpoint - Not Started
+- [ ] Step 3: [In progress item]
+  - Subtask A: [status]
+  - Subtask B: [status]
 
 ## Remaining Steps
-⬜ Step 4: Add authentication middleware
-⬜ Step 5: Write unit tests
-⬜ Step 6: Integration testing
+- [ ] Step 4: [Remaining item]
+- [ ] Step 5: [Remaining item]
 
-## Files Modified This Session
-- `src/models/user.ts` (complete)
-- `src/routes/auth.ts` (in progress)
+## Files Touched
+- `path/to/file1`
+- `path/to/file2`
 
 ## Last Activity
-[Timestamp] - Working on login endpoint
+[Timestamp] - [Short note]
 ```
 
-### Step 4: Continue Execution
-Resume from the current step:
-- Read any partially modified files
-- Continue implementation
-- Update progress as work completes
-
-### Step 5: Handle Blockers
-If blocked by:
-- Missing dependencies → Suggest prerequisite missions
-- Unclear requirements → Ask clarifying questions
-- Technical issues → Invoke debugging agent
-
-## State Management
-
-### Mission State File Format
+## Mission State Schema (Example)
 ```json
 {
   "missionId": "MISSION-001",
-  "taskId": "TASK-20240115",
+  "taskId": "TASK-20240115-001",
   "title": "Implement authentication endpoints",
   "status": "in_progress",
   "progress": 40,
@@ -79,9 +83,8 @@ If blocked by:
   "steps": [
     {"id": 1, "title": "Create user model", "status": "completed"},
     {"id": 2, "title": "Add migration", "status": "completed"},
-    {"id": 3, "title": "Implement endpoints", "status": "in_progress", "substeps": [...]},
-    {"id": 4, "title": "Add middleware", "status": "pending"},
-    {"id": 5, "title": "Write tests", "status": "pending"}
+    {"id": 3, "title": "Implement endpoints", "status": "in_progress"},
+    {"id": 4, "title": "Add middleware", "status": "pending"}
   ],
   "filesModified": ["src/models/user.ts", "src/routes/auth.ts"],
   "context": {
@@ -92,26 +95,14 @@ If blocked by:
 }
 ```
 
-## Example Usage
+## Examples
 ```
 /resume-mission
 /resume-mission MISSION-001
 /resume-mission auth-endpoints
 ```
 
-## Recovery Scenarios
-
-### Scenario: Incomplete File Edit
-- Detect partially edited file
-- Show diff of changes made
-- Confirm continuation or rollback
-
-### Scenario: Failed Tests
-- Show which tests failed
-- Suggest fixes
-- Re-run tests after fixes
-
-### Scenario: Missing Context
-- Load relevant files
-- Prime context with project structure
-- Continue with refreshed understanding
+## Tri-Agent Workflow Integration
+- Use Claude Code when blockers require architectural reasoning.
+- Use Gemini CLI when the mission spans many modules.
+- Use Codex to continue implementation with tight scope.
