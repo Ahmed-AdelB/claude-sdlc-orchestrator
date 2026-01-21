@@ -102,6 +102,7 @@ export const verifyAccessToken = async (
 interface RefreshTokenRecord {
   id: string;
   userId: string;
+  jti: string;
   hash: string;
   expiresAt: Date;
   revokedAt: Date | null;
@@ -130,8 +131,9 @@ export const issueTokens = async (
   const refreshToken = randomBytes(64).toString("base64url");
   const refreshHash = hashToken(refreshToken);
   const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000);
+  const refreshJti = randomUUID();
 
-  await store.insert({ userId, hash: refreshHash, expiresAt });
+  await store.insert({ userId, jti: refreshJti, hash: refreshHash, expiresAt });
   return { accessToken, refreshToken };
 };
 
@@ -169,7 +171,13 @@ declare module "express-session" {
 
 export const sessionMiddleware = session({
   name: "__Host-session",
-  secret: process.env.SESSION_SECRET ?? "replace-me",
+  secret: (() => {
+    const secret = process.env.SESSION_SECRET;
+    if (!secret) {
+      throw new Error("SESSION_SECRET is required");
+    }
+    return secret;
+  })(),
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -370,11 +378,19 @@ Code example:
 ```ts
 import { Issuer, generators } from "openid-client";
 
+const requireEnv = (name: string): string => {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+};
+
 export const buildAuthUrl = async (redirectUri: string) => {
   const issuer = await Issuer.discover("https://accounts.google.com");
   const client = new issuer.Client({
-    client_id: process.env.GOOGLE_CLIENT_ID ?? "",
-    client_secret: process.env.GOOGLE_CLIENT_SECRET ?? "",
+    client_id: requireEnv("GOOGLE_CLIENT_ID"),
+    client_secret: requireEnv("GOOGLE_CLIENT_SECRET"),
     redirect_uris: [redirectUri],
     response_types: ["code"],
   });

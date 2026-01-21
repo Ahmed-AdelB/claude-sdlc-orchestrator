@@ -46,6 +46,9 @@ This skill generates production-ready web components for React, Vue, and Svelte 
 
 ## Templates and Examples
 
+### Example
+`@component react SearchBar "Accessible search input with clear button and icons"`
+
 ### 1. React (Next.js/TS)
 
 **Component (`[Name].tsx`):**

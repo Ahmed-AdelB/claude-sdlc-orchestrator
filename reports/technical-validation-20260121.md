@@ -7,11 +7,11 @@
 - Agent references validated against agent names from `agents/**/*.md` frontmatter and command agent filenames in `commands/agents/`.
 
 ## Summary
-- Commands: 164 files; 81 with valid frontmatter; 80 without frontmatter; 3 invalid frontmatter blocks.
+- Commands: 163 files; 85 with valid frontmatter; 75 without frontmatter; 3 invalid frontmatter blocks.
 - Agents: 94 files; 70 with valid frontmatter; 23 missing frontmatter; 1 invalid frontmatter blocks.
 - Skills: 13 files; 0 frontmatter errors.
 - Shell snippets: 17 syntax errors found.
-- Agent references: 12 missing `subagent_type` targets; 9 `subagent_type` mismatches; 31 command agent docs without `subagent_type`.
+- Agent references: 12 missing `subagent_type` targets; 9 `subagent_type` mismatches; 32 command agent docs without `subagent_type`.
 
 ## Findings
 
@@ -29,7 +29,7 @@ expected <block end>, but found '<scalar>'
   in "<unicode string>", line 10, column 43:
      ... ption: Sync mode to run (default: status).
                                          ^
-- 80 command files have no frontmatter (if frontmatter is required by tooling, these will be skipped).
+- 75 command files have no frontmatter (if frontmatter is required by tooling, these will be skipped).
 
 ### 2) Internal references between agents
 - `subagent_type` values not defined by any agent frontmatter:
@@ -81,6 +81,7 @@ expected <block end>, but found '<scalar>'
   - `commands/agents/general/pair-programmer.md`
   - `commands/agents/general/task-router.md`
   - `commands/agents/general/model-router.md`
+  - `commands/agents/frontend/react-expert.md`
   - `commands/agents/frontend/state-management-expert.md`
   - `commands/agents/quality/semantic-search-agent.md`
   - `commands/agents/quality/dependency-manager.md`
@@ -112,61 +113,61 @@ expected <block end>, but found '<scalar>'
   - `commands/agents/general/cascade-agent.md`: `Claude Test Agent`
 - Agent category counts in `commands/agents/index.md` do not match actual command docs:
   - Planning: index=9, actual=10
-  - Testing: index=10, actual=9
+  - Testing: index=10, actual=8
   - DevOps: index=11, actual=10
   - Cloud: index=6, actual=7
 
 ### 3) Command examples and shell snippet syntax
-- `commands/agents/ai-ml/claude-opus-max.md` (block 8, bash): /tmp/tmpwtnxdmr9.sh: line 5: syntax error near unexpected token `('
-/tmp/tmpwtnxdmr9.sh: line 5: `Predicted Cost = (Input * $0.015) + (Output * $0.075) + (Thinking * $0.075)'
+- `commands/agents/ai-ml/claude-opus-max.md` (block 8, bash): /tmp/tmpq2wuzpxc.sh: line 5: syntax error near unexpected token `('
+/tmp/tmpq2wuzpxc.sh: line 5: `Predicted Cost = (Input * $0.015) + (Output * $0.075) + (Thinking * $0.075)'
   - First line: `# Daily cap enforcement`
-- `commands/agents/devops/kubernetes-expert.md` (block 39, bash): /tmp/tmpqqm1uum6.sh: line 5: syntax error near unexpected token `newline'
-/tmp/tmpqqm1uum6.sh: line 5: `kubectl describe node <node-name>'
+- `commands/agents/devops/kubernetes-expert.md` (block 39, bash): /tmp/tmplw1bwbzp.sh: line 5: syntax error near unexpected token `newline'
+/tmp/tmplw1bwbzp.sh: line 5: `kubectl describe node <node-name>'
   - First line: `# Cluster info`
-- `commands/agents/devops/kubernetes-expert.md` (block 41, bash): /tmp/tmp0gx9sf8u.sh: line 2: syntax error near unexpected token `newline'
-/tmp/tmp0gx9sf8u.sh: line 2: `kubectl debug <pod-name> -it --image=nicolaka/netshoot --target=<container>'
+- `commands/agents/devops/kubernetes-expert.md` (block 41, bash): /tmp/tmpcw8n4d5r.sh: line 2: syntax error near unexpected token `newline'
+/tmp/tmpcw8n4d5r.sh: line 2: `kubectl debug <pod-name> -it --image=nicolaka/netshoot --target=<container>'
   - First line: `# Add debug container to running pod`
-- `commands/agents/index.md` (block 23, bash): /tmp/tmp77shqvwz.sh: line 1: syntax error near unexpected token `<'
-/tmp/tmp77shqvwz.sh: line 1: `/agents/<category>/<agent-name> <task-description>'
+- `commands/agents/index.md` (block 23, bash): /tmp/tmp_s41skt0.sh: line 1: syntax error near unexpected token `<'
+/tmp/tmp_s41skt0.sh: line 1: `/agents/<category>/<agent-name> <task-description>'
   - First line: `/agents/<category>/<agent-name> <task-description>`
-- `commands/agents/index.md` (block 27, bash): /tmp/tmpqrg71z1n.sh: line 2: syntax error near unexpected token `newline'
-/tmp/tmpqrg71z1n.sh: line 2: `/agents/ai-ml/claude-opus-max <complex-architecture-task>'
+- `commands/agents/index.md` (block 27, bash): /tmp/tmp0yoblhfn.sh: line 2: syntax error near unexpected token `newline'
+/tmp/tmp0yoblhfn.sh: line 2: `/agents/ai-ml/claude-opus-max <complex-architecture-task>'
   - First line: `# For architecture (use Opus)`
-- `commands/agents/index.md` (block 28, bash): /tmp/tmpf53si9rc.sh: line 1: syntax error near unexpected token `newline'
-/tmp/tmpf53si9rc.sh: line 1: `/agents/general/orchestrator <task>'
+- `commands/agents/index.md` (block 28, bash): /tmp/tmpzk9jk87y.sh: line 1: syntax error near unexpected token `newline'
+/tmp/tmpzk9jk87y.sh: line 1: `/agents/general/orchestrator <task>'
   - First line: `/agents/general/orchestrator <task>`
-- `commands/agents/index.md` (block 29, bash): /tmp/tmpmbr7g6qe.sh: line 1: syntax error near unexpected token `newline'
-/tmp/tmpmbr7g6qe.sh: line 1: `/agents/planning/architect <system-description>'
+- `commands/agents/index.md` (block 29, bash): /tmp/tmpk9k5k73f.sh: line 1: syntax error near unexpected token `newline'
+/tmp/tmpk9k5k73f.sh: line 1: `/agents/planning/architect <system-description>'
   - First line: `/agents/planning/architect <system-description>`
-- `commands/agents/index.md` (block 30, bash): /tmp/tmp_xa01cr0.sh: line 1: syntax error near unexpected token `newline'
-/tmp/tmp_xa01cr0.sh: line 1: `/agents/backend/nodejs-expert <node-task>'
+- `commands/agents/index.md` (block 30, bash): /tmp/tmp6weg21md.sh: line 1: syntax error near unexpected token `newline'
+/tmp/tmp6weg21md.sh: line 1: `/agents/backend/nodejs-expert <node-task>'
   - First line: `/agents/backend/nodejs-expert <node-task>`
-- `commands/agents/index.md` (block 31, bash): /tmp/tmphfzsmvm4.sh: line 1: syntax error near unexpected token `newline'
-/tmp/tmphfzsmvm4.sh: line 1: `/agents/quality/code-reviewer review <module>'
+- `commands/agents/index.md` (block 31, bash): /tmp/tmp2l85i3tj.sh: line 1: syntax error near unexpected token `newline'
+/tmp/tmp2l85i3tj.sh: line 1: `/agents/quality/code-reviewer review <module>'
   - First line: `/agents/quality/code-reviewer review <module>`
-- `commands/agents/index.md` (block 32, bash): /tmp/tmp83ag_7lz.sh: line 1: syntax error near unexpected token `newline'
-/tmp/tmp83ag_7lz.sh: line 1: `/agents/devops/ci-cd-expert design pipeline for <project>'
+- `commands/agents/index.md` (block 32, bash): /tmp/tmpezkl7fmq.sh: line 1: syntax error near unexpected token `newline'
+/tmp/tmpezkl7fmq.sh: line 1: `/agents/devops/ci-cd-expert design pipeline for <project>'
   - First line: `/agents/devops/ci-cd-expert design pipeline for <project>`
-- `commands/agents/index.md` (block 33, bash): /tmp/tmpfjit4nkr.sh: line 1: syntax error near unexpected token `newline'
-/tmp/tmpfjit4nkr.sh: line 1: `/agents/ai-ml/claude-opus-max <complex-task>'
+- `commands/agents/index.md` (block 33, bash): /tmp/tmp57vvs8bo.sh: line 1: syntax error near unexpected token `newline'
+/tmp/tmp57vvs8bo.sh: line 1: `/agents/ai-ml/claude-opus-max <complex-task>'
   - First line: `/agents/ai-ml/claude-opus-max <complex-task>`
-- `commands/agents/performance/profiling-expert.md` (block 2, bash): /tmp/tmpf6msokit.sh: line 4: syntax error near unexpected token `newline'
-/tmp/tmpf6msokit.sh: line 4: `py-spy record -o profile.svg --pid <PID>           # Attach to running process'
+- `commands/agents/performance/profiling-expert.md` (block 2, bash): /tmp/tmp_mq3qww3.sh: line 4: syntax error near unexpected token `newline'
+/tmp/tmp_mq3qww3.sh: line 4: `py-spy record -o profile.svg --pid <PID>           # Attach to running process'
   - First line: `# === PYTHON CPU PROFILING ===`
-- `commands/agents/performance/profiling-expert.md` (block 3, bash): /tmp/tmp4syukt08.sh: line 100: syntax error near unexpected token `newline'
-/tmp/tmp4syukt08.sh: line 100: `jmap -dump:format=b,file=heap.hprof <PID>'
+- `commands/agents/performance/profiling-expert.md` (block 3, bash): /tmp/tmpjn1sxnu1.sh: line 100: syntax error near unexpected token `newline'
+/tmp/tmpjn1sxnu1.sh: line 100: `jmap -dump:format=b,file=heap.hprof <PID>'
   - First line: `# === PYTHON MEMORY PROFILING ===`
-- `commands/agents/performance/profiling-expert.md` (block 4, bash): /tmp/tmp26n5fd0s.sh: line 4: syntax error near unexpected token `newline'
-/tmp/tmp26n5fd0s.sh: line 4: `py-spy record -o flamegraph.svg --pid <PID>'
+- `commands/agents/performance/profiling-expert.md` (block 4, bash): /tmp/tmpyw27uwgf.sh: line 4: syntax error near unexpected token `newline'
+/tmp/tmpyw27uwgf.sh: line 4: `py-spy record -o flamegraph.svg --pid <PID>'
   - First line: `# === GENERATING FLAME GRAPHS ===`
-- `commands/agents/security/penetration-tester.md` (block 37, bash): /tmp/tmpsg5uhz5x.sh: line 2: syntax error near unexpected token `('
-/tmp/tmpsg5uhz5x.sh: line 2: `/agents/security/penetration-tester test web app at https://staging.example.com (authorized pentest, scope: web app only)'
+- `commands/agents/security/penetration-tester.md` (block 37, bash): /tmp/tmpymqkw2tx.sh: line 2: syntax error near unexpected token `('
+/tmp/tmpymqkw2tx.sh: line 2: `/agents/security/penetration-tester test web app at https://staging.example.com (authorized pentest, scope: web app only)'
   - First line: `# Web application penetration test`
-- `plugins/marketplaces/claude-plugins-official/plugins/plugin-dev/skills/plugin-settings/SKILL.md` (block 3, bash): /tmp/tmpe37zkvn7.sh: line 28: syntax error near unexpected token `fi'
-/tmp/tmpe37zkvn7.sh: line 28: `fi'
+- `plugins/marketplaces/claude-plugins-official/plugins/plugin-dev/skills/plugin-settings/SKILL.md` (block 3, bash): /tmp/tmpi56nuf4x.sh: line 28: syntax error near unexpected token `fi'
+/tmp/tmpi56nuf4x.sh: line 28: `fi'
   - First line: `#!/bin/bash`
-- `plugins/marketplaces/claude-plugins-official/plugins/plugin-dev/skills/plugin-settings/SKILL.md` (block 19, bash): /tmp/tmp2yey4kmd.sh: line 8: syntax error near unexpected token `fi'
-/tmp/tmp2yey4kmd.sh: line 8: `fi'
+- `plugins/marketplaces/claude-plugins-official/plugins/plugin-dev/skills/plugin-settings/SKILL.md` (block 19, bash): /tmp/tmp1_oth7ah.sh: line 8: syntax error near unexpected token `fi'
+/tmp/tmp1_oth7ah.sh: line 8: `fi'
   - First line: `if [[ ! -f "$STATE_FILE" ]]; then`
 
 ### 4) Agent pattern inconsistencies
