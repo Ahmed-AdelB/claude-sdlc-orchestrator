@@ -1,7 +1,7 @@
 ---
 name: MCP Expert Agent
 description: Comprehensive Model Context Protocol specialist for server development, tool definitions, transport layers, security, testing, and Claude Code integration
-version: 2.0.0
+version: 2.1.0
 author: Ahmed Adel Bakr Alderai
 category: integration
 tags:
@@ -15,6 +15,7 @@ tags:
   - stdio
   - sse
   - websocket
+  - json-rpc
 tools:
   - Read
   - Write
@@ -91,12 +92,35 @@ Task: $ARGUMENTS
 | Server Development  | TypeScript SDK, Python SDK, async patterns            |
 | Tool Definitions    | JSON Schema, Zod/Pydantic validation, error handling  |
 | Resource Management | URI templates, MIME types, subscriptions, caching     |
+| Prompt Templates    | Parameterized prompts, argument validation, context   |
 | Transport Layers    | stdio, Server-Sent Events (SSE), WebSocket            |
 | Authentication      | API keys, OAuth, JWT, mTLS, scope-based authorization |
 | Security            | Input validation, rate limiting, sandboxing           |
 | Testing             | Unit tests, integration tests, mock clients           |
 | Deployment          | Docker, systemd, cloud functions, Claude Code config  |
 | Debugging           | MCP Inspector, logging, tracing, error diagnostics    |
+
+---
+
+## Table of Contents
+
+1. [MCP Architecture Overview](#mcp-architecture-overview)
+2. [Transport Layer Options](#transport-layer-options)
+3. [Tool Definitions and Handlers](#tool-definitions-and-handlers)
+4. [Resource Management](#resource-management)
+5. [Prompt Templates](#prompt-templates)
+6. [Authentication and Authorization](#authentication-and-authorization)
+7. [Rate Limiting](#rate-limiting)
+8. [Input Sanitization and Security](#input-sanitization-and-security)
+9. [Error Handling Patterns](#error-handling-patterns)
+10. [Testing MCP Servers](#testing-mcp-servers)
+11. [Debugging and Monitoring](#debugging-and-monitoring)
+12. [Claude Code Integration](#claude-code-integration)
+13. [Common MCP Server Patterns](#common-mcp-server-patterns)
+14. [Performance Optimization](#performance-optimization)
+15. [Deployment](#deployment)
+16. [Troubleshooting Guide](#troubleshooting-guide)
+17. [Production Checklist](#production-checklist)
 
 ---
 
@@ -161,8 +185,39 @@ Client                                              Server
    |  -------- resources/read (uri) --------------->   |
    |  <------- resource contents ------------------    |
    |                                                   |
+   |  -------- prompts/list ----------------------->   |
+   |  <------- prompts list response --------------    |
+   |                                                   |
+   |  -------- prompts/get (name, args) ----------->   |
+   |  <------- prompt messages --------------------    |
+   |                                                   |
    |  <------- notifications/resources/updated ----    |
    |                                                   |
+```
+
+### MCP Server Capabilities Declaration
+
+```typescript
+// src/capabilities.ts
+import { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
+
+export const serverCapabilities: ServerCapabilities = {
+  tools: {
+    // Server provides tools
+  },
+  resources: {
+    // Server provides resources
+    subscribe: true, // Supports resource subscriptions
+  },
+  prompts: {
+    // Server provides prompt templates
+  },
+  logging: {
+    // Server supports logging
+  },
+  // Optional: sampling capability for agentic workflows
+  // sampling: {}
+};
 ```
 
 ---
@@ -347,10 +402,9 @@ export async function startSSEServer(
 ```python
 # src/transports/sse.py
 from typing import Dict
+from datetime import datetime
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
-from mcp.server import Server
 import asyncio
 import json
 import uuid
@@ -525,8 +579,6 @@ export async function startWebSocketServer(
     });
 
     // Connect server to transport
-    // Note: This requires implementing a custom transport adapter
-    // that bridges WebSocket to the MCP SDK transport interface
     await connectServerToWebSocket(server, transport);
 
     // Send connection acknowledgment
@@ -581,6 +633,7 @@ async function connectServerToWebSocket(
 import asyncio
 import json
 from typing import Dict, Set
+from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from mcp.server import Server
 import uuid
@@ -674,6 +727,10 @@ async def process_mcp_message(connection_id: str, message: dict) -> dict | None:
             result = await handle_list_resources(connection_id)
         elif method == "resources/read":
             result = await handle_read_resource(connection_id, params)
+        elif method == "prompts/list":
+            result = await handle_list_prompts(connection_id)
+        elif method == "prompts/get":
+            result = await handle_get_prompt(connection_id, params)
         else:
             return {
                 "jsonrpc": "2.0",
@@ -705,6 +762,809 @@ async def process_mcp_message(connection_id: str, message: dict) -> dict | None:
 | Connection overhead | Process spawn   | HTTP connection | TCP + Upgrade   |
 | Scalability         | Per-process     | HTTP scaling    | WebSocket pools |
 | Best for            | Local CLI tools | Web deployments | Real-time apps  |
+
+---
+
+## Tool Definitions and Handlers
+
+### Tool Schema Structure
+
+```typescript
+// src/tools/types.ts
+import { z } from "zod";
+
+// Tool definition with Zod schema
+export interface ToolDefinition<T extends z.ZodTypeAny> {
+  name: string;
+  description: string;
+  inputSchema: T;
+  handler: (input: z.infer<T>) => Promise<ToolResult>;
+}
+
+export interface ToolResult {
+  content: Array<{
+    type: "text" | "image" | "resource";
+    text?: string;
+    data?: string;
+    mimeType?: string;
+  }>;
+  isError?: boolean;
+}
+```
+
+### Complete Tool Implementation Example
+
+```typescript
+// src/tools/database.ts
+import { z } from "zod";
+import { ToolDefinition, ToolResult } from "./types.js";
+
+// Input validation schema
+const DatabaseQuerySchema = z.object({
+  query: z
+    .string()
+    .min(1)
+    .max(10000)
+    .refine(
+      (q) => {
+        const upper = q.toUpperCase().trim();
+        return (
+          upper.startsWith("SELECT") ||
+          upper.startsWith("WITH") ||
+          upper.startsWith("EXPLAIN")
+        );
+      },
+      { message: "Only SELECT, WITH, and EXPLAIN queries are allowed" },
+    ),
+  database: z.enum(["users", "products", "orders", "analytics"]),
+  limit: z.number().int().min(1).max(1000).default(100),
+  timeout: z.number().int().min(1000).max(30000).default(5000),
+});
+
+type DatabaseQueryInput = z.infer<typeof DatabaseQuerySchema>;
+
+// Tool definition
+export const databaseQueryTool: ToolDefinition<typeof DatabaseQuerySchema> = {
+  name: "database_query",
+  description: `Execute a read-only SQL query against the specified database.
+
+Supported databases: users, products, orders, analytics
+Only SELECT, WITH, and EXPLAIN queries are permitted.
+Results are limited to prevent excessive data transfer.`,
+  inputSchema: DatabaseQuerySchema,
+  handler: async (input: DatabaseQueryInput): Promise<ToolResult> => {
+    try {
+      // Validate and sanitize input
+      const validated = DatabaseQuerySchema.parse(input);
+
+      // Execute query with timeout
+      const results = await executeQueryWithTimeout(
+        validated.database,
+        validated.query,
+        validated.limit,
+        validated.timeout,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                status: "success",
+                database: validated.database,
+                rowCount: results.rows.length,
+                columns: results.columns,
+                rows: results.rows,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                status: "error",
+                message:
+                  error instanceof Error ? error.message : "Unknown error",
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+};
+
+// Convert Zod schema to JSON Schema for MCP
+export function zodToJsonSchema(schema: z.ZodTypeAny): object {
+  // Use zod-to-json-schema library or manual conversion
+  return {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "SQL query to execute (SELECT/WITH/EXPLAIN only)",
+        minLength: 1,
+        maxLength: 10000,
+      },
+      database: {
+        type: "string",
+        enum: ["users", "products", "orders", "analytics"],
+        description: "Target database",
+      },
+      limit: {
+        type: "integer",
+        minimum: 1,
+        maximum: 1000,
+        default: 100,
+        description: "Maximum rows to return",
+      },
+      timeout: {
+        type: "integer",
+        minimum: 1000,
+        maximum: 30000,
+        default: 5000,
+        description: "Query timeout in milliseconds",
+      },
+    },
+    required: ["query", "database"],
+  };
+}
+```
+
+### Tool Registry Pattern
+
+```typescript
+// src/tools/registry.ts
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+
+interface RegisteredTool {
+  name: string;
+  description: string;
+  inputSchema: object;
+  handler: (args: unknown) => Promise<unknown>;
+}
+
+export class ToolRegistry {
+  private tools: Map<string, RegisteredTool> = new Map();
+
+  register(tool: RegisteredTool): void {
+    if (this.tools.has(tool.name)) {
+      throw new Error(`Tool already registered: ${tool.name}`);
+    }
+    this.tools.set(tool.name, tool);
+  }
+
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
+  get(name: string): RegisteredTool | undefined {
+    return this.tools.get(name);
+  }
+
+  list(): RegisteredTool[] {
+    return Array.from(this.tools.values());
+  }
+
+  attachToServer(server: Server): void {
+    // Handle tools/list
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: this.list().map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      })),
+    }));
+
+    // Handle tools/call
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const tool = this.get(request.params.name);
+
+      if (!tool) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Unknown tool: ${request.params.name}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await tool.handler(request.params.arguments);
+        return result;
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Tool error: ${error instanceof Error ? error.message : "Unknown error"}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    });
+  }
+}
+```
+
+---
+
+## Resource Management
+
+### Resource Definition
+
+```typescript
+// src/resources/types.ts
+export interface Resource {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface ResourceContent {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string; // base64 encoded
+}
+
+export interface ResourceTemplate {
+  uriTemplate: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+```
+
+### Resource Provider Implementation
+
+```typescript
+// src/resources/provider.ts
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import {
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  SubscribeRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { Resource, ResourceContent, ResourceTemplate } from "./types.js";
+
+export class ResourceProvider {
+  private resources: Map<string, Resource> = new Map();
+  private templates: Map<string, ResourceTemplate> = new Map();
+  private handlers: Map<string, (uri: string) => Promise<ResourceContent>> =
+    new Map();
+  private subscriptions: Map<string, Set<string>> = new Map(); // uri -> subscriber IDs
+  private server?: Server;
+
+  registerResource(resource: Resource): void {
+    this.resources.set(resource.uri, resource);
+  }
+
+  registerTemplate(template: ResourceTemplate): void {
+    this.templates.set(template.uriTemplate, template);
+  }
+
+  registerHandler(
+    protocol: string,
+    handler: (uri: string) => Promise<ResourceContent>,
+  ): void {
+    this.handlers.set(protocol, handler);
+  }
+
+  attachToServer(server: Server): void {
+    this.server = server;
+
+    // List resources
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: Array.from(this.resources.values()),
+    }));
+
+    // List resource templates
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+      resourceTemplates: Array.from(this.templates.values()),
+    }));
+
+    // Read resource
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const uri = request.params.uri;
+      const protocol = uri.split("://")[0];
+      const handler = this.handlers.get(protocol);
+
+      if (!handler) {
+        throw new Error(`No handler for protocol: ${protocol}`);
+      }
+
+      const content = await handler(uri);
+      return { contents: [content] };
+    });
+
+    // Subscribe to resource changes
+    server.setRequestHandler(SubscribeRequestSchema, async (request) => {
+      const uri = request.params.uri;
+
+      if (!this.subscriptions.has(uri)) {
+        this.subscriptions.set(uri, new Set());
+      }
+
+      // In a real implementation, you would track the client ID
+      this.subscriptions.get(uri)!.add("default-client");
+
+      return {};
+    });
+  }
+
+  // Notify subscribers of resource changes
+  async notifyResourceUpdated(uri: string): Promise<void> {
+    if (!this.server) return;
+
+    const subscribers = this.subscriptions.get(uri);
+    if (!subscribers || subscribers.size === 0) return;
+
+    await this.server.notification({
+      method: "notifications/resources/updated",
+      params: { uri },
+    });
+  }
+
+  // Notify subscribers that resource list changed
+  async notifyResourceListChanged(): Promise<void> {
+    if (!this.server) return;
+
+    await this.server.notification({
+      method: "notifications/resources/list_changed",
+    });
+  }
+}
+```
+
+### File System Resource Handler
+
+```typescript
+// src/resources/handlers/filesystem.ts
+import fs from "fs/promises";
+import path from "path";
+import mime from "mime-types";
+import { ResourceContent } from "../types.js";
+
+const ALLOWED_BASE_PATHS = ["/home/user/projects", "/var/data", process.cwd()];
+
+export async function fileHandler(uri: string): Promise<ResourceContent> {
+  // Parse URI: file:///path/to/file.txt
+  const filePath = uri.replace("file://", "");
+
+  // Security: Validate path is within allowed directories
+  const resolvedPath = path.resolve(filePath);
+  const isAllowed = ALLOWED_BASE_PATHS.some((base) =>
+    resolvedPath.startsWith(path.resolve(base)),
+  );
+
+  if (!isAllowed) {
+    throw new Error(`Access denied: ${filePath}`);
+  }
+
+  // Check file exists
+  try {
+    await fs.access(resolvedPath);
+  } catch {
+    throw new Error(`File not found: ${filePath}`);
+  }
+
+  // Get file stats
+  const stats = await fs.stat(resolvedPath);
+
+  // Size limit (10MB)
+  if (stats.size > 10 * 1024 * 1024) {
+    throw new Error("File too large (max 10MB)");
+  }
+
+  // Determine MIME type
+  const mimeType = mime.lookup(resolvedPath) || "application/octet-stream";
+
+  // Read file
+  if (mimeType.startsWith("text/") || mimeType === "application/json") {
+    const content = await fs.readFile(resolvedPath, "utf-8");
+    return { uri, mimeType, text: content };
+  } else {
+    const content = await fs.readFile(resolvedPath);
+    return { uri, mimeType, blob: content.toString("base64") };
+  }
+}
+```
+
+### Database Schema Resource Handler
+
+```typescript
+// src/resources/handlers/database.ts
+import { ResourceContent } from "../types.js";
+
+export async function dbSchemaHandler(uri: string): Promise<ResourceContent> {
+  // Parse URI: db://database/table
+  const match = uri.match(/^db:\/\/([^/]+)(?:\/(.+))?$/);
+
+  if (!match) {
+    throw new Error(`Invalid database URI: ${uri}`);
+  }
+
+  const [, database, table] = match;
+
+  if (table) {
+    // Get specific table schema
+    const schema = await getTableSchema(database, table);
+    return {
+      uri,
+      mimeType: "application/json",
+      text: JSON.stringify(schema, null, 2),
+    };
+  } else {
+    // Get all tables in database
+    const tables = await getDatabaseTables(database);
+    return {
+      uri,
+      mimeType: "application/json",
+      text: JSON.stringify({ database, tables }, null, 2),
+    };
+  }
+}
+
+async function getTableSchema(
+  database: string,
+  table: string,
+): Promise<object> {
+  // Implementation depends on your database
+  return {
+    table,
+    columns: [
+      { name: "id", type: "INTEGER", primaryKey: true },
+      { name: "name", type: "VARCHAR(255)", nullable: false },
+      { name: "created_at", type: "TIMESTAMP", default: "CURRENT_TIMESTAMP" },
+    ],
+  };
+}
+
+async function getDatabaseTables(database: string): Promise<string[]> {
+  // Implementation depends on your database
+  return ["users", "orders", "products"];
+}
+```
+
+---
+
+## Prompt Templates
+
+Prompts allow servers to define reusable, parameterized prompt templates that clients can use.
+
+### Prompt Definition Types
+
+```typescript
+// src/prompts/types.ts
+export interface PromptArgument {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface Prompt {
+  name: string;
+  description?: string;
+  arguments?: PromptArgument[];
+}
+
+export interface PromptMessage {
+  role: "user" | "assistant";
+  content: {
+    type: "text" | "image" | "resource";
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    resource?: {
+      uri: string;
+      text?: string;
+      blob?: string;
+    };
+  };
+}
+
+export interface GetPromptResult {
+  description?: string;
+  messages: PromptMessage[];
+}
+```
+
+### Prompt Provider Implementation
+
+```typescript
+// src/prompts/provider.ts
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import {
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { Prompt, GetPromptResult } from "./types.js";
+
+type PromptHandler = (args: Record<string, string>) => Promise<GetPromptResult>;
+
+export class PromptProvider {
+  private prompts: Map<string, Prompt> = new Map();
+  private handlers: Map<string, PromptHandler> = new Map();
+
+  registerPrompt(prompt: Prompt, handler: PromptHandler): void {
+    this.prompts.set(prompt.name, prompt);
+    this.handlers.set(prompt.name, handler);
+  }
+
+  attachToServer(server: Server): void {
+    // List prompts
+    server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+      prompts: Array.from(this.prompts.values()),
+    }));
+
+    // Get prompt
+    server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      const { name, arguments: args = {} } = request.params;
+
+      const handler = this.handlers.get(name);
+      if (!handler) {
+        throw new Error(`Unknown prompt: ${name}`);
+      }
+
+      const prompt = this.prompts.get(name)!;
+
+      // Validate required arguments
+      for (const arg of prompt.arguments || []) {
+        if (arg.required && !(arg.name in args)) {
+          throw new Error(`Missing required argument: ${arg.name}`);
+        }
+      }
+
+      return handler(args);
+    });
+  }
+}
+```
+
+### Code Review Prompt Example
+
+```typescript
+// src/prompts/templates/code-review.ts
+import { Prompt, GetPromptResult, PromptMessage } from "../types.js";
+
+export const codeReviewPrompt: Prompt = {
+  name: "code_review",
+  description: "Generate a comprehensive code review for the provided code",
+  arguments: [
+    {
+      name: "code",
+      description: "The code to review",
+      required: true,
+    },
+    {
+      name: "language",
+      description: "Programming language of the code",
+      required: true,
+    },
+    {
+      name: "focus",
+      description:
+        "Areas to focus on: security, performance, readability, or all",
+      required: false,
+    },
+  ],
+};
+
+export async function codeReviewHandler(
+  args: Record<string, string>,
+): Promise<GetPromptResult> {
+  const { code, language, focus = "all" } = args;
+
+  const focusAreas =
+    focus === "all"
+      ? [
+          "security vulnerabilities",
+          "performance issues",
+          "code readability",
+          "best practices",
+          "potential bugs",
+        ]
+      : [focus];
+
+  const messages: PromptMessage[] = [
+    {
+      role: "user",
+      content: {
+        type: "text",
+        text: `Please review the following ${language} code, focusing on: ${focusAreas.join(", ")}.
+
+Provide a detailed analysis with:
+1. Summary of findings
+2. Critical issues (if any)
+3. Recommendations for improvement
+4. Code snippets showing suggested changes
+
+Code to review:
+\`\`\`${language}
+${code}
+\`\`\``,
+      },
+    },
+  ];
+
+  return {
+    description: `Code review for ${language} code focusing on ${focus}`,
+    messages,
+  };
+}
+```
+
+### SQL Query Builder Prompt
+
+```typescript
+// src/prompts/templates/sql-builder.ts
+import { Prompt, GetPromptResult } from "../types.js";
+
+export const sqlBuilderPrompt: Prompt = {
+  name: "sql_query_builder",
+  description:
+    "Generate SQL queries from natural language descriptions with schema context",
+  arguments: [
+    {
+      name: "description",
+      description: "Natural language description of the desired query",
+      required: true,
+    },
+    {
+      name: "database",
+      description: "Target database name",
+      required: true,
+    },
+    {
+      name: "dialect",
+      description: "SQL dialect: postgres, mysql, sqlite",
+      required: false,
+    },
+  ],
+};
+
+export async function sqlBuilderHandler(
+  args: Record<string, string>,
+): Promise<GetPromptResult> {
+  const { description, database, dialect = "postgres" } = args;
+
+  // In a real implementation, you would fetch the actual schema
+  const schema = await fetchDatabaseSchema(database);
+
+  return {
+    description: `SQL query builder for ${database}`,
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Generate a ${dialect.toUpperCase()} query for the following request:
+
+"${description}"
+
+Database schema:
+${JSON.stringify(schema, null, 2)}
+
+Requirements:
+1. Use proper ${dialect} syntax
+2. Include comments explaining the query
+3. Consider performance implications
+4. Handle NULL values appropriately
+5. Use parameterized queries if user input is involved
+
+Provide the query along with any important notes about its behavior.`,
+        },
+      },
+    ],
+  };
+}
+
+async function fetchDatabaseSchema(database: string): Promise<object> {
+  // Fetch actual schema from your database
+  return {
+    tables: {
+      users: {
+        columns: ["id", "email", "name", "created_at"],
+        primaryKey: "id",
+      },
+      orders: {
+        columns: ["id", "user_id", "total", "status", "created_at"],
+        primaryKey: "id",
+        foreignKeys: { user_id: "users.id" },
+      },
+    },
+  };
+}
+```
+
+### Git Commit Message Prompt
+
+```typescript
+// src/prompts/templates/git-commit.ts
+import { Prompt, GetPromptResult } from "../types.js";
+
+export const gitCommitPrompt: Prompt = {
+  name: "git_commit_message",
+  description: "Generate a conventional commit message from a diff",
+  arguments: [
+    {
+      name: "diff",
+      description: "Git diff output",
+      required: true,
+    },
+    {
+      name: "type",
+      description: "Commit type: feat, fix, docs, style, refactor, test, chore",
+      required: false,
+    },
+  ],
+};
+
+export async function gitCommitHandler(
+  args: Record<string, string>,
+): Promise<GetPromptResult> {
+  const { diff, type } = args;
+
+  const typeInstruction = type
+    ? `The commit type should be: ${type}`
+    : "Determine the appropriate commit type from: feat, fix, docs, style, refactor, test, chore";
+
+  return {
+    description: "Generate conventional commit message",
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Generate a conventional commit message for the following changes.
+
+${typeInstruction}
+
+Format:
+type(scope): subject
+
+body (optional - explain what and why, not how)
+
+Rules:
+- Subject line max 72 characters
+- Use imperative mood ("add" not "added")
+- Don't end subject with period
+- Body wrapped at 72 characters
+
+Diff:
+\`\`\`diff
+${diff}
+\`\`\`
+
+Provide only the commit message, no additional commentary.`,
+        },
+      },
+    ],
+  };
+}
+```
 
 ---
 
@@ -801,7 +1661,6 @@ declare global {
 ```typescript
 // src/auth/oauth.ts
 import { OAuth2Client } from "google-auth-library";
-import jwt from "jsonwebtoken";
 
 interface OAuthConfig {
   clientId: string;
@@ -880,6 +1739,7 @@ export class OAuthAuthenticator {
 ```typescript
 // src/auth/jwt.ts
 import jwt, { JwtPayload } from "jsonwebtoken";
+import crypto from "crypto";
 
 interface SessionPayload extends JwtPayload {
   userId: string;
@@ -995,7 +1855,7 @@ export class Authorizer {
     return regex.test(uri);
   }
 
-  filterTools(tools: Tool[], userScopes: Scope[]): Tool[] {
+  filterTools(tools: any[], userScopes: Scope[]): any[] {
     return tools.filter((tool) => this.canAccessTool(tool.name, userScopes));
   }
 }
@@ -1032,7 +1892,7 @@ export function createMTLSServer(
 
   // Add middleware to validate client certificate
   app.use((req, res, next) => {
-    const cert = req.socket.getPeerCertificate();
+    const cert = (req.socket as any).getPeerCertificate();
 
     if (!cert || !cert.subject) {
       return res.status(401).json({
@@ -1052,7 +1912,7 @@ export function createMTLSServer(
     }
 
     // Attach cert info to request
-    req.clientCert = {
+    (req as any).clientCert = {
       cn: cert.subject.CN,
       org: cert.subject.O,
       validFrom: new Date(cert.valid_from),
@@ -1068,9 +1928,385 @@ export function createMTLSServer(
 
 ---
 
+## Rate Limiting
+
+### Token Bucket Rate Limiter
+
+```typescript
+// src/ratelimit/token-bucket.ts
+interface RateLimitConfig {
+  tokensPerInterval: number;
+  interval: number; // milliseconds
+  maxTokens: number;
+}
+
+interface TokenBucket {
+  tokens: number;
+  lastRefill: number;
+}
+
+export class RateLimiter {
+  private buckets: Map<string, TokenBucket> = new Map();
+  private config: RateLimitConfig;
+
+  constructor(config: RateLimitConfig) {
+    this.config = config;
+  }
+
+  async consume(key: string, tokens: number = 1): Promise<boolean> {
+    const bucket = this.getBucket(key);
+    this.refill(bucket);
+
+    if (bucket.tokens >= tokens) {
+      bucket.tokens -= tokens;
+      return true;
+    }
+
+    return false;
+  }
+
+  async getRemaining(key: string): Promise<number> {
+    const bucket = this.getBucket(key);
+    this.refill(bucket);
+    return Math.floor(bucket.tokens);
+  }
+
+  async getResetTime(key: string): Promise<number> {
+    const bucket = this.getBucket(key);
+    const tokensNeeded = 1 - bucket.tokens;
+    const intervalsNeeded = Math.ceil(
+      tokensNeeded / this.config.tokensPerInterval,
+    );
+    return bucket.lastRefill + intervalsNeeded * this.config.interval;
+  }
+
+  private getBucket(key: string): TokenBucket {
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      bucket = {
+        tokens: this.config.maxTokens,
+        lastRefill: Date.now(),
+      };
+      this.buckets.set(key, bucket);
+    }
+    return bucket;
+  }
+
+  private refill(bucket: TokenBucket): void {
+    const now = Date.now();
+    const elapsed = now - bucket.lastRefill;
+    const intervalsElapsed = Math.floor(elapsed / this.config.interval);
+
+    if (intervalsElapsed > 0) {
+      bucket.tokens = Math.min(
+        this.config.maxTokens,
+        bucket.tokens + intervalsElapsed * this.config.tokensPerInterval,
+      );
+      bucket.lastRefill = now;
+    }
+  }
+}
+```
+
+### Rate Limiting Middleware
+
+```typescript
+// src/ratelimit/middleware.ts
+import { Request, Response, NextFunction } from "express";
+import { RateLimiter } from "./token-bucket.js";
+
+// Different limits for different operations
+const toolRateLimiter = new RateLimiter({
+  tokensPerInterval: 10,
+  interval: 60000, // 1 minute
+  maxTokens: 100, // Allow bursts up to 100
+});
+
+const resourceRateLimiter = new RateLimiter({
+  tokensPerInterval: 50,
+  interval: 60000,
+  maxTokens: 200,
+});
+
+export function createRateLimitMiddleware(type: "tool" | "resource") {
+  const limiter = type === "tool" ? toolRateLimiter : resourceRateLimiter;
+
+  return async (req: Request, res: Response, next: NextFunction) => {
+    // Use API key or IP as the rate limit key
+    const key = req.apiKey?.name || req.ip || "anonymous";
+
+    const allowed = await limiter.consume(key);
+
+    // Add rate limit headers
+    res.setHeader("X-RateLimit-Remaining", await limiter.getRemaining(key));
+    res.setHeader("X-RateLimit-Reset", await limiter.getResetTime(key));
+
+    if (!allowed) {
+      return res.status(429).json({
+        error: "rate_limit_exceeded",
+        message: "Too many requests, please try again later",
+        retryAfter: Math.ceil(
+          ((await limiter.getResetTime(key)) - Date.now()) / 1000,
+        ),
+      });
+    }
+
+    next();
+  };
+}
+```
+
+### Redis-Based Distributed Rate Limiting
+
+```typescript
+// src/ratelimit/redis.ts
+import Redis from "ioredis";
+
+export class RedisRateLimiter {
+  private redis: Redis;
+
+  constructor(redisUrl: string) {
+    this.redis = new Redis(redisUrl);
+  }
+
+  async consume(
+    key: string,
+    limit: number,
+    windowSeconds: number,
+  ): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
+    const now = Date.now();
+    const windowKey = `ratelimit:${key}:${Math.floor(now / (windowSeconds * 1000))}`;
+
+    // Use Lua script for atomic increment
+    const script = `
+      local current = redis.call('INCR', KEYS[1])
+      if current == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+      end
+      return current
+    `;
+
+    const count = (await this.redis.eval(
+      script,
+      1,
+      windowKey,
+      windowSeconds,
+    )) as number;
+
+    const allowed = count <= limit;
+    const remaining = Math.max(0, limit - count);
+    const resetAt =
+      (Math.floor(now / (windowSeconds * 1000)) + 1) * windowSeconds * 1000;
+
+    return { allowed, remaining, resetAt };
+  }
+
+  async close(): Promise<void> {
+    await this.redis.quit();
+  }
+}
+```
+
+---
+
+## Input Sanitization and Security
+
+### Input Validation Utilities
+
+```typescript
+// src/security/validation.ts
+import { z } from "zod";
+
+// Common validation schemas
+export const SafeStringSchema = z
+  .string()
+  .max(10000)
+  .refine((s) => !s.includes("\0"), "Null bytes not allowed");
+
+export const SafePathSchema = z
+  .string()
+  .max(1000)
+  .refine((s) => !s.includes(".."), "Path traversal not allowed")
+  .refine((s) => !s.includes("\0"), "Null bytes not allowed")
+  .refine((s) => !/[<>:"|?*]/.test(s), "Invalid path characters");
+
+export const SafeSqlIdentifierSchema = z
+  .string()
+  .max(128)
+  .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, "Invalid SQL identifier");
+
+export const SafeUrlSchema = z
+  .string()
+  .url()
+  .refine(
+    (url) => {
+      const parsed = new URL(url);
+      return ["https:", "http:"].includes(parsed.protocol);
+    },
+    { message: "Only HTTP(S) URLs allowed" },
+  );
+
+// Sanitization functions
+export function sanitizeHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#x27;");
+}
+
+export function sanitizeSqlLiteral(input: string): string {
+  return input.replace(/'/g, "''");
+}
+
+export function sanitizeForShell(input: string): string {
+  return input.replace(/[;&|`$(){}[\]<>!#]/g, "");
+}
+```
+
+### SQL Injection Prevention
+
+```typescript
+// src/security/sql.ts
+const DANGEROUS_SQL_PATTERNS = [
+  /;\s*DROP/i,
+  /;\s*DELETE/i,
+  /;\s*TRUNCATE/i,
+  /;\s*UPDATE/i,
+  /;\s*INSERT/i,
+  /;\s*ALTER/i,
+  /;\s*CREATE/i,
+  /;\s*GRANT/i,
+  /;\s*REVOKE/i,
+  /UNION\s+SELECT/i,
+  /INTO\s+OUTFILE/i,
+  /INTO\s+DUMPFILE/i,
+  /LOAD_FILE/i,
+  /--\s/,
+  /\/\*.*\*\//,
+];
+
+export function validateQuery(query: string): {
+  valid: boolean;
+  reason?: string;
+} {
+  const trimmed = query.trim().toUpperCase();
+
+  // Only allow SELECT, WITH, EXPLAIN
+  if (
+    !trimmed.startsWith("SELECT") &&
+    !trimmed.startsWith("WITH") &&
+    !trimmed.startsWith("EXPLAIN")
+  ) {
+    return {
+      valid: false,
+      reason: "Only SELECT, WITH, and EXPLAIN queries allowed",
+    };
+  }
+
+  // Check for dangerous patterns
+  for (const pattern of DANGEROUS_SQL_PATTERNS) {
+    if (pattern.test(query)) {
+      return { valid: false, reason: `Dangerous pattern detected: ${pattern}` };
+    }
+  }
+
+  // Check for multiple statements
+  if ((query.match(/;/g) || []).length > 1) {
+    return { valid: false, reason: "Multiple statements not allowed" };
+  }
+
+  return { valid: true };
+}
+```
+
+### Path Traversal Prevention
+
+```typescript
+// src/security/path.ts
+import path from "path";
+
+export function isPathSafe(
+  requestedPath: string,
+  allowedBasePaths: string[],
+): boolean {
+  // Resolve the path to eliminate .. and .
+  const resolvedPath = path.resolve(requestedPath);
+
+  // Check if the resolved path is within any allowed base path
+  return allowedBasePaths.some((basePath) => {
+    const resolvedBase = path.resolve(basePath);
+    return (
+      resolvedPath.startsWith(resolvedBase + path.sep) ||
+      resolvedPath === resolvedBase
+    );
+  });
+}
+
+export function sanitizePath(inputPath: string): string {
+  return inputPath
+    .replace(/\.\./g, "") // Remove path traversal
+    .replace(/\0/g, "") // Remove null bytes
+    .replace(/[<>:"|?*]/g, "") // Remove invalid characters
+    .replace(/\/+/g, "/"); // Normalize slashes
+}
+```
+
+### Command Injection Prevention
+
+```typescript
+// src/security/command.ts
+import { spawn } from "child_process";
+
+// NEVER use shell: true with user input
+// ALWAYS use spawn with argument array
+
+export async function safeExec(
+  command: string,
+  args: string[],
+  options: { cwd?: string; timeout?: number } = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    // Validate command is in allowlist
+    const ALLOWED_COMMANDS = ["git", "ls", "cat", "head", "tail"];
+    if (!ALLOWED_COMMANDS.includes(command)) {
+      return reject(new Error(`Command not allowed: ${command}`));
+    }
+
+    // Validate arguments don't contain shell metacharacters
+    for (const arg of args) {
+      if (/[;&|`$(){}[\]<>!#]/.test(arg)) {
+        return reject(new Error(`Invalid characters in argument: ${arg}`));
+      }
+    }
+
+    const proc = spawn(command, args, {
+      cwd: options.cwd,
+      timeout: options.timeout || 30000,
+      shell: false, // CRITICAL: Never use shell
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (data) => (stdout += data));
+    proc.stderr.on("data", (data) => (stderr += data));
+
+    proc.on("close", (exitCode) => {
+      resolve({ stdout, stderr, exitCode: exitCode || 0 });
+    });
+
+    proc.on("error", reject);
+  });
+}
+```
+
+---
+
 ## Error Handling Patterns
 
-### 1. Structured Error Types
+### Structured Error Types
 
 ```typescript
 // src/errors/types.ts
@@ -1143,7 +2379,7 @@ export class TimeoutError extends MCPError {
 }
 ```
 
-### 2. Error Handler Middleware
+### Error Handler
 
 ```typescript
 // src/errors/handler.ts
@@ -1152,7 +2388,7 @@ import { MCPError, MCPErrorCode } from "./types.js";
 import { ZodError } from "zod";
 
 export function handleToolError(error: unknown): CallToolResult {
-  // Log error for debugging
+  // Log error for debugging (to stderr to not interfere with MCP protocol)
   console.error("[Tool Error]", error);
 
   // Handle known error types
@@ -1201,9 +2437,8 @@ export function handleToolError(error: unknown): CallToolResult {
     };
   }
 
-  // Handle standard errors
+  // Handle standard errors - don't expose internal details
   if (error instanceof Error) {
-    // Check for specific error types
     if (error.name === "AbortError" || error.message.includes("timeout")) {
       return {
         content: [
@@ -1213,7 +2448,7 @@ export function handleToolError(error: unknown): CallToolResult {
               {
                 error: "TimeoutError",
                 code: MCPErrorCode.TIMEOUT,
-                message: error.message,
+                message: "Operation timed out",
               },
               null,
               2,
@@ -1223,37 +2458,18 @@ export function handleToolError(error: unknown): CallToolResult {
         isError: true,
       };
     }
-
-    // Generic error - don't expose internal details
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              error: "InternalError",
-              code: MCPErrorCode.INTERNAL_ERROR,
-              message: "An internal error occurred",
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-      isError: true,
-    };
   }
 
-  // Unknown error type
+  // Generic error
   return {
     content: [
       {
         type: "text",
         text: JSON.stringify(
           {
-            error: "UnknownError",
+            error: "InternalError",
             code: MCPErrorCode.INTERNAL_ERROR,
-            message: "An unknown error occurred",
+            message: "An internal error occurred",
           },
           null,
           2,
@@ -1265,10 +2481,12 @@ export function handleToolError(error: unknown): CallToolResult {
 }
 ```
 
-### 3. Retry Logic
+### Retry Logic
 
 ```typescript
 // src/errors/retry.ts
+import { MCPErrorCode } from "./types.js";
+
 interface RetryConfig {
   maxAttempts: number;
   initialDelayMs: number;
@@ -1312,9 +2530,9 @@ export async function withRetry<T>(
         // Special handling for rate limit
         if (
           error.code === MCPErrorCode.RATE_LIMITED &&
-          error.data?.retryAfter
+          (error.data as any)?.retryAfter
         ) {
-          delay = error.data.retryAfter * 1000;
+          delay = (error.data as any).retryAfter * 1000;
         }
       }
 
@@ -1323,9 +2541,8 @@ export async function withRetry<T>(
         break;
       }
 
-      console.warn(
-        `Attempt ${attempt}/${cfg.maxAttempts} failed, retrying in ${delay}ms:`,
-        error,
+      console.error(
+        `Attempt ${attempt}/${cfg.maxAttempts} failed, retrying in ${delay}ms`,
       );
 
       // Wait before retry
@@ -1344,11 +2561,11 @@ export async function withRetry<T>(
 
 ## Testing MCP Servers
 
-### 1. Unit Tests (Vitest)
+### Unit Tests (Vitest)
 
 ```typescript
 // tests/tools.test.ts
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { handleToolCall, tools } from "../src/tools/index.js";
 
 describe("MCP Tools", () => {
@@ -1401,38 +2618,9 @@ describe("MCP Tools", () => {
 
       expect(result.isError).toBe(true);
     });
-
-    it("should validate database name", async () => {
-      const result = await handleToolCall("database_query", {
-        query: "SELECT * FROM users",
-        database: "malicious_db",
-      });
-
-      expect(result.isError).toBe(true);
-    });
-
-    it("should enforce limit constraints", async () => {
-      const result = await handleToolCall("database_query", {
-        query: "SELECT * FROM users",
-        database: "users",
-        limit: 10000, // Exceeds max of 1000
-      });
-
-      expect(result.isError).toBe(true);
-    });
   });
 
   describe("file_search", () => {
-    it("should search for files with valid pattern", async () => {
-      const result = await handleToolCall("file_search", {
-        pattern: "**/*.ts",
-        directory: "src",
-        maxResults: 10,
-      });
-
-      expect(result.isError).toBeFalsy();
-    });
-
     it("should prevent path traversal in pattern", async () => {
       const result = await handleToolCall("file_search", {
         pattern: "../../../etc/passwd",
@@ -1440,45 +2628,6 @@ describe("MCP Tools", () => {
 
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("Path traversal");
-    });
-
-    it("should prevent path traversal in directory", async () => {
-      const result = await handleToolCall("file_search", {
-        pattern: "*.txt",
-        directory: "../../../",
-      });
-
-      expect(result.isError).toBe(true);
-    });
-  });
-
-  describe("api_request", () => {
-    it("should make GET request to allowed host", async () => {
-      const result = await handleToolCall("api_request", {
-        method: "GET",
-        url: "https://api.example.com/data",
-      });
-
-      // Note: This test assumes api.example.com is in allowlist
-      expect(result.content).toBeDefined();
-    });
-
-    it("should reject disallowed hosts", async () => {
-      const result = await handleToolCall("api_request", {
-        url: "https://malicious-site.com/steal",
-      });
-
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("not in allowlist");
-    });
-
-    it("should validate HTTP method", async () => {
-      const result = await handleToolCall("api_request", {
-        method: "INVALID",
-        url: "https://api.example.com/data",
-      });
-
-      expect(result.isError).toBe(true);
     });
   });
 
@@ -1493,7 +2642,7 @@ describe("MCP Tools", () => {
 });
 ```
 
-### 2. Integration Tests
+### Integration Tests
 
 ```typescript
 // tests/integration.test.ts
@@ -1538,7 +2687,6 @@ describe("MCP Server Integration", () => {
       expect(result.tools).toBeDefined();
       expect(result.tools.length).toBeGreaterThan(0);
 
-      // Verify tool structure
       for (const tool of result.tools) {
         expect(tool.name).toBeDefined();
         expect(tool.description).toBeDefined();
@@ -1557,14 +2705,12 @@ describe("MCP Server Integration", () => {
 
       expect(result.isError).toBeFalsy();
       expect(result.content).toBeDefined();
-      expect(result.content.length).toBeGreaterThan(0);
     });
   });
 
   describe("Resource Operations", () => {
     it("should list all available resources", async () => {
       const result = await client.listResources();
-
       expect(result.resources).toBeDefined();
     });
 
@@ -1581,7 +2727,6 @@ describe("MCP Server Integration", () => {
   describe("Prompt Operations", () => {
     it("should list all available prompts", async () => {
       const result = await client.listPrompts();
-
       expect(result.prompts).toBeDefined();
     });
 
@@ -1598,33 +2743,10 @@ describe("MCP Server Integration", () => {
       expect(result.messages.length).toBeGreaterThan(0);
     });
   });
-
-  describe("Error Scenarios", () => {
-    it("should handle unknown tool gracefully", async () => {
-      const result = await client.callTool({
-        name: "nonexistent_tool",
-        arguments: {},
-      });
-
-      expect(result.isError).toBe(true);
-    });
-
-    it("should handle invalid arguments", async () => {
-      const result = await client.callTool({
-        name: "database_query",
-        arguments: {
-          // Missing required 'query' field
-          database: "users",
-        },
-      });
-
-      expect(result.isError).toBe(true);
-    });
-  });
 });
 ```
 
-### 3. Mock Client for Testing
+### Mock Client
 
 ```typescript
 // tests/mocks/client.ts
@@ -1639,7 +2761,6 @@ export class MockMCPClient extends EventEmitter {
   private toolResponses: Map<string, MockToolCallResult> = new Map();
   private resourceResponses: Map<string, unknown> = new Map();
 
-  // Configure mock responses
   mockToolResponse(toolName: string, response: MockToolCallResult): void {
     this.toolResponses.set(toolName, response);
   }
@@ -1648,7 +2769,6 @@ export class MockMCPClient extends EventEmitter {
     this.resourceResponses.set(uri, response);
   }
 
-  // MCP Client interface
   async callTool(params: {
     name: string;
     arguments: unknown;
@@ -1736,7 +2856,6 @@ const logger = pino({
   },
 });
 
-// Request logging middleware
 export function logRequest(
   method: string,
   params: unknown,
@@ -1746,13 +2865,12 @@ export function logRequest(
     event: "mcp_request",
     correlationId,
     method,
-    params: redactSensitive(params),
+    params,
   });
 }
 
 export function logResponse(
   method: string,
-  result: unknown,
   correlationId: string,
   durationMs: number,
 ): void {
@@ -1785,27 +2903,6 @@ export function logError(
   });
 }
 
-function redactSensitive(obj: unknown): unknown {
-  if (typeof obj !== "object" || obj === null) {
-    return obj;
-  }
-
-  const sensitiveKeys = /password|secret|token|key|auth/i;
-  const result: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(obj)) {
-    if (sensitiveKeys.test(key)) {
-      result[key] = "[REDACTED]";
-    } else if (typeof value === "object") {
-      result[key] = redactSensitive(value);
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return result;
-}
-
 export default logger;
 ```
 
@@ -1817,7 +2914,6 @@ import { Registry, Counter, Histogram, Gauge } from "prom-client";
 
 const register = new Registry();
 
-// Define metrics
 export const toolCallsTotal = new Counter({
   name: "mcp_tool_calls_total",
   help: "Total number of tool calls",
@@ -1833,32 +2929,16 @@ export const toolCallDuration = new Histogram({
   registers: [register],
 });
 
-export const resourceReadsTotal = new Counter({
-  name: "mcp_resource_reads_total",
-  help: "Total number of resource reads",
-  labelNames: ["protocol", "status"],
-  registers: [register],
-});
-
 export const activeConnections = new Gauge({
   name: "mcp_active_connections",
   help: "Number of active MCP connections",
   registers: [register],
 });
 
-export const errorTotal = new Counter({
-  name: "mcp_errors_total",
-  help: "Total number of errors",
-  labelNames: ["error_code", "tool_name"],
-  registers: [register],
-});
-
-// Metrics endpoint handler
 export async function metricsHandler(): Promise<string> {
   return register.metrics();
 }
 
-// Instrumentation wrapper
 export function instrumentToolCall<T>(
   toolName: string,
   operation: () => Promise<T>,
@@ -1884,27 +2964,22 @@ export function instrumentToolCall<T>(
 
 ```typescript
 // src/health.ts
-interface HealthCheck {
-  name: string;
-  status: "healthy" | "unhealthy" | "degraded";
-  latencyMs?: number;
-  message?: string;
-}
-
 interface HealthStatus {
   status: "healthy" | "unhealthy" | "degraded";
   version: string;
   uptime: number;
-  checks: HealthCheck[];
+  checks: Array<{
+    name: string;
+    status: "healthy" | "unhealthy" | "degraded";
+    latencyMs?: number;
+    message?: string;
+  }>;
   timestamp: string;
 }
 
 export async function checkHealth(): Promise<HealthStatus> {
-  const startTime = process.hrtime.bigint();
-
   const checks = await Promise.all([
     checkDatabaseConnection(),
-    checkExternalAPI(),
     checkDiskSpace(),
     checkMemory(),
   ]);
@@ -1928,90 +3003,6 @@ export async function checkHealth(): Promise<HealthStatus> {
     checks,
     timestamp: new Date().toISOString(),
   };
-}
-
-async function checkDatabaseConnection(): Promise<HealthCheck> {
-  const start = Date.now();
-  try {
-    // Perform database ping
-    // await db.query("SELECT 1");
-    return {
-      name: "database",
-      status: "healthy",
-      latencyMs: Date.now() - start,
-    };
-  } catch (error) {
-    return {
-      name: "database",
-      status: "unhealthy",
-      message: error instanceof Error ? error.message : "Unknown error",
-    };
-  }
-}
-
-async function checkExternalAPI(): Promise<HealthCheck> {
-  const start = Date.now();
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-    await fetch("https://api.example.com/health", {
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    return {
-      name: "external_api",
-      status: "healthy",
-      latencyMs: Date.now() - start,
-    };
-  } catch (error) {
-    return {
-      name: "external_api",
-      status: "degraded",
-      message: "API unreachable",
-    };
-  }
-}
-
-async function checkDiskSpace(): Promise<HealthCheck> {
-  try {
-    const { execSync } = await import("child_process");
-    const output = execSync("df -BG / | tail -1 | awk '{print $4}'").toString();
-    const freeGB = parseInt(output.replace("G", ""));
-
-    if (freeGB < 1) {
-      return { name: "disk", status: "unhealthy", message: "< 1GB free" };
-    } else if (freeGB < 5) {
-      return { name: "disk", status: "degraded", message: `${freeGB}GB free` };
-    }
-    return { name: "disk", status: "healthy" };
-  } catch {
-    return { name: "disk", status: "degraded", message: "Check failed" };
-  }
-}
-
-async function checkMemory(): Promise<HealthCheck> {
-  const used = process.memoryUsage();
-  const heapUsedMB = Math.round(used.heapUsed / 1024 / 1024);
-  const heapTotalMB = Math.round(used.heapTotal / 1024 / 1024);
-  const usagePercent = (heapUsedMB / heapTotalMB) * 100;
-
-  if (usagePercent > 90) {
-    return {
-      name: "memory",
-      status: "unhealthy",
-      message: `${usagePercent.toFixed(1)}% used`,
-    };
-  } else if (usagePercent > 75) {
-    return {
-      name: "memory",
-      status: "degraded",
-      message: `${usagePercent.toFixed(1)}% used`,
-    };
-  }
-  return { name: "memory", status: "healthy" };
 }
 ```
 
@@ -2055,36 +3046,6 @@ export function traceLog(operation: string, args: unknown): void {
     }),
   );
 }
-
-// Debug wrapper for tool handlers
-export function debugTool<T extends (...args: any[]) => Promise<any>>(
-  toolName: string,
-  handler: T,
-): T {
-  return (async (...args: Parameters<T>): Promise<ReturnType<T>> => {
-    const requestId = crypto.randomUUID();
-    const start = Date.now();
-
-    debugLog("tool", `[${requestId}] START ${toolName}`, { args });
-
-    try {
-      const result = await handler(...args);
-
-      debugLog("tool", `[${requestId}] END ${toolName}`, {
-        durationMs: Date.now() - start,
-        success: true,
-      });
-
-      return result;
-    } catch (error) {
-      debugLog("tool", `[${requestId}] ERROR ${toolName}`, {
-        durationMs: Date.now() - start,
-        error: error instanceof Error ? error.message : error,
-      });
-      throw error;
-    }
-  }) as T;
-}
 ```
 
 ### 6. Common Debug Commands
@@ -2109,9 +3070,6 @@ npx @modelcontextprotocol/inspector --validate
 # Profile memory usage
 node --inspect dist/index.js
 # Then open chrome://inspect
-
-# Check for memory leaks
-node --expose-gc dist/index.js
 ```
 
 ---
@@ -2332,6 +3290,187 @@ const apiTools: Tool[] = [
 
 ---
 
+## Performance Optimization
+
+### 1. Connection Pooling
+
+```typescript
+// src/performance/pool.ts
+import { Pool } from "generic-pool";
+
+interface Connection {
+  id: string;
+  createdAt: Date;
+  lastUsed: Date;
+}
+
+export function createConnectionPool<T>(config: {
+  create: () => Promise<T>;
+  destroy: (conn: T) => Promise<void>;
+  validate?: (conn: T) => Promise<boolean>;
+  max: number;
+  min: number;
+  idleTimeoutMs: number;
+}): Pool<T> {
+  return Pool.create({
+    create: config.create,
+    destroy: config.destroy,
+    validate: config.validate,
+    max: config.max,
+    min: config.min,
+    idleTimeoutMillis: config.idleTimeoutMs,
+    evictionRunIntervalMillis: 60000,
+  });
+}
+```
+
+### 2. Response Caching
+
+```typescript
+// src/performance/cache.ts
+interface CacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+export class LRUCache<T> {
+  private cache = new Map<string, CacheEntry<T>>();
+  private maxSize: number;
+
+  constructor(maxSize: number = 1000) {
+    this.maxSize = maxSize;
+  }
+
+  get(key: string): T | undefined {
+    const entry = this.cache.get(key);
+
+    if (!entry) return undefined;
+
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      return undefined;
+    }
+
+    // Move to end (most recently used)
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+
+    return entry.value;
+  }
+
+  set(key: string, value: T, ttlMs: number): void {
+    // Evict oldest if at capacity
+    if (this.cache.size >= this.maxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey) this.cache.delete(oldestKey);
+    }
+
+    this.cache.set(key, {
+      value,
+      expiresAt: Date.now() + ttlMs,
+    });
+  }
+
+  delete(key: string): boolean {
+    return this.cache.delete(key);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+}
+```
+
+### 3. Request Batching
+
+```typescript
+// src/performance/batch.ts
+export class RequestBatcher<TInput, TOutput> {
+  private pending: Array<{
+    input: TInput;
+    resolve: (result: TOutput) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private timer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private batchHandler: (inputs: TInput[]) => Promise<TOutput[]>,
+    private maxBatchSize: number = 100,
+    private maxWaitMs: number = 10,
+  ) {}
+
+  async add(input: TInput): Promise<TOutput> {
+    return new Promise((resolve, reject) => {
+      this.pending.push({ input, resolve, reject });
+
+      if (this.pending.length >= this.maxBatchSize) {
+        this.flush();
+      } else if (!this.timer) {
+        this.timer = setTimeout(() => this.flush(), this.maxWaitMs);
+      }
+    });
+  }
+
+  private async flush(): Promise<void> {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+
+    const batch = this.pending.splice(0, this.maxBatchSize);
+    if (batch.length === 0) return;
+
+    try {
+      const inputs = batch.map((p) => p.input);
+      const results = await this.batchHandler(inputs);
+
+      batch.forEach((p, i) => p.resolve(results[i]));
+    } catch (error) {
+      batch.forEach((p) => p.reject(error as Error));
+    }
+  }
+}
+```
+
+### 4. Streaming Responses
+
+```typescript
+// src/performance/streaming.ts
+import { Readable } from "stream";
+
+export async function* streamResults<T>(
+  generator: AsyncGenerator<T>,
+  transformFn?: (item: T) => string,
+): AsyncGenerator<string> {
+  for await (const item of generator) {
+    const output = transformFn ? transformFn(item) : JSON.stringify(item);
+    yield output + "\n";
+  }
+}
+
+// Usage in tool handler
+export async function streamingToolHandler(args: unknown): Promise<{
+  content: Array<{ type: "text"; text: string }>;
+}> {
+  const results: string[] = [];
+
+  for await (const chunk of streamResults(queryGenerator(args))) {
+    results.push(chunk);
+
+    // Yield partial results periodically
+    if (results.length % 100 === 0) {
+      // Notification of progress (if supported)
+    }
+  }
+
+  return {
+    content: [{ type: "text", text: results.join("") }],
+  };
+}
+```
+
+---
+
 ## Deployment
 
 ### 1. Docker
@@ -2382,6 +3521,177 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 ```
 
+### 3. Docker Compose for Development
+
+```yaml
+# docker-compose.yml
+version: "3.8"
+services:
+  mcp-server:
+    build: .
+    volumes:
+      - ./src:/app/src:ro
+    environment:
+      - NODE_ENV=development
+      - MCP_DEBUG=1
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/mcp
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=mcp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+
+volumes:
+  pgdata:
+  redisdata:
+```
+
+---
+
+## Troubleshooting Guide
+
+### Common Issues and Solutions
+
+| Issue                      | Symptoms                     | Solution                                                      |
+| -------------------------- | ---------------------------- | ------------------------------------------------------------- |
+| Server not starting        | Process exits immediately    | Check logs, verify dependencies, run with `MCP_DEBUG=1`       |
+| Connection refused         | Client can't connect         | Verify port, check firewall, ensure server is listening       |
+| Tool not found             | "Unknown tool" error         | Check tool registration, verify tool name spelling            |
+| Authentication failed      | 401 errors                   | Verify API key, check token expiration, validate OAuth config |
+| Rate limit exceeded        | 429 errors                   | Implement backoff, check rate limit config                    |
+| Timeout errors             | Operations taking too long   | Increase timeout, optimize queries, add caching               |
+| Memory issues              | OOM errors, slow performance | Add connection pooling, implement pagination                  |
+| JSON-RPC parse errors      | Invalid message format       | Validate JSON structure, check encoding                       |
+| Resource not found         | 404 on resource read         | Verify URI format, check resource registration                |
+| Permission denied          | 403 errors                   | Check scopes, verify authorization policy                     |
+| Database connection errors | Can't connect to DB          | Check connection string, verify network access                |
+| SSL/TLS errors             | Certificate issues           | Verify cert paths, check expiration                           |
+| Prompt template errors     | Missing arguments            | Validate required args, check argument types                  |
+| Transport connection lost  | Frequent disconnects         | Implement reconnection logic, check network stability         |
+| High latency               | Slow responses               | Enable caching, optimize handlers, add indexes                |
+
+### Debug Checklist
+
+```bash
+# 1. Enable verbose logging
+export MCP_DEBUG=1
+export MCP_TRACE=1
+export LOG_LEVEL=debug
+
+# 2. Test server manually
+echo '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | node dist/index.js
+
+# 3. Check process status
+ps aux | grep mcp
+lsof -i :3000
+
+# 4. View logs
+journalctl -u mcp-server -f
+tail -f /var/log/mcp-server.log
+
+# 5. Test with MCP Inspector
+npx @modelcontextprotocol/inspector node dist/index.js
+
+# 6. Check network connectivity
+curl -v http://localhost:3000/health
+nc -zv localhost 3000
+
+# 7. Validate configuration
+cat ~/.claude/mcp.json | jq .
+
+# 8. Check environment variables
+env | grep -E '(MCP|NODE|DATABASE|API)'
+
+# 9. Memory and CPU usage
+top -p $(pgrep -f mcp-server)
+
+# 10. Database connectivity
+psql $DATABASE_URL -c "SELECT 1"
+```
+
+### Error Code Reference
+
+| Error Code | Name               | Description                  | Recovery Action              |
+| ---------- | ------------------ | ---------------------------- | ---------------------------- |
+| -32700     | Parse Error        | Invalid JSON                 | Check message format         |
+| -32600     | Invalid Request    | Missing required fields      | Validate request structure   |
+| -32601     | Method Not Found   | Unknown method               | Check method name spelling   |
+| -32602     | Invalid Params     | Invalid arguments            | Validate against schema      |
+| -32603     | Internal Error     | Server-side error            | Check server logs            |
+| -32001     | Tool Not Found     | Unknown tool name            | Verify tool registration     |
+| -32002     | Resource Not Found | URI not registered           | Check resource URI format    |
+| -32003     | Prompt Not Found   | Unknown prompt               | Verify prompt registration   |
+| -32004     | Unauthorized       | Auth failed                  | Check credentials            |
+| -32005     | Rate Limited       | Too many requests            | Implement backoff            |
+| -32006     | Validation Error   | Input validation failed      | Check input against schema   |
+| -32007     | Timeout            | Operation timed out          | Increase timeout or optimize |
+| -32008     | Dependency Error   | External service unavailable | Retry or failover            |
+
+---
+
+## Production Checklist
+
+### Pre-Deployment
+
+- [ ] All tests passing (unit, integration, e2e)
+- [ ] Security audit completed
+- [ ] Input validation on all tools
+- [ ] Rate limiting configured
+- [ ] Authentication implemented
+- [ ] Authorization (scopes) configured
+- [ ] Error handling for all edge cases
+- [ ] Logging configured (structured, redacted)
+- [ ] Metrics endpoints working
+- [ ] Health check endpoint implemented
+- [ ] Documentation complete
+- [ ] Environment variables documented
+
+### Security
+
+- [ ] No hardcoded secrets
+- [ ] HTTPS/TLS configured
+- [ ] API keys properly stored
+- [ ] SQL injection prevention verified
+- [ ] Path traversal prevention verified
+- [ ] Command injection prevention verified
+- [ ] Rate limiting enabled
+- [ ] Input size limits configured
+- [ ] Timeout limits configured
+- [ ] Principle of least privilege applied
+
+### Operations
+
+- [ ] Container/VM properly sized
+- [ ] Auto-restart configured
+- [ ] Log rotation configured
+- [ ] Monitoring dashboards set up
+- [ ] Alerting configured
+- [ ] Backup procedures documented
+- [ ] Rollback procedure documented
+- [ ] Disaster recovery plan
+- [ ] On-call rotation established
+
+### Performance
+
+- [ ] Connection pooling enabled
+- [ ] Caching configured
+- [ ] Query optimization complete
+- [ ] Load testing completed
+- [ ] Response time within SLA
+- [ ] Memory usage acceptable
+- [ ] CPU usage acceptable
+
 ---
 
 ## Example Invocations
@@ -2407,6 +3717,15 @@ WantedBy=multi-user.target
 
 # Debug connection issues
 /agents/integration/mcp-expert debug MCP server connection problems with Claude Code
+
+# Add prompt templates
+/agents/integration/mcp-expert create code review prompt template with language parameter
+
+# Implement rate limiting
+/agents/integration/mcp-expert add Redis-based rate limiting to MCP server
+
+# Performance optimization
+/agents/integration/mcp-expert optimize MCP server for high throughput
 ```
 
 ---
@@ -2417,13 +3736,16 @@ When invoked, this agent produces:
 
 1. **MCP Server Implementation** - Complete server code (TypeScript/Python)
 2. **Tool Definitions** - JSON Schema validated tools with handlers
-3. **Resource Providers** - URI-based resource handlers
-4. **Prompt Templates** - Reusable prompt definitions
+3. **Resource Providers** - URI-based resource handlers with subscriptions
+4. **Prompt Templates** - Reusable prompt definitions with argument validation
 5. **Transport Configuration** - stdio/SSE/WebSocket setup
-6. **Authentication Module** - API key, OAuth, or JWT auth
-7. **Test Suite** - Unit and integration tests
-8. **Deployment Config** - Docker, systemd, or Claude Code config
-9. **Monitoring Setup** - Metrics, logging, and health checks
+6. **Authentication Module** - API key, OAuth, JWT, or mTLS auth
+7. **Rate Limiting** - Token bucket or Redis-based rate limiting
+8. **Security Configuration** - Input validation, sanitization, authorization
+9. **Test Suite** - Unit and integration tests with mocks
+10. **Deployment Config** - Docker, systemd, or Claude Code config
+11. **Monitoring Setup** - Metrics, logging, health checks, and debugging tools
+12. **Documentation** - API docs, troubleshooting guide, runbooks
 
 ---
 
@@ -2435,6 +3757,7 @@ When invoked, this agent produces:
 - [Official MCP Servers](https://github.com/modelcontextprotocol/servers)
 - [Claude Code MCP Integration](https://docs.anthropic.com/claude-code/mcp)
 - [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification)
+- [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
 
 ---
 
