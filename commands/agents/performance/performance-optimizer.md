@@ -1,51 +1,69 @@
 ---
 name: Performance Optimizer Agent
 description: >
-  Comprehensive performance optimization specialist for full-stack applications.
-  Expert in performance audits, Core Web Vitals optimization, backend throughput,
-  database query tuning, caching strategies, CDN configuration, asset optimization,
-  code splitting, performance monitoring, and budget enforcement. Delivers measurable
-  performance improvements with data-driven recommendations.
+  Comprehensive performance optimization specialist. Expert in performance auditing,
+  Core Web Vitals optimization, backend response time improvement, database query
+  optimization, caching strategies, CDN configuration, asset optimization, code
+  splitting, performance monitoring, and budget enforcement. Provides end-to-end
+  performance improvement from analysis to implementation.
 version: 2.0.0
 author: Ahmed Adel Bakr Alderai
 category: performance
 tools:
+  - Bash
   - Read
   - Write
-  - Bash
   - Glob
   - Grep
 capabilities:
   - performance_audit
-  - frontend_optimization
+  - core_web_vitals_optimization
   - backend_optimization
-  - database_tuning
-  - caching_strategy
+  - database_query_optimization
+  - caching_strategy_design
   - cdn_configuration
-  - asset_optimization
+  - image_asset_optimization
   - code_splitting
+  - lazy_loading
   - performance_monitoring
-  - budget_enforcement
-integrates_with:
-  - /agents/performance/profiling-expert
-  - /agents/performance/caching-expert
-  - /agents/frontend/frontend-developer
-  - /agents/database/database-architect
-  - /agents/devops/monitoring-expert
-  - /agents/performance/bundle-optimizer
+  - performance_budget_enforcement
+  - lighthouse_analysis
+  - bundle_optimization
+  - critical_rendering_path
+integrations:
+  - profiling-expert
+  - caching-expert
+  - frontend-developer
+  - database-architect
+  - devops-engineer
+languages:
+  - JavaScript
+  - TypeScript
+  - Python
+  - Go
+  - Rust
+  - Java
+frameworks:
+  - React
+  - Next.js
+  - Vue
+  - Angular
+  - Node.js
+  - Django
+  - FastAPI
+  - Express
 ---
 
 # Performance Optimizer Agent
 
-Comprehensive performance optimization specialist for full-stack applications. Expert
-in systematic performance audits, Core Web Vitals (FCP, LCP, CLS, INP), backend
-response time and throughput optimization, database query tuning, multi-layer caching
-strategies, CDN configuration, image and asset optimization, code splitting patterns,
-performance monitoring setup, and budget enforcement with CI/CD integration.
+Comprehensive performance optimization specialist providing end-to-end performance
+improvement from analysis to implementation. Covers frontend Core Web Vitals,
+backend response times, database queries, caching strategies, CDN configuration,
+asset optimization, code splitting, monitoring setup, and budget enforcement.
 
 ## Arguments
 
-- `$ARGUMENTS` - Performance optimization task, audit request, or specific optimization target
+- `$ARGUMENTS` - Performance optimization task (audit, optimization target, specific metric)
 
 ---
 
@@ -56,18 +74,18 @@ Use the Task tool with subagent_type="performance-analyst" to:
 
 1. Conduct comprehensive performance audits
 2. Optimize Core Web Vitals (FCP, LCP, CLS, INP)
-3. Improve backend response time and throughput
-4. Tune database queries and indexing
-5. Design multi-layer caching strategies
+3. Improve backend response times
+4. Optimize database queries
+5. Design and implement caching strategies
 6. Configure CDN for optimal delivery
-7. Optimize images and static assets
+7. Optimize images and assets
 8. Implement code splitting and lazy loading
-9. Set up performance monitoring and alerting
-10. Enforce performance budgets in CI/CD
+9. Set up performance monitoring
+10. Enforce performance budgets
 
 Context: $ARGUMENTS
 
-Apply the performance optimization framework appropriate to the target stack.
+Apply the appropriate optimization workflow based on the target area.
 Generate actionable recommendations with measurable impact estimates.
 ```
 
@@ -75,564 +93,983 @@ Generate actionable recommendations with measurable impact estimates.
 
 ## Performance Audit Methodology
 
-### Phase 1: Baseline Measurement
+### Phase 1: Data Collection
 
 ```bash
-# === AUTOMATED PERFORMANCE AUDIT SCRIPT ===
+# === FRONTEND PERFORMANCE AUDIT ===
 
-#!/bin/bash
-# performance-audit.sh - Comprehensive performance baseline
-set -euo pipefail
-
-TARGET_URL="${1:-https://example.com}"
-OUTPUT_DIR="./performance-audit-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$OUTPUT_DIR"
-
-echo "=== Performance Audit: $TARGET_URL ==="
-echo "Output: $OUTPUT_DIR"
-
-# 1. Lighthouse CI (Core Web Vitals)
-echo "[1/6] Running Lighthouse..."
-npx lighthouse "$TARGET_URL" \
+# Lighthouse CLI (comprehensive audit)
+npx lighthouse https://example.com \
   --output=json,html \
-  --output-path="$OUTPUT_DIR/lighthouse" \
-  --chrome-flags="--headless --no-sandbox" \
+  --output-path=./lighthouse-report \
   --preset=desktop \
-  --only-categories=performance
+  --chrome-flags="--headless"
 
-# 2. WebPageTest API (if configured)
-if [[ -n "${WPT_API_KEY:-}" ]]; then
-  echo "[2/6] Submitting to WebPageTest..."
-  curl -s "https://www.webpagetest.org/runtest.php?url=$TARGET_URL&f=json&k=$WPT_API_KEY" \
-    > "$OUTPUT_DIR/webpagetest-submit.json"
-fi
+# Mobile audit
+npx lighthouse https://example.com \
+  --output=json,html \
+  --output-path=./lighthouse-mobile \
+  --preset=mobile \
+  --chrome-flags="--headless"
 
-# 3. Response time baseline
-echo "[3/6] Measuring response times..."
-for i in {1..10}; do
-  curl -w "@curl-format.txt" -o /dev/null -s "$TARGET_URL" >> "$OUTPUT_DIR/response-times.txt"
-done
+# Web Vitals measurement script
+cat > measure-vitals.js << 'EOF'
+const { onCLS, onFCP, onLCP, onINP, onTTFB } = require('web-vitals');
 
-# 4. Resource analysis
-echo "[4/6] Analyzing resources..."
-curl -s "$TARGET_URL" | grep -oP '(src|href)="[^"]*"' | sort -u > "$OUTPUT_DIR/resources.txt"
+function sendToAnalytics(metric) {
+  console.log(JSON.stringify({
+    name: metric.name,
+    value: metric.value,
+    rating: metric.rating,
+    delta: metric.delta,
+    id: metric.id,
+    navigationType: metric.navigationType
+  }));
+}
 
-# 5. Network waterfall (using Chrome DevTools Protocol)
-echo "[5/6] Capturing network waterfall..."
-npx puppeteer-har "$TARGET_URL" > "$OUTPUT_DIR/network.har" 2>/dev/null || true
+onCLS(sendToAnalytics);
+onFCP(sendToAnalytics);
+onLCP(sendToAnalytics);
+onINP(sendToAnalytics);
+onTTFB(sendToAnalytics);
+EOF
 
-# 6. Generate summary
-echo "[6/6] Generating summary..."
-node -e "
-const fs = require('fs');
-const lighthouse = JSON.parse(fs.readFileSync('$OUTPUT_DIR/lighthouse.report.json'));
-const perf = lighthouse.categories.performance;
-console.log(JSON.stringify({
-  score: perf.score * 100,
-  fcp: lighthouse.audits['first-contentful-paint'].numericValue,
-  lcp: lighthouse.audits['largest-contentful-paint'].numericValue,
-  cls: lighthouse.audits['cumulative-layout-shift'].numericValue,
-  tbt: lighthouse.audits['total-blocking-time'].numericValue,
-  si: lighthouse.audits['speed-index'].numericValue,
-}, null, 2));
-" > "$OUTPUT_DIR/summary.json"
+# PageSpeed Insights API
+curl "https://www.googleapis.com/pagespeedonline/v5/runPagespeed?\
+url=https://example.com&\
+strategy=mobile&\
+category=performance&\
+category=accessibility&\
+key=$PAGESPEED_API_KEY" | jq '.lighthouseResult.categories'
 
-echo "=== Audit Complete ==="
-cat "$OUTPUT_DIR/summary.json"
+
+# === BACKEND PERFORMANCE AUDIT ===
+
+# Load test with k6
+cat > load-test.js << 'EOF'
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Trend, Rate } from 'k6/metrics';
+
+const responseTime = new Trend('response_time');
+const errorRate = new Rate('errors');
+
+export const options = {
+  stages: [
+    { duration: '1m', target: 10 },   // Ramp up
+    { duration: '3m', target: 50 },   // Sustained load
+    { duration: '1m', target: 100 },  // Peak load
+    { duration: '1m', target: 0 },    // Ramp down
+  ],
+  thresholds: {
+    http_req_duration: ['p(95)<500', 'p(99)<1000'],
+    errors: ['rate<0.01'],
+  },
+};
+
+export default function() {
+  const res = http.get('https://api.example.com/endpoint');
+  responseTime.add(res.timings.duration);
+  errorRate.add(res.status !== 200);
+  
+  check(res, {
+    'status is 200': (r) => r.status === 200,
+    'response time < 500ms': (r) => r.timings.duration < 500,
+  });
+  
+  sleep(1);
+}
+EOF
+
+k6 run load-test.js --out json=results.json
+
+# Autocannon for quick benchmarks
+npx autocannon -c 100 -d 30 -p 10 https://api.example.com/endpoint
+
+
+# === DATABASE PERFORMANCE AUDIT ===
+
+# PostgreSQL slow query analysis
+psql -c "
+SELECT 
+    round(total_exec_time::numeric, 2) as total_ms,
+    calls,
+    round(mean_exec_time::numeric, 2) as mean_ms,
+    round((100 * total_exec_time / sum(total_exec_time) over ())::numeric, 2) as pct,
+    substring(query, 1, 100) as query
+FROM pg_stat_statements
+WHERE total_exec_time > 0
+ORDER BY total_exec_time DESC
+LIMIT 30;
+"
+
+# Index usage analysis
+psql -c "
+SELECT 
+    schemaname, tablename, indexname,
+    idx_scan, idx_tup_read, idx_tup_fetch,
+    pg_size_pretty(pg_relation_size(indexrelid)) as size
+FROM pg_stat_user_indexes
+ORDER BY idx_scan ASC
+LIMIT 20;
+"
+
+# Table bloat check
+psql -c "
+SELECT 
+    schemaname, tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as total_size,
+    n_dead_tup,
+    n_live_tup,
+    round(100.0 * n_dead_tup / nullif(n_live_tup + n_dead_tup, 0), 2) as dead_pct
+FROM pg_stat_user_tables
+WHERE n_dead_tup > 1000
+ORDER BY n_dead_tup DESC;
+"
+
+
+# === BUNDLE ANALYSIS ===
+
+# Webpack bundle analyzer
+npx webpack-bundle-analyzer stats.json
+
+# Source map explorer
+npx source-map-explorer dist/**/*.js --html bundle-analysis.html
+
+# Next.js bundle analysis
+ANALYZE=true npm run build
+
+# Vite bundle analysis
+npx vite-bundle-visualizer
 ```
 
-### Phase 2: Analysis Framework
+### Phase 2: Baseline Establishment
 
-```markdown
-## Performance Audit Report Template
-
-**Target:** [URL/Application]
-**Date:** [YYYY-MM-DD]
-**Environment:** [Production/Staging/Development]
-**Auditor:** Ahmed Adel Bakr Alderai
+```bash
+# Create performance baseline document
+cat > performance-baseline.json << 'EOF'
+{
+  "timestamp": "$(date -Iseconds)",
+  "environment": "production",
+  "metrics": {
+    "webVitals": {
+      "LCP": { "value": null, "target": 2500, "unit": "ms" },
+      "FCP": { "value": null, "target": 1800, "unit": "ms" },
+      "CLS": { "value": null, "target": 0.1, "unit": "score" },
+      "INP": { "value": null, "target": 200, "unit": "ms" },
+      "TTFB": { "value": null, "target": 200, "unit": "ms" }
+    },
+    "backend": {
+      "p50_latency": { "value": null, "target": 100, "unit": "ms" },
+      "p95_latency": { "value": null, "target": 500, "unit": "ms" },
+      "p99_latency": { "value": null, "target": 1000, "unit": "ms" },
+      "throughput": { "value": null, "target": 1000, "unit": "rps" },
+      "error_rate": { "value": null, "target": 0.1, "unit": "%" }
+    },
+    "database": {
+      "avg_query_time": { "value": null, "target": 10, "unit": "ms" },
+      "slow_queries_pct": { "value": null, "target": 1, "unit": "%" },
+      "connection_pool_usage": { "value": null, "target": 70, "unit": "%" }
+    },
+    "bundle": {
+      "js_size": { "value": null, "target": 200, "unit": "KB" },
+      "css_size": { "value": null, "target": 50, "unit": "KB" },
+      "total_size": { "value": null, "target": 500, "unit": "KB" }
+    }
+  }
+}
+EOF
+```
 
 ---
 
-### Executive Summary
+## Core Web Vitals Optimization
 
-| Metric | Current | Target | Status |
-|--------|---------|--------|--------|
-| Performance Score | [0-100] | >= 90 | [PASS/FAIL] |
-| FCP | [Xms] | < 1.8s | [PASS/FAIL] |
-| LCP | [Xms] | < 2.5s | [PASS/FAIL] |
-| CLS | [X] | < 0.1 | [PASS/FAIL] |
-| INP | [Xms] | < 200ms | [PASS/FAIL] |
-| TTFB | [Xms] | < 200ms | [PASS/FAIL] |
+### Largest Contentful Paint (LCP) - Target: < 2.5s
 
-**Overall Assessment:** [Critical/Needs Work/Good/Excellent]
-**Estimated Improvement Potential:** [X%]
+```bash
+# === LCP OPTIMIZATION STRATEGIES ===
 
----
+# 1. Preload critical resources
+cat > preload-critical.html << 'EOF'
+<!-- Preload hero image -->
+<link rel="preload" as="image" href="/hero.webp" fetchpriority="high">
 
-### Critical Issues (P0)
+<!-- Preload critical font -->
+<link rel="preload" as="font" type="font/woff2" href="/fonts/main.woff2" crossorigin>
 
-1. **[Issue Title]**
-   - Impact: [High/Medium/Low]
-   - Affected Metric: [LCP/FCP/CLS/etc.]
-   - Current: [Value]
-   - Target: [Value]
-   - Recommendation: [Specific fix]
-   - Effort: [Hours/Days]
-   - Expected Improvement: [X% or Xms]
+<!-- Preload LCP image with fetchpriority -->
+<img src="/hero.webp" fetchpriority="high" alt="Hero" loading="eager">
+EOF
 
-### Optimization Roadmap
+# 2. Optimize server response time
+# See Backend Optimization section
 
-| Phase | Tasks | Effort | Impact | Dependencies |
-|-------|-------|--------|--------|--------------|
-| Quick Wins | [List] | < 1 day | High | None |
-| Short Term | [List] | 1-3 days | Medium-High | [Deps] |
-| Medium Term | [List] | 1-2 weeks | Medium | [Deps] |
-| Long Term | [List] | > 2 weeks | Variable | [Deps] |
+# 3. Resource hints for external origins
+cat > resource-hints.html << 'EOF'
+<!-- DNS prefetch for CDN -->
+<link rel="dns-prefetch" href="//cdn.example.com">
+
+<!-- Preconnect to critical third parties -->
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://api.example.com" crossorigin>
+
+<!-- Prefetch next page resources -->
+<link rel="prefetch" href="/next-page.js">
+EOF
+
+# 4. Image optimization for LCP element
+# See Image Optimization section
+
+# 5. Server-side rendering / Static generation
+cat > next.config.js << 'EOF'
+module.exports = {
+  // Enable static optimization
+  experimental: {
+    optimizeCss: true,
+  },
+  images: {
+    formats: ['image/avif', 'image/webp'],
+    deviceSizes: [640, 750, 828, 1080, 1200, 1920],
+  },
+};
+EOF
 ```
 
-### Phase 3: Continuous Monitoring
+### First Contentful Paint (FCP) - Target: < 1.8s
 
-```yaml
-# lighthouse-ci.yml - GitHub Actions Integration
-name: Performance Audit
+```bash
+# === FCP OPTIMIZATION STRATEGIES ===
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: '0 6 * * *'  # Daily at 6 AM
+# 1. Critical CSS extraction
+npx critical https://example.com \
+  --base dist \
+  --inline \
+  --minify \
+  --width 1300 \
+  --height 900
 
-jobs:
-  lighthouse:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Run Lighthouse CI
-        uses: treosh/lighthouse-ci-action@v10
-        with:
-          urls: |
-            https://example.com
-            https://example.com/products
-            https://example.com/checkout
-          budgetPath: ./performance-budget.json
-          uploadArtifacts: true
-          temporaryPublicStorage: true
-          
-      - name: Assert Performance Budget
-        run: |
-          npx lhci assert --config=lighthouserc.js
-```
-
----
-
-## Frontend Optimization (Core Web Vitals)
-
-### Core Web Vitals Reference
-
-| Metric | Full Name | Good | Needs Improvement | Poor | Measurement |
-|--------|-----------|------|-------------------|------|-------------|
-| **FCP** | First Contentful Paint | < 1.8s | 1.8s - 3.0s | > 3.0s | Time to first text/image |
-| **LCP** | Largest Contentful Paint | < 2.5s | 2.5s - 4.0s | > 4.0s | Time to largest element |
-| **CLS** | Cumulative Layout Shift | < 0.1 | 0.1 - 0.25 | > 0.25 | Visual stability score |
-| **INP** | Interaction to Next Paint | < 200ms | 200ms - 500ms | > 500ms | Input responsiveness |
-| **TTFB** | Time to First Byte | < 200ms | 200ms - 500ms | > 500ms | Server response time |
-| **TBT** | Total Blocking Time | < 200ms | 200ms - 600ms | > 600ms | Main thread blocking |
-
-### FCP Optimization
-
-```html
-<!-- 1. Preload critical resources -->
+# 2. Inline critical CSS
+cat > critical-css-inline.html << 'EOF'
 <head>
-  <!-- Preload critical CSS -->
-  <link rel="preload" href="/critical.css" as="style">
+  <!-- Inline critical CSS -->
+  <style>
+    /* Critical above-the-fold styles */
+    .header { display: flex; padding: 1rem; }
+    .hero { min-height: 60vh; }
+    /* ... */
+  </style>
   
-  <!-- Preload LCP image -->
-  <link rel="preload" href="/hero-image.webp" as="image" fetchpriority="high">
-  
-  <!-- Preload critical fonts -->
-  <link rel="preload" href="/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin>
-  
-  <!-- Preconnect to critical origins -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://cdn.example.com" crossorigin>
-  
-  <!-- DNS prefetch for third parties -->
-  <link rel="dns-prefetch" href="https://analytics.example.com">
+  <!-- Defer non-critical CSS -->
+  <link rel="preload" href="/styles.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link rel="stylesheet" href="/styles.css"></noscript>
 </head>
-```
+EOF
 
-```css
-/* 2. Critical CSS - Inline in <head> */
-:root {
-  --primary-color: #2563eb;
-  --text-color: #1f2937;
-}
+# 3. Remove render-blocking resources
+cat > defer-scripts.html << 'EOF'
+<!-- Defer non-critical JavaScript -->
+<script defer src="/analytics.js"></script>
+<script defer src="/chat-widget.js"></script>
 
-body {
-  margin: 0;
-  font-family: 'Inter', system-ui, sans-serif;
-  color: var(--text-color);
-  line-height: 1.5;
-}
+<!-- Async for independent scripts -->
+<script async src="/third-party.js"></script>
 
-/* Font display optimization */
-@font-face {
-  font-family: 'Inter';
-  src: url('/fonts/inter-var.woff2') format('woff2');
-  font-weight: 100 900;
-  font-display: swap; /* Prevent FOIT */
-}
-```
+<!-- Module scripts are deferred by default -->
+<script type="module" src="/app.js"></script>
+EOF
 
-### LCP Optimization
-
-```typescript
-// React/Next.js optimized hero image
-import Image from 'next/image';
-
-export function HeroSection() {
-  return (
-    <section className="hero">
-      <Image
-        src="/hero-image.webp"
-        alt="Hero"
-        width={1920}
-        height={1080}
-        priority  // Preload LCP image
-        fetchPriority="high"
-        sizes="100vw"
-        placeholder="blur"
-        blurDataURL="data:image/jpeg;base64,..."
-      />
-    </section>
-  );
-}
-```
-
-```html
-<!-- Native HTML optimized LCP image -->
-<img 
-  src="/hero-image.webp"
-  srcset="
-    /hero-image-400.webp 400w,
-    /hero-image-800.webp 800w,
-    /hero-image-1200.webp 1200w,
-    /hero-image-1920.webp 1920w
-  "
-  sizes="100vw"
-  alt="Hero"
-  width="1920"
-  height="1080"
-  fetchpriority="high"
-  decoding="async"
-  loading="eager"
->
-```
-
-### CLS Optimization
-
-```css
-/* 1. Reserve space for dynamic content */
-
-/* Images - always specify dimensions */
-img {
-  max-width: 100%;
-  height: auto;
-  aspect-ratio: attr(width) / attr(height);
-}
-
-/* Responsive images with aspect ratio */
-.image-container {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  background: #f3f4f6;
-}
-
-/* Ads and embeds - reserve space */
-.ad-slot {
-  min-height: 250px;
-  background: #f9fafb;
-}
-
-/* 2. Font loading without layout shift */
+# 4. Optimize font loading
+cat > font-optimization.css << 'EOF'
+/* Font display swap for fast initial render */
 @font-face {
   font-family: 'CustomFont';
   src: url('/fonts/custom.woff2') format('woff2');
-  font-display: optional; /* No layout shift, may not show custom font */
-  size-adjust: 100.5%; /* Adjust to match fallback */
-  ascent-override: 95%;
-  descent-override: 20%;
-  line-gap-override: 0%;
+  font-display: swap;
+  font-weight: 400;
 }
 
-/* 3. Animations that don't cause layout shift */
-/* GOOD - no layout shift */
-.expand-good {
-  animation: expandGood 0.3s ease;
+/* Subset fonts for critical characters */
+/* Use unicode-range for language-specific subsets */
+@font-face {
+  font-family: 'CustomFont';
+  src: url('/fonts/custom-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF;
+  font-display: swap;
 }
-@keyframes expandGood {
-  from { transform: scaleY(0); opacity: 0; }
-  to { transform: scaleY(1); opacity: 1; }
-}
+EOF
+
+# 5. Minimize main thread work
+# - Code split large bundles
+# - Defer heavy JavaScript
+# - Use web workers for CPU-intensive tasks
 ```
 
-### INP Optimization
+### Cumulative Layout Shift (CLS) - Target: < 0.1
 
-```typescript
-// 1. Break up long tasks
-function processLargeDataset(data: any[]) {
-  const CHUNK_SIZE = 100;
-  let index = 0;
-  
-  function processChunk() {
-    const chunk = data.slice(index, index + CHUNK_SIZE);
-    chunk.forEach(item => processItem(item));
-    
-    index += CHUNK_SIZE;
-    
-    if (index < data.length) {
-      // Yield to main thread between chunks
-      requestIdleCallback(processChunk, { timeout: 50 });
+```bash
+# === CLS OPTIMIZATION STRATEGIES ===
+
+# 1. Reserve space for dynamic content
+cat > cls-prevention.css << 'EOF'
+/* Reserve space for images */
+.image-container {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  background-color: #f0f0f0;
+}
+
+/* Reserve space for ads */
+.ad-slot {
+  min-height: 250px;
+  min-width: 300px;
+}
+
+/* Reserve space for embeds */
+.video-embed {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+}
+
+/* Prevent font swap shifts */
+.text-content {
+  font-synthesis: none;
+  font-optical-sizing: auto;
+}
+EOF
+
+# 2. Always include size attributes on images
+cat > img-sizes.html << 'EOF'
+<!-- Always specify width and height -->
+<img src="hero.webp" width="1200" height="600" alt="Hero">
+
+<!-- Or use aspect-ratio in CSS -->
+<style>
+  img { aspect-ratio: attr(width) / attr(height); }
+</style>
+EOF
+
+# 3. Avoid inserting content above existing content
+cat > cls-safe-injection.js << 'EOF'
+// BAD: Inserting at top causes shifts
+element.prepend(newContent);
+
+// GOOD: Insert at bottom or in reserved space
+element.append(newContent);
+
+// GOOD: Use CSS containment for isolated updates
+element.style.contain = 'layout';
+EOF
+
+# 4. Transform animations instead of layout properties
+cat > cls-safe-animations.css << 'EOF'
+/* BAD: Animating layout properties causes shifts */
+.animate-bad {
+  transition: height 0.3s, width 0.3s, margin 0.3s;
+}
+
+/* GOOD: Use transform for animations */
+.animate-good {
+  transition: transform 0.3s, opacity 0.3s;
+  will-change: transform;
+}
+
+/* GOOD: Scale instead of resize */
+.expand {
+  transform: scale(1.1);
+}
+EOF
+
+# 5. Detect CLS issues
+cat > detect-cls.js << 'EOF'
+// Monitor layout shifts
+new PerformanceObserver((entryList) => {
+  for (const entry of entryList.getEntries()) {
+    if (!entry.hadRecentInput) {
+      console.log('Layout shift:', {
+        value: entry.value,
+        sources: entry.sources?.map(s => ({
+          node: s.node,
+          previousRect: s.previousRect,
+          currentRect: s.currentRect
+        }))
+      });
     }
   }
-  
-  processChunk();
+}).observe({ type: 'layout-shift', buffered: true });
+EOF
+```
+
+### Interaction to Next Paint (INP) - Target: < 200ms
+
+```bash
+# === INP OPTIMIZATION STRATEGIES ===
+
+# 1. Break up long tasks
+cat > long-task-splitting.js << 'EOF'
+// BAD: Single long task
+function processAllItems(items) {
+  items.forEach(item => expensiveOperation(item));
 }
 
-// 2. Debounce expensive handlers
-function debounce<T extends (...args: any[]) => any>(
-  fn: T, 
-  delay: number
-): (...args: Parameters<T>) => void {
-  let timeoutId: ReturnType<typeof setTimeout>;
-  
-  return (...args: Parameters<T>) => {
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => fn(...args), delay);
-  };
-}
-
-const handleInput = debounce((value: string) => {
-  performSearch(value);
-}, 150);
-
-// 3. Web Workers for heavy computation
-const worker = new Worker(new URL('./worker.ts', import.meta.url));
-
-worker.postMessage({ type: 'PROCESS_DATA', data: largeDataset });
-
-worker.onmessage = (e) => {
-  if (e.data.type === 'RESULT') {
-    updateUI(e.data.result);
+// GOOD: Yield to main thread
+async function processAllItems(items) {
+  for (const item of items) {
+    expensiveOperation(item);
+    
+    // Yield every 50ms
+    if (Date.now() - lastYield > 50) {
+      await scheduler.yield(); // If available
+      // Or fallback:
+      // await new Promise(r => setTimeout(r, 0));
+      lastYield = Date.now();
+    }
   }
+}
+
+// GOOD: Use requestIdleCallback
+function processInIdle(items) {
+  const iterator = items[Symbol.iterator]();
+  
+  function processChunk(deadline) {
+    while (deadline.timeRemaining() > 5) {
+      const { value, done } = iterator.next();
+      if (done) return;
+      expensiveOperation(value);
+    }
+    requestIdleCallback(processChunk);
+  }
+  
+  requestIdleCallback(processChunk);
+}
+EOF
+
+# 2. Debounce/throttle input handlers
+cat > input-optimization.js << 'EOF'
+// Debounce search input
+const debouncedSearch = debounce((query) => {
+  performSearch(query);
+}, 300);
+
+searchInput.addEventListener('input', (e) => {
+  debouncedSearch(e.target.value);
+});
+
+// Use passive event listeners
+element.addEventListener('scroll', handler, { passive: true });
+element.addEventListener('touchstart', handler, { passive: true });
+EOF
+
+# 3. Optimize event handlers
+cat > event-optimization.js << 'EOF'
+// BAD: Heavy synchronous work in handler
+button.onclick = () => {
+  const data = heavyComputation();
+  updateUI(data);
 };
+
+// GOOD: Immediate visual feedback, defer heavy work
+button.onclick = () => {
+  // Immediate feedback
+  button.classList.add('loading');
+  
+  // Defer heavy work
+  requestAnimationFrame(() => {
+    queueMicrotask(() => {
+      const data = heavyComputation();
+      updateUI(data);
+      button.classList.remove('loading');
+    });
+  });
+};
+
+// GOOD: Use web workers for CPU-intensive tasks
+const worker = new Worker('compute-worker.js');
+button.onclick = () => {
+  button.classList.add('loading');
+  worker.postMessage({ type: 'compute', data: inputData });
+};
+worker.onmessage = (e) => {
+  updateUI(e.data);
+  button.classList.remove('loading');
+};
+EOF
+
+# 4. Reduce JavaScript execution time
+# - Code splitting
+# - Tree shaking
+# - Minification
+# - Avoid polyfills for modern browsers
+
+# 5. Monitor long tasks
+cat > monitor-long-tasks.js << 'EOF'
+new PerformanceObserver((entryList) => {
+  for (const entry of entryList.getEntries()) {
+    if (entry.duration > 50) {
+      console.warn('Long task detected:', {
+        duration: entry.duration,
+        startTime: entry.startTime,
+        attribution: entry.attribution
+      });
+    }
+  }
+}).observe({ type: 'longtask', buffered: true });
+EOF
 ```
 
 ---
 
-## Backend Optimization
+## Backend Response Time Optimization
 
-### Response Time Optimization
+### Server-Side Optimization
 
-```typescript
-// 1. Connection pooling (Node.js + PostgreSQL)
-import { Pool } from 'pg';
+```bash
+# === NODE.JS OPTIMIZATION ===
+
+# 1. Enable clustering
+cat > cluster-server.js << 'EOF'
+const cluster = require('cluster');
+const numCPUs = require('os').cpus().length;
+
+if (cluster.isPrimary) {
+  console.log(`Primary ${process.pid} starting ${numCPUs} workers`);
+  
+  for (let i = 0; i < numCPUs; i++) {
+    cluster.fork();
+  }
+  
+  cluster.on('exit', (worker, code, signal) => {
+    console.log(`Worker ${worker.process.pid} died, restarting...`);
+    cluster.fork();
+  });
+} else {
+  require('./app.js');
+}
+EOF
+
+# 2. Compression middleware
+cat > compression-config.js << 'EOF'
+const compression = require('compression');
+
+app.use(compression({
+  level: 6,
+  threshold: 1024,
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) {
+      return false;
+    }
+    return compression.filter(req, res);
+  }
+}));
+EOF
+
+# 3. Response caching
+cat > response-cache.js << 'EOF'
+const mcache = require('memory-cache');
+
+const cache = (duration) => {
+  return (req, res, next) => {
+    const key = '__express__' + req.originalUrl;
+    const cachedBody = mcache.get(key);
+    
+    if (cachedBody) {
+      res.send(cachedBody);
+      return;
+    }
+    
+    res.sendResponse = res.send;
+    res.send = (body) => {
+      mcache.put(key, body, duration * 1000);
+      res.sendResponse(body);
+    };
+    next();
+  };
+};
+
+// Cache for 5 minutes
+app.get('/api/data', cache(300), (req, res) => {
+  // expensive operation
+});
+EOF
+
+# 4. Connection pooling
+cat > pool-config.js << 'EOF'
+const { Pool } = require('pg');
 
 const pool = new Pool({
   host: process.env.DB_HOST,
+  port: 5432,
   database: process.env.DB_NAME,
-  max: 20,                    // Maximum connections in pool
-  min: 5,                     // Minimum connections
-  idleTimeoutMillis: 30000,   // Close idle connections after 30s
-  connectionTimeoutMillis: 5000,
-  maxUses: 7500,              // Close after N uses
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  max: 20,                      // Maximum connections
+  idleTimeoutMillis: 30000,     // Close idle connections after 30s
+  connectionTimeoutMillis: 2000, // Timeout after 2s
 });
 
-// 2. Query result caching
-import Redis from 'ioredis';
-
-const redis = new Redis(process.env.REDIS_URL);
-
-async function getCachedOrFetch<T>(
-  key: string,
-  fetcher: () => Promise<T>,
-  ttlSeconds: number = 300
-): Promise<T> {
-  const cached = await redis.get(key);
-  
-  if (cached) {
-    return JSON.parse(cached);
+// Reuse connections
+app.get('/api/users', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const result = await client.query('SELECT * FROM users');
+    res.json(result.rows);
+  } finally {
+    client.release();
   }
-  
-  const data = await fetcher();
-  await redis.setex(key, ttlSeconds, JSON.stringify(data));
-  
-  return data;
-}
-
-// Usage
-app.get('/api/products', async (req, res) => {
-  const products = await getCachedOrFetch(
-    `products:${req.query.category}`,
-    () => db.query('SELECT * FROM products WHERE category = $1', [req.query.category]),
-    600 // 10 minute cache
-  );
-  
-  res.json(products);
 });
+EOF
+
+
+# === PYTHON/FASTAPI OPTIMIZATION ===
+
+cat > fastapi-optimization.py << 'EOF'
+from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.redis import RedisBackend
+from redis import asyncio as aioredis
+import uvicorn
+
+app = FastAPI()
+
+# GZip compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Redis caching
+@app.on_event("startup")
+async def startup():
+    redis = aioredis.from_url("redis://localhost")
+    FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache")
+
+# Response caching decorator
+from fastapi_cache.decorator import cache
+
+@app.get("/api/data")
+@cache(expire=300)  # 5 minutes
+async def get_data():
+    # expensive operation
+    return {"data": result}
+
+# Connection pooling with async
+from databases import Database
+database = Database(DATABASE_URL, min_size=5, max_size=20)
+
+@app.on_event("startup")
+async def connect_db():
+    await database.connect()
+
+@app.on_event("shutdown")
+async def disconnect_db():
+    await database.disconnect()
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        workers=4,
+        loop="uvloop",
+        http="httptools"
+    )
+EOF
+
+
+# === GO OPTIMIZATION ===
+
+cat > go-optimization.go << 'EOF'
+package main
+
+import (
+    "net/http"
+    "time"
+    
+    "github.com/go-chi/chi/v5"
+    "github.com/go-chi/chi/v5/middleware"
+)
+
+func main() {
+    r := chi.NewRouter()
+    
+    // Compression
+    r.Use(middleware.Compress(5))
+    
+    // Timeout
+    r.Use(middleware.Timeout(30 * time.Second))
+    
+    // Rate limiting
+    r.Use(middleware.Throttle(100))
+    
+    // Profiling endpoint
+    r.Mount("/debug", middleware.Profiler())
+    
+    http.ListenAndServe(":8080", r)
+}
+EOF
 ```
 
-### Throughput Optimization
+### API Response Optimization
 
-```typescript
-// 3. Request batching and queuing
-import PQueue from 'p-queue';
+```bash
+# === RESPONSE PAYLOAD OPTIMIZATION ===
 
-const externalApiQueue = new PQueue({
-  concurrency: 10,
-  intervalCap: 100,
-  interval: 1000, // Max 100 requests per second
-});
-
-// 4. Response streaming for large datasets
-app.get('/api/export', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Transfer-Encoding', 'chunked');
+# 1. Field filtering (sparse fieldsets)
+cat > field-filtering.js << 'EOF'
+// Allow clients to request specific fields
+app.get('/api/users', (req, res) => {
+  const fields = req.query.fields?.split(',') || null;
   
-  res.write('[');
+  let users = await User.findAll();
   
-  let first = true;
-  const cursor = db.query('SELECT * FROM large_table').cursor(100);
-  
-  for await (const batch of cursor) {
-    for (const row of batch) {
-      if (!first) res.write(',');
-      first = false;
-      res.write(JSON.stringify(row));
-    }
+  if (fields) {
+    users = users.map(user => 
+      fields.reduce((obj, field) => {
+        if (user[field] !== undefined) obj[field] = user[field];
+        return obj;
+      }, {})
+    );
   }
   
-  res.write(']');
-  res.end();
+  res.json(users);
 });
+// Usage: GET /api/users?fields=id,name,email
+EOF
 
-// 5. GraphQL DataLoader for N+1 prevention
-import DataLoader from 'dataloader';
-
-const userLoader = new DataLoader(async (userIds: string[]) => {
-  const users = await db.query(
-    'SELECT * FROM users WHERE id = ANY($1)',
-    [userIds]
-  );
+# 2. Pagination
+cat > pagination.js << 'EOF'
+app.get('/api/items', async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+  const offset = (page - 1) * limit;
   
-  const userMap = new Map(users.rows.map(u => [u.id, u]));
-  return userIds.map(id => userMap.get(id) || null);
+  const [items, total] = await Promise.all([
+    Item.findAll({ limit, offset }),
+    Item.count()
+  ]);
+  
+  res.json({
+    data: items,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+      hasNext: page * limit < total,
+      hasPrev: page > 1
+    }
+  });
 });
+EOF
+
+# 3. Response compression with proper content types
+cat > compression-types.js << 'EOF'
+const compression = require('compression');
+
+app.use(compression({
+  filter: (req, res) => {
+    const type = res.getHeader('Content-Type');
+    // Compress text-based responses
+    return /json|text|javascript|css|html|xml|svg/.test(type);
+  }
+}));
+EOF
+
+# 4. ETag caching
+cat > etag-caching.js << 'EOF'
+const crypto = require('crypto');
+
+function generateETag(data) {
+  return crypto.createHash('md5').update(JSON.stringify(data)).digest('hex');
+}
+
+app.get('/api/resource/:id', async (req, res) => {
+  const data = await fetchResource(req.params.id);
+  const etag = generateETag(data);
+  
+  res.set('ETag', etag);
+  res.set('Cache-Control', 'private, max-age=0, must-revalidate');
+  
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
+  }
+  
+  res.json(data);
+});
+EOF
 ```
 
 ---
 
 ## Database Query Optimization
 
-### Query Analysis and Tuning
+### Query Analysis and Optimization
 
-```sql
--- === POSTGRESQL QUERY OPTIMIZATION ===
+```bash
+# === POSTGRESQL OPTIMIZATION ===
 
--- 1. Enable pg_stat_statements for query analysis
-CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
-
--- Find slowest queries
+# 1. Identify slow queries
+psql -c "
 SELECT 
-    round(total_exec_time::numeric, 2) AS total_ms,
+    round(total_exec_time::numeric, 2) as total_ms,
     calls,
-    round(mean_exec_time::numeric, 2) AS avg_ms,
-    round((100 * total_exec_time / sum(total_exec_time) OVER ())::numeric, 2) AS pct,
-    substring(query, 1, 100) AS query_preview
+    round(mean_exec_time::numeric, 2) as mean_ms,
+    rows,
+    round((100 * total_exec_time / sum(total_exec_time) over ())::numeric, 2) as pct,
+    substring(query, 1, 80) as query
 FROM pg_stat_statements
 ORDER BY total_exec_time DESC
 LIMIT 20;
+"
 
--- 2. EXPLAIN ANALYZE for specific queries
+# 2. Analyze query execution plan
+psql -c "
 EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT u.*, COUNT(o.id) as order_count
 FROM users u
-LEFT JOIN orders o ON o.user_id = u.id
-WHERE u.created_at > '2024-01-01'
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE u.created_at > NOW() - INTERVAL '30 days'
 GROUP BY u.id
 ORDER BY order_count DESC
-LIMIT 100;
+LIMIT 10;
+"
 
--- 3. Index optimization
--- Composite index for common query patterns
-CREATE INDEX CONCURRENTLY idx_orders_user_created 
+# 3. Create optimal indexes
+psql -c "
+-- Partial index for active users
+CREATE INDEX CONCURRENTLY idx_users_active 
+ON users (email) 
+WHERE status = 'active';
+
+-- Composite index for common queries
+CREATE INDEX CONCURRENTLY idx_orders_user_date 
 ON orders (user_id, created_at DESC);
 
--- Partial index for common filter
-CREATE INDEX CONCURRENTLY idx_orders_pending 
-ON orders (created_at) 
-WHERE status = 'pending';
-
--- Covering index to avoid heap lookup
+-- Covering index to avoid table lookups
 CREATE INDEX CONCURRENTLY idx_products_category_covering 
 ON products (category_id) 
 INCLUDE (name, price, stock);
 
--- 4. Pagination optimization
--- Cursor-based pagination (efficient)
-SELECT * FROM products 
-WHERE created_at < '2024-01-15T10:30:00Z'
-ORDER BY created_at DESC 
-LIMIT 20;
+-- Expression index for case-insensitive search
+CREATE INDEX CONCURRENTLY idx_users_email_lower 
+ON users (LOWER(email));
+"
+
+# 4. Optimize N+1 queries
+cat > n-plus-one-fix.js << 'EOF'
+// BAD: N+1 queries
+const users = await User.findAll();
+for (const user of users) {
+  user.orders = await Order.findAll({ where: { userId: user.id } });
+}
+
+// GOOD: Single query with JOIN or include
+const users = await User.findAll({
+  include: [{
+    model: Order,
+    as: 'orders',
+    where: { status: 'active' },
+    required: false
+  }]
+});
+
+// GOOD: Batch loading with DataLoader
+const orderLoader = new DataLoader(async (userIds) => {
+  const orders = await Order.findAll({
+    where: { userId: { [Op.in]: userIds } }
+  });
+  
+  const ordersByUser = userIds.map(id => 
+    orders.filter(o => o.userId === id)
+  );
+  return ordersByUser;
+});
+
+// Usage in resolver
+const user = await User.findByPk(id);
+const orders = await orderLoader.load(user.id);
+EOF
+
+# 5. Connection pool optimization
+cat > pool-tuning.sql << 'EOF'
+-- Check current connections
+SELECT count(*) FROM pg_stat_activity;
+
+-- Optimal pool size formula:
+-- connections = ((core_count * 2) + effective_spindle_count)
+-- For SSD: connections = (core_count * 2) + 1
+
+-- Set connection limits
+ALTER SYSTEM SET max_connections = 200;
+ALTER SYSTEM SET shared_buffers = '256MB';
+ALTER SYSTEM SET effective_cache_size = '1GB';
+ALTER SYSTEM SET work_mem = '16MB';
+
+-- Reload configuration
+SELECT pg_reload_conf();
+EOF
 ```
 
-### ORM Optimization
+### Query Patterns and Anti-Patterns
 
-```typescript
-// Prisma optimization patterns
-const prisma = new PrismaClient();
+```bash
+# === QUERY OPTIMIZATION PATTERNS ===
 
-// 1. Select only needed fields
-const users = await prisma.user.findMany({
-  select: {
-    id: true,
-    name: true,
-    email: true,
-  },
-});
+cat > query-patterns.sql << 'EOF'
+-- ANTI-PATTERN: SELECT * (fetches unnecessary data)
+SELECT * FROM users WHERE id = 1;
 
-// 2. Eager loading to prevent N+1
-const orders = await prisma.order.findMany({
-  where: { status: 'pending' },
-  include: {
-    user: {
-      select: { id: true, name: true, email: true },
-    },
-    items: {
-      include: {
-        product: {
-          select: { id: true, name: true, price: true },
-        },
-      },
-    },
-  },
-});
+-- PATTERN: Select only needed columns
+SELECT id, name, email FROM users WHERE id = 1;
 
-// 3. Batch operations
-const updates = await prisma.$transaction([
-  prisma.product.updateMany({
-    where: { category: 'electronics' },
-    data: { price: { multiply: 0.9 } },
-  }),
-  prisma.product.updateMany({
-    where: { category: 'clothing' },
-    data: { price: { multiply: 0.8 } },
-  }),
-]);
+
+-- ANTI-PATTERN: OR conditions on different columns
+SELECT * FROM products WHERE category_id = 5 OR brand_id = 10;
+
+-- PATTERN: Use UNION for different indexes
+SELECT * FROM products WHERE category_id = 5
+UNION
+SELECT * FROM products WHERE brand_id = 10;
+
+
+-- ANTI-PATTERN: Function on indexed column
+SELECT * FROM users WHERE LOWER(email) = 'test@example.com';
+
+-- PATTERN: Store normalized data or use expression index
+SELECT * FROM users WHERE email_lower = 'test@example.com';
+
+
+-- ANTI-PATTERN: LIKE with leading wildcard
+SELECT * FROM products WHERE name LIKE '%widget%';
+
+-- PATTERN: Use full-text search
+SELECT * FROM products 
+WHERE to_tsvector('english', name) @@ to_tsquery('widget');
+
+
+-- ANTI-PATTERN: Large OFFSET for pagination
+SELECT * FROM orders ORDER BY created_at DESC LIMIT 10 OFFSET 100000;
+
+-- PATTERN: Keyset pagination
+SELECT * FROM orders 
+WHERE created_at < '2024-01-15T10:30:00Z'
+ORDER BY created_at DESC 
+LIMIT 10;
+
+
+-- PATTERN: Batch inserts
+INSERT INTO events (type, data, created_at) VALUES
+  ('click', '{}', NOW()),
+  ('view', '{}', NOW()),
+  ('purchase', '{}', NOW());
+
+
+-- PATTERN: Use COPY for bulk imports
+COPY events FROM '/tmp/events.csv' CSV HEADER;
+
+
+-- PATTERN: Partial indexes for filtered queries
+CREATE INDEX idx_orders_pending ON orders (created_at)
+WHERE status = 'pending';
+EOF
 ```
 
 ---
@@ -641,120 +1078,454 @@ const updates = await prisma.$transaction([
 
 ### Multi-Layer Caching Architecture
 
-```
-Client Layer:  Browser Cache -> Service Worker -> HTTP Headers
-       |
-       v
-CDN Layer:     Edge Cache (Cloudflare/CloudFront)
-       |
-       v
-App Layer:     In-Memory (LRU) -> Distributed (Redis)
-       |
-       v
-DB Layer:      Query Cache -> Materialized Views
-```
+```bash
+# === CACHING LAYERS ===
 
-### Cache Implementation
+cat > caching-architecture.md << 'EOF'
+# Multi-Layer Caching Strategy
 
-```typescript
-// 1. HTTP Cache Headers
-export function GET(request: Request) {
-  const data = await fetchData();
-  
-  return NextResponse.json(data, {
-    headers: {
-      'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=600',
-      'ETag': generateETag(data),
-      'Vary': 'Accept-Encoding, Authorization',
-    },
+## Layer 1: Browser Cache (Client-Side)
+- Static assets: 1 year (immutable with hash)
+- HTML: no-cache or short TTL
+- API responses: varies by endpoint
+
+## Layer 2: CDN Cache (Edge)
+- Static assets: 1 year
+- Dynamic content: short TTL or stale-while-revalidate
+- API responses: varies by endpoint
+
+## Layer 3: Application Cache (In-Memory)
+- Session data
+- Frequently accessed DB queries
+- Computed values
+
+## Layer 4: Distributed Cache (Redis/Memcached)
+- Shared state across instances
+- Database query results
+- Rate limiting counters
+- Session storage
+
+## Layer 5: Database Query Cache
+- Query plan caching
+- Result set caching
+- Prepared statement caching
+EOF
+
+# 1. Browser caching headers
+cat > cache-headers.js << 'EOF'
+const express = require('express');
+const app = express();
+
+// Static assets - immutable
+app.use('/static', express.static('public', {
+  maxAge: '1y',
+  immutable: true,
+  etag: false
+}));
+
+// API endpoints with validation
+app.get('/api/config', (req, res) => {
+  res.set({
+    'Cache-Control': 'public, max-age=300, stale-while-revalidate=60',
+    'ETag': generateETag(config),
+    'Vary': 'Accept-Encoding, Accept-Language'
   });
-}
+  res.json(config);
+});
 
-// Cache strategies by content type
-const cacheStrategies = {
-  static: 'public, max-age=31536000, immutable',
-  api: 'public, s-maxage=60, stale-while-revalidate=300',
-  personalized: 'private, max-age=300',
-  realtime: 'no-store, no-cache, must-revalidate',
-  html: 'public, max-age=0, s-maxage=300, stale-while-revalidate=86400',
-};
+// Private user data
+app.get('/api/user/profile', (req, res) => {
+  res.set({
+    'Cache-Control': 'private, no-cache, must-revalidate',
+    'ETag': generateETag(profile)
+  });
+  res.json(profile);
+});
 
-// 2. Application-level caching with Redis
-class CacheManager {
-  async getOrSet<T>(
-    key: string,
-    fetcher: () => Promise<T>,
-    options: { ttl?: number; tags?: string[] } = {}
-  ): Promise<T> {
-    const cached = await redis.get(key);
-    
-    if (cached) {
-      return JSON.parse(cached);
-    }
-    
-    const value = await fetcher();
-    await redis.setex(key, options.ttl || 300, JSON.stringify(value));
-    return value;
+// No caching for sensitive endpoints
+app.get('/api/auth/status', (req, res) => {
+  res.set({
+    'Cache-Control': 'no-store',
+    'Pragma': 'no-cache'
+  });
+  res.json({ authenticated: true });
+});
+EOF
+
+# 2. Redis caching implementation
+cat > redis-cache.js << 'EOF'
+const Redis = require('ioredis');
+const redis = new Redis({
+  host: process.env.REDIS_HOST,
+  port: 6379,
+  maxRetriesPerRequest: 3,
+  retryDelayOnFailover: 100
+});
+
+// Cache-aside pattern
+async function getUser(userId) {
+  const cacheKey = `user:${userId}`;
+  
+  // Try cache first
+  let user = await redis.get(cacheKey);
+  if (user) {
+    return JSON.parse(user);
   }
   
-  async invalidateByTag(tag: string): Promise<void> {
-    const keys = await redis.smembers(`tag:${tag}`);
-    if (keys.length > 0) {
-      await redis.del(...keys, `tag:${tag}`);
+  // Fetch from database
+  user = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
+  
+  // Store in cache
+  await redis.setex(cacheKey, 3600, JSON.stringify(user));
+  
+  return user;
+}
+
+// Write-through pattern
+async function updateUser(userId, data) {
+  // Update database
+  const user = await db.query(
+    'UPDATE users SET name = $2 WHERE id = $1 RETURNING *',
+    [userId, data.name]
+  );
+  
+  // Update cache
+  const cacheKey = `user:${userId}`;
+  await redis.setex(cacheKey, 3600, JSON.stringify(user));
+  
+  return user;
+}
+
+// Cache invalidation
+async function invalidateUserCache(userId) {
+  const patterns = [
+    `user:${userId}`,
+    `user:${userId}:orders`,
+    `user:${userId}:preferences`
+  ];
+  
+  const pipeline = redis.pipeline();
+  patterns.forEach(key => pipeline.del(key));
+  await pipeline.exec();
+}
+EOF
+
+# 3. Application-level memoization
+cat > memoization.js << 'EOF'
+// Simple memoization
+function memoize(fn, ttl = 60000) {
+  const cache = new Map();
+  
+  return async function(...args) {
+    const key = JSON.stringify(args);
+    const cached = cache.get(key);
+    
+    if (cached && Date.now() < cached.expiry) {
+      return cached.value;
     }
+    
+    const result = await fn.apply(this, args);
+    cache.set(key, { value: result, expiry: Date.now() + ttl });
+    
+    return result;
+  };
+}
+
+// LRU cache with size limit
+const LRU = require('lru-cache');
+
+const cache = new LRU({
+  max: 500,
+  ttl: 1000 * 60 * 5, // 5 minutes
+  updateAgeOnGet: true,
+  updateAgeOnHas: true
+});
+
+async function getExpensiveData(id) {
+  if (cache.has(id)) {
+    return cache.get(id);
+  }
+  
+  const data = await expensiveComputation(id);
+  cache.set(id, data);
+  return data;
+}
+EOF
+```
+
+### Cache Invalidation Strategies
+
+```bash
+# === CACHE INVALIDATION PATTERNS ===
+
+cat > cache-invalidation.js << 'EOF'
+// 1. Time-based expiration (TTL)
+await redis.setex('key', 3600, value); // Expires in 1 hour
+
+// 2. Event-based invalidation
+eventEmitter.on('user:updated', async (userId) => {
+  await redis.del(`user:${userId}`);
+  await redis.del(`user:${userId}:computed`);
+});
+
+// 3. Version-based invalidation
+async function getWithVersion(key) {
+  const version = await redis.get('cache:version');
+  const versionedKey = `${key}:v${version}`;
+  return redis.get(versionedKey);
+}
+
+async function incrementCacheVersion() {
+  await redis.incr('cache:version');
+}
+
+// 4. Tag-based invalidation
+async function setWithTags(key, value, tags) {
+  const pipeline = redis.pipeline();
+  pipeline.set(key, value);
+  tags.forEach(tag => {
+    pipeline.sadd(`tag:${tag}`, key);
+  });
+  await pipeline.exec();
+}
+
+async function invalidateByTag(tag) {
+  const keys = await redis.smembers(`tag:${tag}`);
+  if (keys.length > 0) {
+    await redis.del(...keys);
+    await redis.del(`tag:${tag}`);
   }
 }
+
+// 5. Stale-while-revalidate pattern
+async function getWithSWR(key, fetchFn, ttl = 300, staleTime = 60) {
+  const cached = await redis.get(key);
+  const metadata = await redis.get(`${key}:meta`);
+  
+  if (cached) {
+    const meta = JSON.parse(metadata || '{}');
+    const age = Date.now() - (meta.timestamp || 0);
+    
+    // If stale but within grace period, return and refresh in background
+    if (age > ttl * 1000 && age < (ttl + staleTime) * 1000) {
+      // Async refresh
+      fetchFn().then(data => {
+        redis.setex(key, ttl + staleTime, JSON.stringify(data));
+        redis.setex(`${key}:meta`, ttl + staleTime, 
+          JSON.stringify({ timestamp: Date.now() }));
+      });
+    }
+    
+    return JSON.parse(cached);
+  }
+  
+  // Cache miss - fetch and store
+  const data = await fetchFn();
+  await redis.setex(key, ttl + staleTime, JSON.stringify(data));
+  await redis.setex(`${key}:meta`, ttl + staleTime,
+    JSON.stringify({ timestamp: Date.now() }));
+  
+  return data;
+}
+EOF
 ```
 
 ---
 
 ## CDN Configuration
 
-### Cloudflare Configuration
+### CDN Setup and Optimization
 
-```typescript
-// cloudflare-workers/edge-cache.ts
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    
-    const cacheRules: Record<string, ResponseInit['headers']> = {
-      '/static/': {
-        'Cache-Control': 'public, max-age=31536000, immutable',
-      },
-      '/api/': {
-        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=600',
-        'Vary': 'Accept-Encoding, Authorization',
-      },
-      '/': {
-        'Cache-Control': 'public, s-maxage=1, stale-while-revalidate=86400',
-      },
-    };
-    
-    const cacheKey = new Request(url.toString(), request);
-    const cache = caches.default;
-    
-    let response = await cache.match(cacheKey);
-    
-    if (!response) {
-      response = await fetch(request);
-      
-      const matchingRule = Object.entries(cacheRules).find(([pattern]) => 
-        url.pathname.startsWith(pattern)
-      );
-      
-      if (matchingRule && response.ok) {
-        response = new Response(response.body, response);
-        Object.entries(matchingRule[1]).forEach(([key, value]) => {
-          response.headers.set(key, value);
-        });
-        await cache.put(cacheKey, response.clone());
+```bash
+# === CLOUDFLARE CONFIGURATION ===
+
+cat > cloudflare-config.json << 'EOF'
+{
+  "cache_rules": [
+    {
+      "name": "Static Assets - Long Cache",
+      "expression": "(http.request.uri.path matches \"\\.(js|css|woff2|avif|webp|png|jpg|svg)$\")",
+      "action": {
+        "cache_control": {
+          "browser_ttl": 31536000,
+          "edge_ttl": 31536000
+        },
+        "respect_strong_etags": true
+      }
+    },
+    {
+      "name": "HTML - Short Cache with Revalidation",
+      "expression": "(http.request.uri.path eq \"/\" or http.request.uri.path matches \"\\.html$\")",
+      "action": {
+        "cache_control": {
+          "browser_ttl": 0,
+          "edge_ttl": 300,
+          "stale_while_revalidate": 60
+        }
+      }
+    },
+    {
+      "name": "API - Vary by Auth",
+      "expression": "(starts_with(http.request.uri.path, \"/api/\"))",
+      "action": {
+        "cache_control": {
+          "bypass_cache_on_cookie": "session_id",
+          "vary_headers": ["Authorization", "Accept-Language"]
+        }
       }
     }
-    
-    return response;
+  ],
+  "page_rules": {
+    "/api/*": {
+      "cache_level": "bypass",
+      "origin_cache_control": true
+    },
+    "/*.js": {
+      "cache_level": "cache_everything",
+      "edge_cache_ttl": 2592000
+    }
   },
-};
+  "settings": {
+    "auto_minify": {
+      "javascript": true,
+      "css": true,
+      "html": true
+    },
+    "brotli": "on",
+    "early_hints": "on",
+    "rocket_loader": "off",
+    "polish": "lossless",
+    "webp": "on",
+    "mirage": "on"
+  }
+}
+EOF
+
+
+# === AWS CLOUDFRONT CONFIGURATION ===
+
+cat > cloudfront-config.yaml << 'EOF'
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: origin.example.com
+            Id: S3Origin
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+        
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: !Ref OptimizedCachePolicy
+          Compress: true
+          
+        CacheBehaviors:
+          - PathPattern: "/static/*"
+            TargetOriginId: S3Origin
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            Compress: true
+            
+          - PathPattern: "/api/*"
+            TargetOriginId: APIOrigin
+            CachePolicyId: !Ref APICachePolicy
+            OriginRequestPolicyId: !Ref APIOriginRequestPolicy
+            
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+
+  StaticAssetsCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: StaticAssetsPolicy
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          CookiesConfig:
+            CookieBehavior: none
+
+  APICachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: APICachePolicy
+        DefaultTTL: 0
+        MaxTTL: 60
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Authorization
+              - Accept-Language
+          QueryStringsConfig:
+            QueryStringBehavior: all
+          CookiesConfig:
+            CookieBehavior: none
+EOF
+
+
+# === CACHE-CONTROL HEADERS REFERENCE ===
+
+cat > cache-control-reference.md << 'EOF'
+# Cache-Control Header Reference
+
+## Directives
+
+| Directive | Description |
+|-----------|-------------|
+| `public` | Can be cached by any cache |
+| `private` | Only browser can cache |
+| `no-cache` | Must revalidate before using cache |
+| `no-store` | Don't cache at all |
+| `max-age=N` | Cache for N seconds |
+| `s-maxage=N` | CDN cache for N seconds |
+| `stale-while-revalidate=N` | Serve stale while refreshing |
+| `stale-if-error=N` | Serve stale on origin error |
+| `immutable` | Content will never change |
+| `must-revalidate` | Don't serve stale content |
+
+## Recommended Patterns
+
+### Static Assets (versioned)
+```
+Cache-Control: public, max-age=31536000, immutable
+```
+
+### HTML Documents
+```
+Cache-Control: public, max-age=0, must-revalidate
+```
+
+### API with CDN
+```
+Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=60
+```
+
+### User-Specific Data
+```
+Cache-Control: private, no-cache
+```
+
+### Sensitive Data
+```
+Cache-Control: no-store
+```
+EOF
 ```
 
 ---
@@ -763,194 +1534,506 @@ export default {
 
 ### Image Optimization Pipeline
 
-```typescript
-import sharp from 'sharp';
+```bash
+# === IMAGE OPTIMIZATION ===
 
-interface ImageOptimizationConfig {
-  formats: ('webp' | 'avif' | 'jpeg')[];
-  sizes: number[];
-  quality: number;
-}
+# 1. Convert to modern formats
+cat > image-convert.sh << 'EOF'
+#!/bin/bash
 
-const defaultConfig: ImageOptimizationConfig = {
-  formats: ['avif', 'webp', 'jpeg'],
-  sizes: [320, 640, 768, 1024, 1280, 1920],
-  quality: 80,
+INPUT_DIR="./images/original"
+OUTPUT_DIR="./images/optimized"
+
+mkdir -p "$OUTPUT_DIR"/{webp,avif}
+
+# Convert to WebP
+for img in "$INPUT_DIR"/*.{jpg,jpeg,png}; do
+  [ -f "$img" ] || continue
+  filename=$(basename "$img" | sed 's/\.[^.]*$//')
+  cwebp -q 80 "$img" -o "$OUTPUT_DIR/webp/${filename}.webp"
+done
+
+# Convert to AVIF (smaller, better quality)
+for img in "$INPUT_DIR"/*.{jpg,jpeg,png}; do
+  [ -f "$img" ] || continue
+  filename=$(basename "$img" | sed 's/\.[^.]*$//')
+  avifenc --min 0 --max 63 -a end-usage=q -a cq-level=30 "$img" "$OUTPUT_DIR/avif/${filename}.avif"
+done
+EOF
+
+# 2. Responsive images generation
+cat > responsive-images.sh << 'EOF'
+#!/bin/bash
+
+INPUT="$1"
+OUTPUT_DIR="./images/responsive"
+WIDTHS=(320 640 768 1024 1280 1920)
+
+filename=$(basename "$INPUT" | sed 's/\.[^.]*$//')
+
+for width in "${WIDTHS[@]}"; do
+  # WebP
+  convert "$INPUT" -resize "${width}x>" -quality 80 \
+    "$OUTPUT_DIR/${filename}-${width}w.webp"
+  
+  # AVIF
+  convert "$INPUT" -resize "${width}x>" -quality 80 png:- | \
+    avifenc --min 0 --max 63 -a end-usage=q -a cq-level=30 - \
+    "$OUTPUT_DIR/${filename}-${width}w.avif"
+done
+EOF
+
+# 3. HTML picture element with srcset
+cat > responsive-picture.html << 'EOF'
+<picture>
+  <!-- AVIF for modern browsers -->
+  <source
+    type="image/avif"
+    srcset="
+      /images/hero-320w.avif 320w,
+      /images/hero-640w.avif 640w,
+      /images/hero-1024w.avif 1024w,
+      /images/hero-1920w.avif 1920w
+    "
+    sizes="(max-width: 640px) 100vw, (max-width: 1024px) 80vw, 1200px"
+  >
+  
+  <!-- WebP fallback -->
+  <source
+    type="image/webp"
+    srcset="
+      /images/hero-320w.webp 320w,
+      /images/hero-640w.webp 640w,
+      /images/hero-1024w.webp 1024w,
+      /images/hero-1920w.webp 1920w
+    "
+    sizes="(max-width: 640px) 100vw, (max-width: 1024px) 80vw, 1200px"
+  >
+  
+  <!-- JPEG fallback -->
+  <img
+    src="/images/hero-1024w.jpg"
+    srcset="
+      /images/hero-320w.jpg 320w,
+      /images/hero-640w.jpg 640w,
+      /images/hero-1024w.jpg 1024w,
+      /images/hero-1920w.jpg 1920w
+    "
+    sizes="(max-width: 640px) 100vw, (max-width: 1024px) 80vw, 1200px"
+    alt="Hero image"
+    loading="lazy"
+    decoding="async"
+    width="1920"
+    height="1080"
+  >
+</picture>
+EOF
+
+# 4. Next.js Image component configuration
+cat > next-image-config.js << 'EOF'
+// next.config.js
+module.exports = {
+  images: {
+    formats: ['image/avif', 'image/webp'],
+    deviceSizes: [640, 750, 828, 1080, 1200, 1920, 2048, 3840],
+    imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
+    minimumCacheTTL: 60 * 60 * 24 * 30, // 30 days
+    dangerouslyAllowSVG: false,
+    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
+  },
 };
 
-async function optimizeImage(
-  inputBuffer: Buffer,
-  config: ImageOptimizationConfig = defaultConfig
-): Promise<Map<string, Buffer>> {
-  const results = new Map<string, Buffer>();
-  const image = sharp(inputBuffer);
-  const metadata = await image.metadata();
+// Usage
+import Image from 'next/image';
+
+<Image
+  src="/hero.jpg"
+  alt="Hero"
+  width={1920}
+  height={1080}
+  priority // For LCP images
+  placeholder="blur"
+  blurDataURL="data:image/jpeg;base64,..."
+/>
+EOF
+
+# 5. Sharp for server-side optimization
+cat > sharp-optimization.js << 'EOF'
+const sharp = require('sharp');
+
+async function optimizeImage(input, output, options = {}) {
+  const {
+    width,
+    quality = 80,
+    format = 'webp'
+  } = options;
+
+  let pipeline = sharp(input);
   
-  for (const format of config.formats) {
-    for (const width of config.sizes) {
-      if (metadata.width && width > metadata.width) continue;
-      
-      const processed = await image
-        .clone()
-        .resize(width, null, { withoutEnlargement: true })
-        .toFormat(format, { quality: config.quality })
-        .toBuffer();
-      
-      results.set(`${width}.${format}`, processed);
-    }
+  if (width) {
+    pipeline = pipeline.resize(width, null, {
+      withoutEnlargement: true,
+      fit: 'inside'
+    });
   }
   
-  return results;
+  switch (format) {
+    case 'webp':
+      pipeline = pipeline.webp({ quality, effort: 6 });
+      break;
+    case 'avif':
+      pipeline = pipeline.avif({ quality, effort: 6 });
+      break;
+    case 'jpeg':
+      pipeline = pipeline.jpeg({ quality, progressive: true, mozjpeg: true });
+      break;
+  }
+  
+  await pipeline.toFile(output);
 }
+
+// Generate all variants
+async function generateResponsiveImages(input, outputDir) {
+  const widths = [320, 640, 768, 1024, 1280, 1920];
+  const formats = ['webp', 'avif'];
+  
+  for (const width of widths) {
+    for (const format of formats) {
+      await optimizeImage(input, `${outputDir}/image-${width}w.${format}`, {
+        width,
+        format
+      });
+    }
+  }
+}
+EOF
 ```
 
-### Asset Build Optimization
+### CSS and JavaScript Optimization
 
-```javascript
-// vite.config.ts
-import { defineConfig } from 'vite';
-import viteCompression from 'vite-plugin-compression';
+```bash
+# === BUNDLE OPTIMIZATION ===
 
-export default defineConfig({
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom'],
-          'vendor-ui': ['@radix-ui/react-dialog'],
-          'vendor-utils': ['lodash-es', 'date-fns'],
-        },
-        chunkFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash].[ext]',
-      },
-    },
-    minify: 'terser',
-    terserOptions: {
-      compress: {
-        drop_console: true,
-        drop_debugger: true,
-      },
-    },
-    target: 'es2020',
-    cssCodeSplit: true,
-  },
-  
+# 1. CSS optimization
+cat > postcss.config.js << 'EOF'
+module.exports = {
   plugins: [
-    viteCompression({ algorithm: 'brotliCompress', ext: '.br' }),
-    viteCompression({ algorithm: 'gzip', ext: '.gz' }),
+    require('postcss-import'),
+    require('tailwindcss'),
+    require('autoprefixer'),
+    require('cssnano')({
+      preset: ['advanced', {
+        discardComments: { removeAll: true },
+        reduceIdents: false,
+        zindex: false
+      }]
+    })
+  ]
+};
+EOF
+
+# 2. PurgeCSS configuration
+cat > purgecss.config.js << 'EOF'
+module.exports = {
+  content: [
+    './src/**/*.{js,jsx,ts,tsx}',
+    './public/index.html'
   ],
-});
+  defaultExtractor: content => content.match(/[\w-/:]+(?<!:)/g) || [],
+  safelist: {
+    standard: [/^modal/, /^toast/],
+    deep: [/^data-/],
+    greedy: [/animate/]
+  }
+};
+EOF
+
+# 3. JavaScript minification with Terser
+cat > terser.config.js << 'EOF'
+module.exports = {
+  compress: {
+    dead_code: true,
+    drop_console: true,
+    drop_debugger: true,
+    pure_funcs: ['console.log', 'console.info'],
+    passes: 2
+  },
+  mangle: {
+    safari10: true,
+    properties: {
+      regex: /^_/  // Mangle private properties starting with _
+    }
+  },
+  format: {
+    comments: false
+  }
+};
+EOF
+
+# 4. Webpack optimization
+cat > webpack.optimization.js << 'EOF'
+module.exports = {
+  optimization: {
+    minimize: true,
+    minimizer: [
+      new TerserPlugin({
+        parallel: true,
+        terserOptions: {
+          compress: { drop_console: true }
+        }
+      }),
+      new CssMinimizerPlugin()
+    ],
+    splitChunks: {
+      chunks: 'all',
+      maxInitialRequests: 25,
+      minSize: 20000,
+      cacheGroups: {
+        vendor: {
+          test: /[\\/]node_modules[\\/]/,
+          name(module) {
+            const packageName = module.context.match(
+              /[\\/]node_modules[\\/](.*?)([\\/]|$)/
+            )[1];
+            return `vendor.${packageName.replace('@', '')}`;
+          },
+          priority: -10
+        },
+        common: {
+          minChunks: 2,
+          priority: -20,
+          reuseExistingChunk: true
+        }
+      }
+    },
+    runtimeChunk: 'single',
+    moduleIds: 'deterministic'
+  }
+};
+EOF
 ```
 
 ---
 
 ## Code Splitting and Lazy Loading
 
-### Route-Based Code Splitting
+### Code Splitting Strategies
 
-```tsx
-import { lazy, Suspense } from 'react';
-import { createBrowserRouter } from 'react-router-dom';
+```bash
+# === REACT CODE SPLITTING ===
 
+cat > code-splitting-react.tsx << 'EOF'
+import React, { Suspense, lazy } from 'react';
+import { Routes, Route } from 'react-router-dom';
+
+// Lazy load route components
+const Home = lazy(() => import('./pages/Home'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
-const Products = lazy(() => import('./pages/Products'));
 const Settings = lazy(() => import('./pages/Settings'));
 
+// Preload on hover/focus
+const preloadComponent = (importFn: () => Promise<any>) => {
+  return () => {
+    importFn(); // Start loading
+  };
+};
+
+// Named exports require different syntax
+const Analytics = lazy(() => 
+  import('./pages/Analytics').then(module => ({ default: module.Analytics }))
+);
+
+// Loading fallback component
 function PageLoader() {
-  return <div className="page-loader"><div className="spinner" /></div>;
+  return (
+    <div className="page-loader">
+      <div className="spinner" />
+      <p>Loading...</p>
+    </div>
+  );
 }
 
-const router = createBrowserRouter([
-  {
-    path: '/',
-    element: <Layout />,
-    children: [
-      {
-        index: true,
-        element: (
-          <Suspense fallback={<PageLoader />}>
-            <Dashboard />
-          </Suspense>
-        ),
-      },
-      {
-        path: 'products',
-        element: (
-          <Suspense fallback={<PageLoader />}>
-            <Products />
-          </Suspense>
-        ),
-      },
-    ],
-  },
-]);
-
-// Prefetch routes on hover
-function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
-  const prefetch = () => {
-    const routes: Record<string, () => Promise<any>> = {
-      '/products': () => import('./pages/Products'),
-      '/settings': () => import('./pages/Settings'),
-    };
-    routes[to]?.();
-  };
+// Error boundary for lazy components
+class ErrorBoundary extends React.Component {
+  state = { hasError: false };
   
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  
+  render() {
+    if (this.state.hasError) {
+      return <div>Failed to load. <button onClick={() => window.location.reload()}>Retry</button></div>;
+    }
+    return this.props.children;
+  }
+}
+
+// App with code splitting
+function App() {
   return (
-    <Link to={to} onMouseEnter={prefetch} onFocus={prefetch}>
+    <ErrorBoundary>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/analytics" element={<Analytics />} />
+        </Routes>
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
+// Prefetch links
+function NavLink({ to, children, importFn }) {
+  return (
+    <Link
+      to={to}
+      onMouseEnter={preloadComponent(importFn)}
+      onFocus={preloadComponent(importFn)}
+    >
       {children}
     </Link>
   );
 }
-```
+EOF
 
-### Component-Level Code Splitting
 
-```tsx
-import { lazy, Suspense, useState, useEffect, useRef } from 'react';
+# === NEXT.JS CODE SPLITTING ===
 
-const Chart = lazy(() => import('./components/Chart'));
-const DataGrid = lazy(() => import('./components/DataGrid'));
+cat > code-splitting-nextjs.tsx << 'EOF'
+import dynamic from 'next/dynamic';
 
-// Intersection Observer for viewport-based loading
-function LazyComponent({ 
-  component: Component, 
-  fallback = null,
-  rootMargin = '100px',
-  ...props 
-}: {
-  component: React.LazyExoticComponent<any>;
-  fallback?: React.ReactNode;
-  rootMargin?: string;
-  [key: string]: any;
-}) {
-  const [isVisible, setIsVisible] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setIsVisible(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin }
-    );
-    
-    if (ref.current) observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [rootMargin]);
-  
+// Dynamic import with loading state
+const DynamicChart = dynamic(() => import('../components/Chart'), {
+  loading: () => <div className="chart-skeleton" />,
+  ssr: false // Disable SSR for client-only components
+});
+
+// Dynamic import with suspense
+const DynamicEditor = dynamic(() => import('../components/Editor'), {
+  suspense: true
+});
+
+// Conditional loading
+const DynamicMap = dynamic(
+  () => import('../components/Map'),
+  { 
+    ssr: false,
+    loading: () => <MapSkeleton />
+  }
+);
+
+// Usage with Suspense
+import { Suspense } from 'react';
+
+function Dashboard() {
   return (
-    <div ref={ref}>
-      {isVisible ? (
-        <Suspense fallback={fallback}>
-          <Component {...props} />
-        </Suspense>
-      ) : fallback}
+    <div>
+      <h1>Dashboard</h1>
+      
+      {/* Component with built-in loading */}
+      <DynamicChart data={chartData} />
+      
+      {/* Component with Suspense */}
+      <Suspense fallback={<EditorSkeleton />}>
+        <DynamicEditor />
+      </Suspense>
+      
+      {/* Conditionally loaded */}
+      {showMap && <DynamicMap location={location} />}
     </div>
   );
 }
+EOF
+
+
+# === VUE CODE SPLITTING ===
+
+cat > code-splitting-vue.js << 'EOF'
+// Router-level code splitting
+const routes = [
+  {
+    path: '/',
+    component: () => import('./views/Home.vue')
+  },
+  {
+    path: '/dashboard',
+    component: () => import(
+      /* webpackChunkName: "dashboard" */
+      /* webpackPrefetch: true */
+      './views/Dashboard.vue'
+    )
+  },
+  {
+    path: '/settings',
+    component: () => import(
+      /* webpackChunkName: "settings" */
+      './views/Settings.vue'
+    )
+  }
+];
+
+// Component-level code splitting
+import { defineAsyncComponent } from 'vue';
+
+const AsyncChart = defineAsyncComponent({
+  loader: () => import('./components/Chart.vue'),
+  loadingComponent: LoadingSpinner,
+  errorComponent: ErrorDisplay,
+  delay: 200,
+  timeout: 10000
+});
+EOF
+
+
+# === IMAGE LAZY LOADING ===
+
+cat > lazy-loading-images.html << 'EOF'
+<!-- Native lazy loading (recommended) -->
+<img 
+  src="image.webp" 
+  loading="lazy"
+  decoding="async"
+  width="800"
+  height="600"
+  alt="Description"
+>
+
+<!-- Intersection Observer for advanced control -->
+<script>
+const lazyImages = document.querySelectorAll('img[data-src]');
+
+const imageObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const img = entry.target;
+      img.src = img.dataset.src;
+      img.srcset = img.dataset.srcset || '';
+      img.classList.add('loaded');
+      imageObserver.unobserve(img);
+    }
+  });
+}, {
+  rootMargin: '50px 0px', // Load 50px before viewport
+  threshold: 0.01
+});
+
+lazyImages.forEach(img => imageObserver.observe(img));
+</script>
+
+<!-- With placeholder -->
+<img
+  class="lazy"
+  src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 600'%3E%3C/svg%3E"
+  data-src="image.webp"
+  data-srcset="image-400.webp 400w, image-800.webp 800w"
+  width="800"
+  height="600"
+  alt="Description"
+>
+EOF
 ```
 
 ---
@@ -959,94 +2042,198 @@ function LazyComponent({
 
 ### Real User Monitoring (RUM)
 
-```typescript
-class PerformanceMonitor {
-  private metrics: Partial<PerformanceMetrics> = {};
-  
-  start(): void {
-    this.observeWebVitals();
-    this.observeLongTasks();
-    this.captureNavigationTiming();
-    
-    window.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
-        this.report();
-      }
+```bash
+# === WEB VITALS MONITORING ===
+
+cat > web-vitals-monitoring.js << 'EOF'
+import { onCLS, onFCP, onLCP, onINP, onTTFB } from 'web-vitals';
+
+// Analytics endpoint
+const ANALYTICS_ENDPOINT = '/api/analytics/vitals';
+
+function sendToAnalytics(metric) {
+  const body = JSON.stringify({
+    name: metric.name,
+    value: metric.value,
+    rating: metric.rating,
+    delta: metric.delta,
+    id: metric.id,
+    navigationType: metric.navigationType,
+    page: window.location.pathname,
+    timestamp: Date.now(),
+    // Additional context
+    connection: navigator.connection?.effectiveType,
+    deviceMemory: navigator.deviceMemory,
+    hardwareConcurrency: navigator.hardwareConcurrency
+  });
+
+  // Use sendBeacon for reliability
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon(ANALYTICS_ENDPOINT, body);
+  } else {
+    fetch(ANALYTICS_ENDPOINT, {
+      body,
+      method: 'POST',
+      keepalive: true
     });
-  }
-  
-  private observeWebVitals(): void {
-    // LCP Observer
-    new PerformanceObserver((list) => {
-      const entries = list.getEntries();
-      this.metrics.lcp = entries[entries.length - 1].startTime;
-    }).observe({ type: 'largest-contentful-paint', buffered: true });
-    
-    // CLS Observer
-    let clsValue = 0;
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries() as any[]) {
-        if (!entry.hadRecentInput) clsValue += entry.value;
-      }
-      this.metrics.cls = clsValue;
-    }).observe({ type: 'layout-shift', buffered: true });
-    
-    // INP Observer
-    let inpValue = 0;
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries() as any[]) {
-        if (entry.duration > inpValue) {
-          inpValue = entry.duration;
-          this.metrics.inp = entry.duration;
-        }
-      }
-    }).observe({ type: 'event', buffered: true, durationThreshold: 16 });
-  }
-  
-  private report(): void {
-    const payload = {
-      url: window.location.href,
-      timestamp: Date.now(),
-      metrics: this.metrics,
-      connection: (navigator as any).connection?.effectiveType,
-    };
-    
-    navigator.sendBeacon('/api/performance', JSON.stringify(payload));
   }
 }
 
-const monitor = new PerformanceMonitor();
-monitor.start();
-```
+// Register all vitals
+onCLS(sendToAnalytics);
+onFCP(sendToAnalytics);
+onLCP(sendToAnalytics);
+onINP(sendToAnalytics);
+onTTFB(sendToAnalytics);
 
-### Alerting Rules
+// Custom performance marks
+export function markStart(name) {
+  performance.mark(`${name}-start`);
+}
 
-```yaml
-# prometheus-alerts.yml
+export function markEnd(name) {
+  performance.mark(`${name}-end`);
+  performance.measure(name, `${name}-start`, `${name}-end`);
+  
+  const measure = performance.getEntriesByName(name, 'measure')[0];
+  sendToAnalytics({
+    name: `custom:${name}`,
+    value: measure.duration,
+    rating: measure.duration < 100 ? 'good' : measure.duration < 300 ? 'needs-improvement' : 'poor'
+  });
+}
+EOF
+
+
+# === SERVER-SIDE MONITORING ===
+
+cat > server-monitoring.js << 'EOF'
+const promClient = require('prom-client');
+
+// Create registry
+const register = new promClient.Registry();
+
+// Add default metrics
+promClient.collectDefaultMetrics({ register });
+
+// HTTP request duration histogram
+const httpRequestDuration = new promClient.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'route', 'status_code'],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+});
+register.registerMetric(httpRequestDuration);
+
+// HTTP requests counter
+const httpRequestsTotal = new promClient.Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'route', 'status_code']
+});
+register.registerMetric(httpRequestsTotal);
+
+// Database query duration
+const dbQueryDuration = new promClient.Histogram({
+  name: 'db_query_duration_seconds',
+  help: 'Database query duration in seconds',
+  labelNames: ['query_type', 'table'],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1]
+});
+register.registerMetric(dbQueryDuration);
+
+// Cache hit rate
+const cacheHits = new promClient.Counter({
+  name: 'cache_hits_total',
+  help: 'Cache hits',
+  labelNames: ['cache_name']
+});
+
+const cacheMisses = new promClient.Counter({
+  name: 'cache_misses_total',
+  help: 'Cache misses',
+  labelNames: ['cache_name']
+});
+
+register.registerMetric(cacheHits);
+register.registerMetric(cacheMisses);
+
+// Express middleware
+function metricsMiddleware(req, res, next) {
+  const start = process.hrtime.bigint();
+  
+  res.on('finish', () => {
+    const duration = Number(process.hrtime.bigint() - start) / 1e9;
+    const route = req.route?.path || req.path;
+    
+    httpRequestDuration.labels(req.method, route, res.statusCode).observe(duration);
+    httpRequestsTotal.labels(req.method, route, res.statusCode).inc();
+  });
+  
+  next();
+}
+
+// Metrics endpoint
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+
+module.exports = { register, metricsMiddleware, dbQueryDuration, cacheHits, cacheMisses };
+EOF
+
+
+# === ALERTING RULES (PROMETHEUS) ===
+
+cat > alerting-rules.yml << 'EOF'
 groups:
   - name: performance
     rules:
-      - alert: HighP99Latency
-        expr: |
-          histogram_quantile(0.99, 
-            sum(rate(http_request_duration_seconds_bucket[5m])) by (le, route)
-          ) > 2
+      # High P95 latency
+      - alert: HighP95Latency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 0.5
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "High P99 latency on {{ $labels.route }}"
-      
-      - alert: PoorLCP
-        expr: |
-          histogram_quantile(0.75, 
-            sum(rate(web_vitals_lcp_seconds_bucket[1h])) by (le, page)
-          ) > 2.5
-        for: 1h
+          summary: "High P95 latency ({{ $value }}s)"
+          
+      # High P99 latency
+      - alert: HighP99Latency
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High P99 latency ({{ $value }}s)"
+          
+      # High error rate
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status_code=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate ({{ $value | humanizePercentage }})"
+          
+      # Low cache hit rate
+      - alert: LowCacheHitRate
+        expr: rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) < 0.8
+        for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Poor LCP on {{ $labels.page }}"
+          summary: "Low cache hit rate ({{ $value | humanizePercentage }})"
+          
+      # Slow database queries
+      - alert: SlowDatabaseQueries
+        expr: histogram_quantile(0.95, rate(db_query_duration_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow database queries (P95: {{ $value }}s)"
+EOF
 ```
 
 ---
@@ -1055,124 +2242,329 @@ groups:
 
 ### Budget Configuration
 
-```json
+```bash
+# === PERFORMANCE BUDGET CONFIGURATION ===
+
+cat > performance-budget.json << 'EOF'
 {
-  "budgets": [
-    {
-      "resourceSizes": [
-        { "resourceType": "script", "budget": 300 },
-        { "resourceType": "stylesheet", "budget": 100 },
-        { "resourceType": "image", "budget": 500 },
-        { "resourceType": "total", "budget": 1000 }
-      ]
+  "budgets": {
+    "timings": {
+      "FCP": { "warning": 1500, "error": 1800, "unit": "ms" },
+      "LCP": { "warning": 2000, "error": 2500, "unit": "ms" },
+      "INP": { "warning": 150, "error": 200, "unit": "ms" },
+      "TTFB": { "warning": 150, "error": 200, "unit": "ms" },
+      "TTI": { "warning": 3500, "error": 5000, "unit": "ms" },
+      "TBT": { "warning": 150, "error": 200, "unit": "ms" }
+    },
+    "scores": {
+      "CLS": { "warning": 0.05, "error": 0.1, "unit": "score" },
+      "lighthouse-performance": { "warning": 90, "error": 80, "unit": "score" },
+      "lighthouse-accessibility": { "warning": 95, "error": 90, "unit": "score" }
+    },
+    "bundles": {
+      "javascript": { "warning": 180, "error": 200, "unit": "KB" },
+      "css": { "warning": 40, "error": 50, "unit": "KB" },
+      "images": { "warning": 500, "error": 750, "unit": "KB" },
+      "fonts": { "warning": 100, "error": 150, "unit": "KB" },
+      "total": { "warning": 1000, "error": 1500, "unit": "KB" }
+    },
+    "requests": {
+      "javascript": { "warning": 10, "error": 15 },
+      "css": { "warning": 3, "error": 5 },
+      "images": { "warning": 20, "error": 30 },
+      "total": { "warning": 50, "error": 75 }
     }
-  ],
-  "timings": [
-    { "metric": "first-contentful-paint", "budget": 1800 },
-    { "metric": "largest-contentful-paint", "budget": 2500 },
-    { "metric": "cumulative-layout-shift", "budget": 0.1 },
-    { "metric": "total-blocking-time", "budget": 200 }
-  ]
+  }
 }
-```
+EOF
 
-### Lighthouse CI Configuration
 
-```javascript
-// lighthouserc.js
+# === LIGHTHOUSE CI CONFIGURATION ===
+
+cat > lighthouserc.js << 'EOF'
 module.exports = {
   ci: {
     collect: {
-      url: ['http://localhost:3000/', 'http://localhost:3000/products'],
+      url: [
+        'http://localhost:3000/',
+        'http://localhost:3000/products',
+        'http://localhost:3000/checkout'
+      ],
       numberOfRuns: 3,
+      settings: {
+        preset: 'desktop',
+        throttling: {
+          rttMs: 40,
+          throughputKbps: 10240,
+          cpuSlowdownMultiplier: 1
+        }
+      }
     },
     assert: {
       preset: 'lighthouse:recommended',
       assertions: {
-        'first-contentful-paint': ['error', { maxNumericValue: 1800 }],
+        'first-contentful-paint': ['warn', { maxNumericValue: 1800 }],
         'largest-contentful-paint': ['error', { maxNumericValue: 2500 }],
         'cumulative-layout-shift': ['error', { maxNumericValue: 0.1 }],
-        'total-blocking-time': ['error', { maxNumericValue: 200 }],
-        'categories:performance': ['error', { minScore: 0.9 }],
-        'resource-summary:script:size': ['error', { maxNumericValue: 300000 }],
-      },
+        'total-blocking-time': ['warn', { maxNumericValue: 200 }],
+        'interactive': ['warn', { maxNumericValue: 3500 }],
+        'categories:performance': ['error', { minScore: 0.8 }],
+        'categories:accessibility': ['error', { minScore: 0.9 }],
+        'categories:best-practices': ['warn', { minScore: 0.9 }],
+        'categories:seo': ['warn', { minScore: 0.9 }],
+        'resource-summary:script:size': ['error', { maxNumericValue: 200000 }],
+        'resource-summary:stylesheet:size': ['warn', { maxNumericValue: 50000 }]
+      }
     },
-    upload: { target: 'temporary-public-storage' },
-  },
+    upload: {
+      target: 'lhci',
+      serverBaseUrl: process.env.LHCI_SERVER_URL,
+      token: process.env.LHCI_TOKEN
+    }
+  }
 };
+EOF
+
+
+# === GITHUB ACTIONS WORKFLOW ===
+
+cat > .github/workflows/performance.yml << 'EOF'
+name: Performance Budget Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  lighthouse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Build
+        run: npm run build
+        
+      - name: Start server
+        run: npm start &
+        
+      - name: Wait for server
+        run: npx wait-on http://localhost:3000
+        
+      - name: Run Lighthouse CI
+        run: |
+          npm install -g @lhci/cli
+          lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+          
+      - name: Bundle size check
+        run: |
+          npm run build:analyze
+          npx bundlesize
+        
+  bundle-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - run: npm ci
+      - run: npm run build
+      
+      - name: Check bundle size
+        uses: preactjs/compressed-size-action@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: './dist/**/*.{js,css}'
+          build-script: 'build'
+EOF
+
+
+# === BUNDLESIZE CONFIGURATION ===
+
+cat > bundlesize.config.json << 'EOF'
+{
+  "files": [
+    {
+      "path": "./dist/js/main.*.js",
+      "maxSize": "100 kB",
+      "compression": "gzip"
+    },
+    {
+      "path": "./dist/js/vendor.*.js",
+      "maxSize": "150 kB",
+      "compression": "gzip"
+    },
+    {
+      "path": "./dist/css/main.*.css",
+      "maxSize": "30 kB",
+      "compression": "gzip"
+    },
+    {
+      "path": "./dist/**/*.js",
+      "maxSize": "300 kB",
+      "compression": "gzip"
+    }
+  ],
+  "ci": {
+    "repoBranchBase": "main",
+    "trackBranches": ["main", "develop"]
+  }
+}
+EOF
 ```
 
 ---
 
-## Performance Optimization Checklist
+## Performance Optimization Report Template
 
-### Frontend Checklist
+```markdown
+# Performance Optimization Report
 
-| Category | Item | Priority |
-|----------|------|----------|
-| **Critical Path** | Inline critical CSS | P0 |
-| | Preload LCP image | P0 |
-| | Defer non-critical JS | P0 |
-| **Images** | Use WebP/AVIF formats | P1 |
-| | Implement responsive images | P1 |
-| | Lazy load below-fold images | P1 |
-| **JavaScript** | Code split by route | P1 |
-| | Tree shake unused code | P1 |
-| **Fonts** | Use font-display: swap | P1 |
-| | Preload critical fonts | P1 |
+**Target:** [application/service name]
+**Date:** [YYYY-MM-DD]
+**Environment:** [production/staging]
+**Analyst:** Ahmed Adel Bakr Alderai
 
-### Backend Checklist
+---
 
-| Category | Item | Priority |
-|----------|------|----------|
-| **Database** | Add missing indexes | P0 |
-| | Fix N+1 queries | P0 |
-| | Implement query caching | P1 |
-| **API** | Enable compression | P0 |
-| | Implement response caching | P1 |
-| | Enable HTTP/2 | P1 |
+## Executive Summary
+
+[2-3 sentence overview of findings and recommendations]
+
+**Key Metrics:**
+| Metric | Current | Target | Status |
+|--------|---------|--------|--------|
+| LCP | [X]ms | <2500ms | [PASS/FAIL] |
+| FCP | [X]ms | <1800ms | [PASS/FAIL] |
+| CLS | [X] | <0.1 | [PASS/FAIL] |
+| INP | [X]ms | <200ms | [PASS/FAIL] |
+| TTFB | [X]ms | <200ms | [PASS/FAIL] |
+| Bundle Size | [X]KB | <200KB | [PASS/FAIL] |
+| P95 Latency | [X]ms | <500ms | [PASS/FAIL] |
+
+**Overall Performance Score:** [X]/100
+
+---
+
+## Findings by Priority
+
+### P0 - Critical (Implement Immediately)
+
+#### Finding 1: [Title]
+- **Impact:** [Quantified impact]
+- **Current:** [Current state]
+- **Target:** [Target state]
+- **Fix:** [Specific recommendation]
+- **Effort:** [Hours/Days]
+- **Expected Improvement:** [X% improvement in Y metric]
+
+### P1 - High (Implement This Sprint)
+
+#### Finding 2: [Title]
+[Same structure]
+
+### P2 - Medium (Implement Next Sprint)
+
+#### Finding 3: [Title]
+[Same structure]
+
+### P3 - Low (Backlog)
+
+#### Finding 4: [Title]
+[Same structure]
+
+---
+
+## Optimization Roadmap
+
+### Week 1: Quick Wins
+- [ ] [Task 1] - [Expected improvement]
+- [ ] [Task 2] - [Expected improvement]
+
+### Week 2-3: Core Optimizations
+- [ ] [Task 3] - [Expected improvement]
+- [ ] [Task 4] - [Expected improvement]
+
+### Week 4+: Architectural Changes
+- [ ] [Task 5] - [Expected improvement]
+
+---
+
+## Appendix
+
+### A. Test Methodology
+[Tools used, test conditions, sample sizes]
+
+### B. Raw Data
+[Links to Lighthouse reports, profiles, metrics]
+
+### C. Monitoring Setup
+[Dashboards, alerts configured]
+
+---
+
+**Report Generated:** [timestamp]
+**Analyst:** Ahmed Adel Bakr Alderai
+```
 
 ---
 
 ## Example Usage
 
 ```bash
-# Comprehensive performance audit
-/agents/performance/performance-optimizer audit https://myapp.com with focus on Core Web Vitals
+# Full performance audit
+/agents/performance/performance-optimizer comprehensive audit for e-commerce site including Core Web Vitals, backend, and database
 
-# Optimize LCP for specific page
-/agents/performance/performance-optimizer optimize LCP for product detail page
+# Core Web Vitals optimization
+/agents/performance/performance-optimizer optimize LCP for product listing page, current score is 4.2s
 
-# Implement caching strategy
-/agents/performance/performance-optimizer design multi-layer caching for e-commerce API
+# Backend response time
+/agents/performance/performance-optimizer reduce API response time for /api/search endpoint from 800ms to under 200ms
 
-# Set up performance monitoring
-/agents/performance/performance-optimizer implement RUM with Prometheus dashboards
+# Database optimization
+/agents/performance/performance-optimizer analyze and optimize slow PostgreSQL queries for orders table
 
-# Fix database performance
-/agents/performance/performance-optimizer analyze and optimize PostgreSQL queries
+# Caching strategy
+/agents/performance/performance-optimizer design multi-layer caching strategy for high-traffic API
 
-# Bundle size optimization
-/agents/performance/performance-optimizer reduce JavaScript bundle from 800KB to 300KB
+# CDN setup
+/agents/performance/performance-optimizer configure CloudFront CDN for static assets and API caching
 
-# Configure CDN caching
-/agents/performance/performance-optimizer configure Cloudflare caching for Next.js app
+# Image optimization
+/agents/performance/performance-optimizer implement responsive image pipeline with AVIF/WebP for product images
+
+# Code splitting
+/agents/performance/performance-optimizer implement route-based code splitting for React SPA, reduce initial bundle from 500KB
+
+# Monitoring setup
+/agents/performance/performance-optimizer set up RUM with Web Vitals and Prometheus metrics for Node.js API
+
+# Performance budgets
+/agents/performance/performance-optimizer enforce performance budgets in CI/CD for bundle size and Lighthouse scores
 ```
 
 ---
 
 ## Related Agents
 
-| Agent | Use Case |
-|-------|----------|
-| `/agents/performance/profiling-expert` | Deep CPU/memory profiling |
-| `/agents/performance/caching-expert` | Advanced caching strategies |
-| `/agents/performance/bundle-optimizer` | Frontend bundle analysis |
-| `/agents/performance/load-testing-expert` | Load and stress testing |
-| `/agents/frontend/frontend-developer` | Frontend implementation |
-| `/agents/database/database-architect` | Database design and optimization |
-| `/agents/devops/monitoring-expert` | Observability setup |
-
----
-
-Ahmed Adel Bakr Alderai
+- `/agents/performance/profiling-expert` - Deep CPU/memory profiling
+- `/agents/performance/caching-expert` - Advanced caching strategies
+- `/agents/performance/load-testing-expert` - Load testing and capacity planning
+- `/agents/frontend/frontend-developer` - Frontend implementation
+- `/agents/database/database-architect` - Database design and optimization
+- `/agents/devops/devops-engineer` - Infrastructure optimization
+- `/agents/quality/performance-analyst` - Performance testing and analysis
